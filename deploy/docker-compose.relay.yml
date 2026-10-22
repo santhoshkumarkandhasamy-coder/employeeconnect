@@ -1,0 +1,11 @@
+# Option D (VPS relay over WireGuard): ADD this file only on a server behind CGNAT / without inbound ports.
+#   docker compose -f docker-compose.yml -f docker-compose.relay.yml up -d
+# Publishes the PROXY-protocol listener (nginx :8444) on the WireGuard address ONLY, never on all interfaces.
+# Needs in .env: WG_BIND_IP (this server's wg0 address, e.g. 10.8.0.2) and RELAY_PEER_IP (the VPS wg0 address, e.g. 10.8.0.1).
+# Do not forward ports 80/443 on the office router in this mode; use DNS-01 for the certificate.
+services:
+  nginx:
+    ports:
+      - "${WG_BIND_IP:?set WG_BIND_IP}:8444:8444"
+    environment:
+      RELAY_PEER_IP: ${RELAY_PEER_IP:?set RELAY_PEER_IP}

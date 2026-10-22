@@ -1,0 +1,5 @@
+*
+!database/scripts/backup.sh
+!database/scripts/backup-uploads.sh
+!database/scripts/restore.sh
+!deploy/backup/entrypoint.sh

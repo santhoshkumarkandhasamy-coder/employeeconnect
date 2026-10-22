@@ -1,0 +1,18 @@
+# DEV-ONLY override for local testing on a workstation (Docker Desktop). NOT for production.
+#   docker compose -p ecdev -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+# Differences from the production layout:
+#   - api is published on ${DEV_BIND}:${DEV_API_PORT} (default 127.0.0.1:8000) so the app can use plain http://
+#   - nginx and backup are NOT started (profile "prod-only"): no TLS cert / backup key needed
+#   - postgres and redis stay unpublished on the internal network; every hardening setting of the base file still applies
+#   - APP_ENV comes from .env (dev = /docs enabled, CORS_ORIGINS allowed; use dev only here)
+# DEV_BIND=0.0.0.0 exposes the API to your LAN (phone testing): opt-in, dev secrets only, and add a Windows firewall rule.
+name: ecdev
+
+services:
+  api:
+    ports:
+      - "${DEV_BIND:-127.0.0.1}:${DEV_API_PORT:-8000}:8000"
+  nginx:
+    profiles: ["prod-only"]
+  backup:
+    profiles: ["prod-only"]

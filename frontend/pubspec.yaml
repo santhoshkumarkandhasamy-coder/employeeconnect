@@ -1,0 +1,34 @@
+name: employee_connect
+description: Employee Connect mobile app.
+publish_to: "none"
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.5.0
+  flutter: ">=3.24.0"
+
+# Deliberately minimal. firebase_messaging etc. are added
+# only when their feature is built. No intl / calendar / UI-kit packages.
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_riverpod: ^2.5.1
+  go_router: ^14.2.0
+  dio: ^5.7.0
+  flutter_secure_storage: ^9.2.2
+  local_auth: ^2.3.0
+  geolocator: ^13.0.2 # attendance geofence (foreground location only)
+  image_picker: ^1.1.2 # optional selfie at check-in
+  crypto: ^3.0.5 # SHA-256 for certificate pinning (tiny, dart.dev)
+  file_picker: ^8.1.2 # admin announcement PDF upload only (image_picker cannot pick documents)
+  path_provider: ^2.1.4 # app-private cache dir for exports (getTemporaryDirectory)
+  share_plus: ^10.0.0 # share sheet for downloaded Excel exports (Share.shareXFiles)
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+  # No custom fonts, no image assets: system fonts + Material icons only.

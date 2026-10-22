@@ -1,0 +1,47 @@
+# secrets and local config
+.env
+*.env
+!.env.example
+deploy/.env
+deploy/secrets/
+deploy/certs/
+*.pem
+*.key
+*.p12
+*.jks
+*.gpg
+*.asc
+key.properties
+local.properties
+google-services.json
+GoogleService-Info.plist
+
+# runtime data
+uploads/
+backups/
+*.sqlite
+*.sqlite3
+*.db
+*.log
+
+# python
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# flutter / android
+frontend/build/
+frontend/.dart_tool/
+frontend/.flutter-plugins*
+frontend/android/.gradle/
+frontend/android/app/debug/
+frontend/android/app/release/
+*.apk
+*.aab
+
+# local tooling
+.claude/settings.local.json
+.idea/
+.vscode/

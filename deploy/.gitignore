@@ -1,0 +1,11 @@
+.env
+certs/*
+!certs/.gitkeep
+secrets/*/*
+!secrets/*/.gitkeep
+# console build output (copied here by the Flutter web build) and ACME tokens
+console/*
+!console/.gitkeep
+!console/README.md
+acme/*
+!acme/.gitkeep

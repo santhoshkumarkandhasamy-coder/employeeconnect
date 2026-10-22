@@ -1,0 +1,16 @@
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+*.iml
+.idea/
+pubspec.lock.bak
+# split-debug-info output (keep privately for crash symbolication)
+symbols/
+android/key.properties
+*.jks
+
+# Maps API key (injected at build time, never committed)
+ios/Flutter/Maps.xcconfig
+android/local.properties

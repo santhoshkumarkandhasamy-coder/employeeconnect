@@ -1,0 +1,22 @@
+[project]
+name = "employeeconnect-backend"
+version = "1.0.0"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 130
+extend-exclude = ["app/models", "app/core/crypto.py", ".venv"]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["B008", "UP037", "E501"]  # B008: FastAPI Depends() in defaults; UP037: quoted annotations are harmless
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]

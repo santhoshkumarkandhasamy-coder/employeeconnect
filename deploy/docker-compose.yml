@@ -1,0 +1,367 @@
+# Employee Connect - on-premise stack.  Run from this directory:  docker compose up -d --build
+# Only nginx publishes ports (80, 443).  postgres, redis, api (8000) and worker live on an internal network.
+name: employeeconnect
+
+x-hardening: &hardening
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: ["ALL"]
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "5" }
+
+# deploy/api.Dockerfile = backend/Dockerfile + optional firebase-admin (FIREBASE_ADMIN_VERSION, empty = not installed).
+x-api-build: &api-build
+  context: ..
+  dockerfile: deploy/api.Dockerfile
+  args:
+    FIREBASE_ADMIN_VERSION: ${FIREBASE_ADMIN_VERSION:-}
+
+# Variables the backend reads (see backend/app/core/config.py). Unset optional ones fall back to backend defaults.
+x-app-env: &app-env
+  APP_ENV: ${APP_ENV:-prod}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  CORS_ORIGINS: ${CORS_ORIGINS:-}
+  TRUSTED_PROXIES: ${NGINX_IP:?set NGINX_IP}/32   # exactly the nginx container: only it may set X-Real-IP
+  DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+  REDIS_URL: ${REDIS_URL:?set REDIS_URL}
+  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
+  JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+  ACCESS_TOKEN_MINUTES: ${ACCESS_TOKEN_MINUTES:-15}
+  REFRESH_TOKEN_DAYS: ${REFRESH_TOKEN_DAYS:-30}
+  SESSION_MAX_DAYS: ${SESSION_MAX_DAYS:-90}
+  REFRESH_GRACE_SECONDS: ${REFRESH_GRACE_SECONDS:-15}
+  JWT_LEEWAY_SECONDS: ${JWT_LEEWAY_SECONDS:-10}
+  DATA_ENCRYPTION_KEYS: ${DATA_ENCRYPTION_KEYS:?set DATA_ENCRYPTION_KEYS}
+  AUDIT_HMAC_KEY: ${AUDIT_HMAC_KEY:-}
+  ARGON2_TIME_COST: ${ARGON2_TIME_COST:-3}
+  ARGON2_MEMORY_KIB: ${ARGON2_MEMORY_KIB:-65536}
+  ARGON2_PARALLELISM: ${ARGON2_PARALLELISM:-2}
+  ARGON2_MAX_THREADS: ${ARGON2_MAX_THREADS:-4}
+  LOGIN_RATE_IP: ${LOGIN_RATE_IP:-300}      # per-IP backstop (office NAT); per-employee LOGIN_RATE_EID is the primary limit
+  LOGIN_RATE_EID: ${LOGIN_RATE_EID:-10}
+  LOGIN_RATE_WINDOW_SECONDS: ${LOGIN_RATE_WINDOW_SECONDS:-600}
+  LOCKOUT_THRESHOLD: ${LOCKOUT_THRESHOLD:-5}
+  LOCKOUT_MINUTES: ${LOCKOUT_MINUTES:-15}
+  FORGOT_MIN_LATENCY_MS: ${FORGOT_MIN_LATENCY_MS:-300}
+  FORGOT_RATE_EID: ${FORGOT_RATE_EID:-3}
+  FORGOT_RATE_IP: ${FORGOT_RATE_IP:-10}
+  TEMP_PASSWORD_HOURS: ${TEMP_PASSWORD_HOURS:-72}
+  SENSITIVE_VIEW_ALERT_PER_HOUR: ${SENSITIVE_VIEW_ALERT_PER_HOUR:-100}
+  FILE_STORAGE_DIR: /data/files              # = the `uploads` volume mount path in api/worker (backup mounts it ro at /data)
+  MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-10}
+  UPLOAD_RATE_PER_MIN: ${UPLOAD_RATE_PER_MIN:-20}
+  MAX_IMAGE_PIXELS: ${MAX_IMAGE_PIXELS:-16000000}
+  IMAGE_CONCURRENCY: ${IMAGE_CONCURRENCY:-2}
+  PUNCH_FAIL_LIMIT: ${PUNCH_FAIL_LIMIT:-5}
+  PUNCH_FAIL_WINDOW_SECONDS: ${PUNCH_FAIL_WINDOW_SECONDS:-600}
+  LEAVE_WRITE_RATE_PER_MIN: ${LEAVE_WRITE_RATE_PER_MIN:-10}
+  LEAVE_WRITE_RATE_PER_DAY: ${LEAVE_WRITE_RATE_PER_DAY:-50}
+  LEAVE_DECIDE_RATE_PER_MIN: ${LEAVE_DECIDE_RATE_PER_MIN:-60}
+  EXPORT_TEMP_DIR: ${EXPORT_TEMP_DIR:-/exports}  # required in prod; the api mounts a private tmpfs there (service `api`)
+  EXPORT_MAX_CONCURRENCY: ${EXPORT_MAX_CONCURRENCY:-2}
+  EXPORT_TIMEOUT_S: ${EXPORT_TIMEOUT_S:-60}
+  EXPORT_MAX_ROWS: ${EXPORT_MAX_ROWS:-200000}
+  EXPORT_MAX_PENDING_DOWNLOADS: ${EXPORT_MAX_PENDING_DOWNLOADS:-8}
+  EXPORT_DAILY_MAX_EXPORTS: ${EXPORT_DAILY_MAX_EXPORTS:-30}
+  EXPORT_DAILY_MAX_ROWS: ${EXPORT_DAILY_MAX_ROWS:-2000000}
+  EXPORT_WARN_ROWS: ${EXPORT_WARN_ROWS:-50000}
+  EXPORT_DAILY_WARN_EXPORTS: ${EXPORT_DAILY_WARN_EXPORTS:-10}
+  EXPORT_DAILY_WARN_ROWS: ${EXPORT_DAILY_WARN_ROWS:-500000}
+  EXPORT_TEAM_WINDOW_MONTHS: ${EXPORT_TEAM_WINDOW_MONTHS:-12}
+  ANNOUNCE_WRITE_RATE_PER_MIN: ${ANNOUNCE_WRITE_RATE_PER_MIN:-10}
+  ANNOUNCE_READ_RATE_PER_MIN: ${ANNOUNCE_READ_RATE_PER_MIN:-120}
+  ANNOUNCE_PUSH_BATCH: ${ANNOUNCE_PUSH_BATCH:-500}
+  ANNOUNCE_PUSH_MAX_USERS: ${ANNOUNCE_PUSH_MAX_USERS:-5000}
+  ANNOUNCEMENT_DELETED_RETENTION_DAYS: ${ANNOUNCEMENT_DELETED_RETENTION_DAYS:-30}
+  ANNOUNCEMENT_RENOTIFY_COOLDOWN_MIN: ${ANNOUNCEMENT_RENOTIFY_COOLDOWN_MIN:-60}
+  ANNOUNCEMENT_PUSH_BUDGET_PER_DAY: ${ANNOUNCEMENT_PUSH_BUDGET_PER_DAY:-20}
+  PROFILE_WRITE_RATE_PER_MIN: ${PROFILE_WRITE_RATE_PER_MIN:-10}
+  CELEBRATIONS_WINDOW_DAYS: ${CELEBRATIONS_WINDOW_DAYS:-7}
+  PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN}   # console CSRF: Origin of /api/auth/web/* must equal this
+  FCM_CREDENTIALS_FILE: ${FCM_CREDENTIALS_FILE:-}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USER: ${SMTP_USER:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_FROM: ${SMTP_FROM:-}
+  APP_VERSION: ${APP_VERSION:-latest}   # reported by the health endpoint
+  STATUS_DIR: ${STATUS_DIR:-/status}    # backup.json written by the `backup` service (api/worker mount it read-only)
+  TLS_CERT_FILE: ${TLS_CERT_FILE:-/certs/fullchain.pem}   # public cert only, for the expiry check
+
+services:
+  postgres:
+    <<: *hardening
+    image: postgres:16-alpine
+    user: postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-app_owner}        # owner role: migrations, seed, backups
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-employeeconnect}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    tmpfs: ["/tmp", "/run/postgresql"]
+    read_only: true
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: 1g, pids: 300 }
+
+  redis:
+    <<: *hardening
+    image: redis:7-alpine
+    user: redis
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --appendonly yes --maxmemory 256mb --maxmemory-policy noeviction"]
+    volumes:
+      - redisdata:/data
+    tmpfs: ["/tmp"]
+    read_only: true
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 384m, pids: 100 }
+
+  # One-shot: alembic upgrade head as the owner role.
+  migrate:
+    image: employeeconnect-migrate:${APP_VERSION:-latest}
+    build:
+      context: ..
+      dockerfile: deploy/migrate.Dockerfile
+    restart: "no"
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    environment:
+      DATABASE_URL: ${OWNER_DATABASE_URL:?set OWNER_DATABASE_URL}
+      DATA_ENCRYPTION_KEYS: ${DATA_ENCRYPTION_KEYS:?set DATA_ENCRYPTION_KEYS}   # migrations 0009/0013 encrypt existing data
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [backend]
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512m }
+
+  # One-shot: ALTER ROLE app_user LOGIN PASSWORD (role is created NOLOGIN by migration 0001).
+  dbrole:
+    image: postgres:16-alpine
+    user: postgres
+    restart: "no"
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    entrypoint: ["/bin/sh", "/scripts/db-role.sh"]
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-app_owner}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:-employeeconnect}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD}
+    volumes:
+      - ./scripts/db-role.sh:/scripts/db-role.sh:ro
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    networks: [backend]
+
+  # Setup-only (profile "setup"): idempotent seed (roles, permissions, leave types, settings; optionally first Admin).
+  #   Preferred (no password in env/history): seed WITHOUT an admin, then create the first admin with the CLI:
+  #     docker compose run --rm -e SEED_SKIP_ADMIN=1 seed        (or: ... seed python database/seed.py --no-admin)
+  #     docker compose exec -it api python -m scripts.create_admin create ADMIN001 "Full Name"
+  #   Legacy: docker compose run --rm -e ADMIN_EMPLOYEE_ID=ADMIN001 -e ADMIN_PASSWORD='...' seed
+  seed:
+    profiles: ["setup"]
+    image: employeeconnect-migrate:${APP_VERSION:-latest}
+    restart: "no"
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    working_dir: /app
+    command: ["python", "database/seed.py"]
+    environment:
+      DATABASE_URL: ${OWNER_DATABASE_URL:?set OWNER_DATABASE_URL}
+      SEED_SKIP_ADMIN: ${SEED_SKIP_ADMIN:-}
+      ADMIN_FULL_NAME: ${ADMIN_FULL_NAME:-System Administrator}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      OFFICE_LAT: ${OFFICE_LAT:-}
+      OFFICE_LNG: ${OFFICE_LNG:-}
+      OFFICE_RADIUS_M: ${OFFICE_RADIUS_M:-}
+      OFFICE_TIMEZONE: ${OFFICE_TIMEZONE:-}
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    networks: [backend]
+
+  api:
+    <<: *hardening
+    image: employeeconnect-api:${APP_VERSION:-latest}
+    build: *api-build
+    environment: *app-env
+    expose: ["8000"]                    # NEVER `ports:` - nginx must be the only way in (X-Real-IP trust)
+    read_only: true
+    tmpfs:
+      - /tmp
+      - ${EXPORT_TEMP_DIR:-/exports}:size=${EXPORT_TMPFS_SIZE:-256m},uid=10001,gid=10001,mode=0700   # export build dir: private, size-limited
+    volumes:
+      - uploads:/data/files
+      - ./secrets/api:/run/app-secrets:ro
+      - status:/status:ro               # backup.json from the backup service
+      - ./certs/fullchain.pem:/certs/fullchain.pem:ro   # public chain only (never privkey.pem); restart api after a renewal
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      dbrole: { condition: service_completed_successfully }
+    networks:
+      backend:
+      egress:                           # outbound only (FCM push, SMTP)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: 1g, pids: 200 }   # Argon2 = ARGON2_MEMORY_KIB x ARGON2_MAX_THREADS (~256 MiB default)
+
+  # Background jobs (same image).  Needs `python -m app.jobs.scheduler` in the backend (not present yet).
+  worker:
+    <<: *hardening
+    image: employeeconnect-api:${APP_VERSION:-latest}
+    build: *api-build
+    command: ["python", "-m", "app.jobs.scheduler"]
+    environment: *app-env
+    read_only: true
+    tmpfs: ["/tmp"]
+    volumes:
+      - uploads:/data/files
+      - ./secrets/api:/run/app-secrets:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      dbrole: { condition: service_completed_successfully }
+    networks:
+      backend:
+      egress:
+    healthcheck:
+      disable: true                     # image HEALTHCHECK probes :8000, which the worker does not serve
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512m, pids: 100 }
+
+  nginx:
+    <<: *hardening
+    image: nginxinc/nginx-unprivileged:1.27-alpine   # runs as uid 101; listens on 8080/8443 inside
+    ports:
+      - "80:8080"
+      - "443:8443"
+    # nginx.conf is a template: scripts/nginx-start.sh renders it into /tmp/nginx.conf from the variables below.
+    entrypoint: ["/bin/sh", "/scripts/nginx-start.sh"]
+    environment:
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:?set PUBLIC_HOSTNAME}      # the only Host/SNI served; others are rejected
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN}            # https://<PUBLIC_HOSTNAME>, accepted Origin for /api/auth/web/*
+      CONSOLE_ALLOW_CIDRS: ${CONSOLE_ALLOW_CIDRS:-}                 # empty = no restriction on /console/ and /api/auth/web/
+      RELAY_PEER_IP: ${RELAY_PEER_IP:-}                             # option D only (VPS relay WireGuard IP)
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf.tpl:ro
+      - ./scripts/nginx-start.sh:/scripts/nginx-start.sh:ro
+      - ./nginx-snippets:/etc/nginx/snippets:ro
+      - ./certs:/etc/nginx/certs:ro               # fullchain.pem + privkey.pem
+      - ./console:/srv/www/console:ro             # admin console static build (flutter build web output), see console/README.md
+      - ./acme:/srv/www/acme:ro                   # Let's Encrypt HTTP-01 webroot (certbot writes here from the host)
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+      - /var/body_temp:size=128m,uid=101,gid=101,mode=0700   # client_body_temp_path: caps spooled upload bodies
+    read_only: true
+    depends_on:
+      api: { condition: service_healthy }
+    networks:
+      backend:
+        ipv4_address: ${NGINX_IP:?set NGINX_IP}
+      edge:
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/nginx-health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 384m, pids: 100 }   # tmpfs (32m + 128m) counts against this
+
+  # Nightly encrypted pg_dump (backup.sh, BACKUP_TIME_UTC) and uploads archive (backup-uploads.sh, BACKUP_UPLOADS_TIME_UTC), with retention. Restore: see docs/DEPLOY.md.
+  backup:
+    <<: *hardening
+    image: employeeconnect-backup:${APP_VERSION:-latest}
+    build:
+      context: ..
+      dockerfile: deploy/backup/Dockerfile
+    init: true
+    # The app stores uploads as uid 10001 with mode 0700 dirs / 0600 files (backend/app/services/files.py), so the uid-999
+    # backup user cannot read them (tar: Permission denied). Run as root with ONLY the two caps needed to read them and to write
+    # into the postgres-owned /backups volume; uploads stay mounted read-only and cap_drop ALL / no-new-privileges still apply.
+    user: "0:0"
+    cap_add: ["DAC_READ_SEARCH", "DAC_OVERRIDE"]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_USER:-app_owner}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:-employeeconnect}
+      BACKUP_DIR: /backups
+      STATUS_DIR: /status               # backup.sh / backup-uploads.sh write backup.json here after each success
+      UPLOADS_DIR: /data
+      BACKUP_UPLOADS_TIME_UTC: ${BACKUP_UPLOADS_TIME_UTC:-02:30}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      BACKUP_TIME_UTC: ${BACKUP_TIME_UTC:-02:00}
+      BACKUP_GPG_RECIPIENT: ${BACKUP_GPG_RECIPIENT:-}
+      BACKUP_GPG_PUBLIC_KEY_FILE: ${BACKUP_GPG_PUBLIC_KEY_FILE:-}
+      BACKUP_PASSPHRASE_FILE: ${BACKUP_PASSPHRASE_FILE:-}
+    volumes:
+      - backups:/backups
+      - status:/status
+      - uploads:/data:ro                # read-only: backup can never alter user files (files are 0600 uid 10001; the backup container reads them via cap DAC_READ_SEARCH)
+      - ./secrets/backup:/run/backup-secrets:ro
+    tmpfs: ["/tmp"]
+    read_only: true
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [backend]
+    healthcheck:                        # newest DB dump AND uploads archive must both be < 26 h old
+      test: ["CMD-SHELL", "find /backups -maxdepth 1 -name 'employeeconnect_*.dump.gpg' -mmin -1560 | grep -q . && find /backups -maxdepth 1 -name 'employeeconnect_uploads_*.tgz.gpg' -mmin -1560 | grep -q ."]
+      interval: 30m
+      timeout: 10s
+      retries: 1
+      start_period: 15m
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512m, pids: 50 }
+
+networks:
+  backend:                              # internal: no route to or from the outside
+    internal: true
+    ipam:
+      config: [{ subnet: "${NET_SUBNET:?set NET_SUBNET}" }]
+  edge:                                 # nginx <-> host ports only
+  egress:                               # api/worker outbound (FCM, SMTP); nothing is published on it
+
+volumes:
+  pgdata:
+  redisdata:
+  uploads:
+  backups:
+  status:

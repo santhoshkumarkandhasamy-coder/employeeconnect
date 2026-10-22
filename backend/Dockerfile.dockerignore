@@ -1,0 +1,12 @@
+# Read by BuildKit for backend/Dockerfile (context = repo root); backend/.dockerignore is NOT used for a root context.
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+backend/tests
+**/.env
+**/.env.*
+!**/.env.example
+frontend
+docs
+.git

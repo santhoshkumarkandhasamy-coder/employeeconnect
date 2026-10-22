@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- DEBUG BUILDS ONLY (resource overlay of the main file of the same name).
+     Allows cleartext http so the app can reach a LAN / emulator (10.0.2.2) backend.
+     Release and profile keep the strict config in src/main. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
