@@ -3,13 +3,18 @@ import 'package:flutter/material.dart';
 
 /// Material 3, system fonts, no assets.
 abstract final class AppTheme {
-  static const Color _seed = Color(0xFF1B5E9E);
+  /// Brand colours taken from the company logo (navy and orange).
+  static const Color _seed = Color(0xFF044C84);
+  static const Color _accent = Color(0xFFF47424);
 
   static ThemeData get light => _build(Brightness.light);
   static ThemeData get dark => _build(Brightness.dark);
 
   static ThemeData _build(Brightness b) {
-    final scheme = ColorScheme.fromSeed(seedColor: _seed, brightness: b);
+    final scheme = ColorScheme.fromSeed(seedColor: _seed, brightness: b).copyWith(
+      tertiary: _accent,
+      onTertiary: Colors.white,
+    );
     return ThemeData(
       useMaterial3: true,
       colorScheme: scheme,
