@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/security/screen_protect.dart';
 import '../../../core/widgets/state_views.dart';
 import '../../auth/presentation/auth_controller.dart';
+import '../../payroll/presentation/payroll_home_screen.dart';
 import '../domain/admin_models.dart';
 import 'admin_providers.dart';
 import 'admin_widgets.dart';
@@ -30,6 +31,7 @@ IconData _icon(AdminSection s) => switch (s) {
       AdminSection.sessions => Icons.devices_outlined,
       AdminSection.license => Icons.verified_outlined,
       AdminSection.company => Icons.business_outlined,
+      AdminSection.payroll => Icons.payments_outlined,
     };
 
 Widget _screenFor(AdminSection s) => switch (s) {
@@ -45,6 +47,7 @@ Widget _screenFor(AdminSection s) => switch (s) {
       AdminSection.sessions => const SessionsScreen(),
       AdminSection.license => const LicenseScreen(),
       AdminSection.company => const CompanyScreen(),
+      AdminSection.payroll => const PayrollHomeScreen(),
     };
 
 /// Admin home: one tile per section the user is permitted to open. The

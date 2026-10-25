@@ -106,8 +106,12 @@ def ensure_in_scope(actor: Principal, u: User) -> None:
         raise AppError("NOT_FOUND", "Employee not found")
 
 
+# Permissions every role holds for its own data: they do NOT make a role 'elevated' (plain self-service stays plain).
+SELF_SERVICE_PERMISSIONS = admin_security.SELF_SERVICE_PERMISSIONS
+
+
 def _role_permissions(role: Role) -> frozenset[str]:
-    return frozenset(p.code for p in role.permissions)
+    return frozenset(p.code for p in role.permissions) - SELF_SERVICE_PERMISSIONS
 
 
 def _check_may_manage_role(actor: Principal, role: Role, *, what: str) -> None:

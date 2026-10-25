@@ -28,7 +28,7 @@ async def _visible_role_ids(session: AsyncSession, actor: Principal) -> list[uui
     """Roles whose accounts the actor may manage (containment + elevated rule), the same rules as deactivate/unlock."""
     ids = []
     for role in (await session.execute(select(Role))).unique().scalars():
-        perms = frozenset(p.code for p in role.permissions)
+        perms = frozenset(p.code for p in role.permissions) - emp.SELF_SERVICE_PERMISSIONS
         if perms <= actor.permissions and (not perms or actor.has("role.assign")):
             ids.append(role.id)
     return ids

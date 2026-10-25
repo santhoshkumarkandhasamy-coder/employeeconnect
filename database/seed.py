@@ -70,6 +70,10 @@ PERMISSIONS: dict[str, tuple[str, set[str]]] = {
     "session.manage": ("View and revoke login sessions and devices", {ADMIN, HR}),
     "system.view": ("View system health", {ADMIN}),
     "license.manage": ("View and install the license", {ADMIN}),
+    "payroll.view_own": ("View and download own payslips", {ADMIN, HR, MANAGER, EMPLOYEE}),
+    "payroll.view_all": ("View payroll (read-only): runs, structures, payslips", {ADMIN, HR}),
+    "payroll.manage": ("Manage payroll: settings, structures, details, runs, drafts", {ADMIN, HR}),
+    "payroll.publish": ("Publish payroll runs and payslips", {ADMIN, HR}),
 }
 
 ROLES = [
@@ -116,6 +120,33 @@ DEFAULT_SETTINGS = {
     "auth.offline_cache_max_hours": 72,
     "console.session_max_hours": 12,
     "console.inactivity_timeout_minutes": 15,
+    # payroll (plan 12). PT: Tamil Nadu half-yearly (Sep + Mar payroll, slab on half-yearly gross).
+    # VERIFY THE PT SLABS AGAINST CURRENT TAMIL NADU RULES before the first real run; they are editable settings.
+    "payroll.pay_days_basis": "calendar",
+    "payroll.lop_absent_days": True,
+    "payroll.lop_half_day_attendance": True,
+    "payroll.pf_employee_rate_pct": 12,
+    "payroll.pf_employer_rate_pct": 12,
+    "payroll.pf_wage_ceiling": 15000,
+    "payroll.esi_wage_threshold": 20000,
+    "payroll.esi_employee_rate_pct": 0.75,
+    "payroll.esi_employer_rate_pct": 3.25,
+    "payroll.pt_frequency": "half_yearly",
+    "payroll.pt_slabs": [
+        {"min_gross": "0.00", "max_gross": "21000.00", "amount": "0.00", "months": [3, 9]},
+        {"min_gross": "21001.00", "max_gross": "30000.00", "amount": "135.00", "months": [3, 9]},
+        {"min_gross": "30001.00", "max_gross": "45000.00", "amount": "315.00", "months": [3, 9]},
+        {"min_gross": "45001.00", "max_gross": "60000.00", "amount": "690.00", "months": [3, 9]},
+        {"min_gross": "60001.00", "max_gross": "75000.00", "amount": "1025.00", "months": [3, 9]},
+        {"min_gross": "75001.00", "max_gross": None, "amount": "1250.00", "months": [3, 9]},
+    ],
+    "payroll.rounding": "rupee",
+    "payroll.show_employer_contributions": False,
+    "payroll.employer_share_from_employee": True,
+    "payroll.mask_pan": True,
+    "payroll.publish_requires_second_person": False,
+    "payroll.company_address": "",
+    "payroll.payslip_footer": "This is a computer-generated payslip and does not require a signature.",
 }
 
 

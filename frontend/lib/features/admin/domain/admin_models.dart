@@ -34,6 +34,7 @@ abstract final class AdminPerm {
   static const licenseManage = 'license.manage';
   static const consoleAccess = 'console.access';
   static const attendanceViewAll = 'attendance.view_all';
+  static const payrollViewAll = 'payroll.view_all';
 }
 
 /// One entry of the Admin home. Shown only when the user holds [permission];
@@ -50,7 +51,8 @@ enum AdminSection {
   audit('Audit log', AdminPerm.auditView),
   sessions('Sessions and devices', AdminPerm.sessionManage),
   license('License', AdminPerm.licenseManage),
-  company('Company', AdminPerm.companyManage);
+  company('Company', AdminPerm.companyManage),
+  payroll('Payroll', AdminPerm.payrollViewAll);
 
   const AdminSection(this.label, this.permission);
   final String label;

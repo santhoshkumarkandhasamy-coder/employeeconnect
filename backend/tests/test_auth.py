@@ -16,7 +16,7 @@ async def test_login_success_shape_and_audit(client, db):
     b = r.json()
     assert b["token_type"] == "Bearer" and b["expires_in"] == 900 and b["must_change_password"] is False
     assert b["user"]["employee_id"] == "EMP001" and b["user"]["role"] == "employee"
-    assert b["user"]["permissions"] == []  # employees hold no catalogue permissions
+    assert b["user"]["permissions"] == ["payroll.view_own"]  # employees only hold own-payslip access
     assert "password_hash" not in r.text
     assert "auth.login_success" in await actions(db)
     row = (await db.execute(select(AuditLog).where(AuditLog.action == "auth.login_success"))).scalar_one()

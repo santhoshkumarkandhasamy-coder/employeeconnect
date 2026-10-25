@@ -75,6 +75,10 @@ TABLES = [
     "announcement_departments",
     "announcement_reads",
     "food_enrollments",
+    "salary_structures",
+    "employee_payroll_details",
+    "payroll_runs",
+    "payslips",
 ]
 
 
@@ -109,12 +113,21 @@ def _adapt_metadata_for_sqlite() -> None:
             if isinstance(c, ExcludeConstraint):
                 table.constraints.discard(c)
             elif isinstance(c, CheckConstraint) and (
-                "::" in str(c.sqltext) or "<@" in str(c.sqltext) or "btrim" in str(c.sqltext) or "char_length" in str(c.sqltext)
+                "::" in str(c.sqltext)
+                or "<@" in str(c.sqltext)
+                or "btrim" in str(c.sqltext)
+                or "char_length" in str(c.sqltext)
+                or "extract(" in str(c.sqltext)
+                or "DATE '" in str(c.sqltext)
+                or "trunc(" in str(c.sqltext)
             ):
                 table.constraints.discard(c)
         for ix in list(table.indexes):
             if ix.dialect_options["postgresql"]["where"] is not None:
                 table.indexes.discard(ix)
+    Base.metadata.tables["payslips"].c.warnings.type = JSON()  # text[] in Postgres
+    Base.metadata.tables["payslips"].c.warnings.server_default = None
+    Base.metadata.tables["payslips"].c.warnings.default = ColumnDefault(list)
     wd = Base.metadata.tables["shifts"].c.working_days
     wd.type = JSON()
     wd.server_default = None
@@ -267,3 +280,6 @@ async def tokens_for(client):
         return await login_tokens(client, USERS[role])
 
     return _get
+
+
+from tests.payroll_fixtures import H, payroll, uid  # noqa: E402,F401 - payroll fixtures shared by several test modules

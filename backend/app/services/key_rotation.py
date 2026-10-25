@@ -13,7 +13,7 @@ import logging
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
-from sqlalchemy import LargeBinary, select, type_coerce, update
+from sqlalchemy import LargeBinary, select, text, type_coerce, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.crypto import EncryptedJSON, EncryptedString, fernet_keys
@@ -32,6 +32,15 @@ def encrypted_columns() -> list[tuple[Any, Any]]:
             if isinstance(col.type, (EncryptedString, EncryptedJSON)):
                 out.append((table, col))
     return out
+
+
+async def _allow_rotation(session: AsyncSession) -> None:
+    """PostgreSQL only: lets the payroll lock triggers (migration 0018) accept an UPDATE that changes nothing but `*_enc`
+    columns. `SET LOCAL` lasts for the current transaction only, so it is issued again after every commit. Other columns are
+    still refused by the triggers."""
+    bind = session.get_bind()
+    if bind.dialect.name == "postgresql":
+        await session.execute(text("SET LOCAL app.key_rotation = 'on'"))
 
 
 def _is_primary(primary: Fernet, token: bytes) -> bool:
@@ -57,6 +66,8 @@ async def rotate_all(session: AsyncSession, *, dry_run: bool = False, batch: int
             if not rows:
                 break
             offset += len(rows)
+            if not dry_run:
+                await _allow_rotation(session)
             for row in rows:
                 *pk_vals, token = row
                 try:

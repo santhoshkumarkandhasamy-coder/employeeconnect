@@ -34,6 +34,7 @@ from .routers import (
     food,
     home,
     leave,
+    payroll,
     profile,
 )
 
@@ -107,4 +108,6 @@ def create_app() -> FastAPI:
     app.include_router(admin_export.router, prefix="/api")
     app.include_router(admin_masters.router, prefix="/api")
     app.include_router(admin_roles.router, prefix="/api")
+    app.include_router(payroll.employee_router, prefix="/api")
+    app.include_router(payroll.admin_router, prefix="/api")
     return app

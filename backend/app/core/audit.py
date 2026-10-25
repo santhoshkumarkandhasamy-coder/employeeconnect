@@ -16,14 +16,27 @@ from .context import get_request_context
 _SENSITIVE = (
     "password", "token", "hash", "secret", "otp",
     "phone", "personal_email", "address", "dob", "birth", "anniversary", "emergency", "blood", "location",
+    # payroll (plan 12 s.7): money, bank and tax values never reach the audit log
+    "salary", "amount", "bank", "earning", "deduction", "gross", "net_pay", "tds",
 )  # fmt: skip
+# `pan` as a substring would also hide `company`, so the short identifiers are matched EXACTLY.
+_SENSITIVE_EXACT = frozenset({"pan", "uan", "ifsc"})
+# Flags that merely contain a sensitive word but carry no value (plan 12 s.7: `after.include_bank`).
+_SAFE_EXACT = frozenset({"include_bank"})
 _EID = re.compile(r"^[A-Z0-9._-]{1,32}$")
+
+
+def _masked(key: Any) -> bool:
+    k = str(key).lower()
+    if k in _SAFE_EXACT:
+        return False
+    return k in _SENSITIVE_EXACT or any(s in k for s in _SENSITIVE)
 
 
 def redact(data: Any) -> Any:
     """Recursively mask sensitive keys (nested dicts / lists included)."""
     if isinstance(data, dict):
-        return {k: ("***" if any(s in str(k).lower() for s in _SENSITIVE) else redact(v)) for k, v in data.items()}
+        return {k: ("***" if _masked(k) else redact(v)) for k, v in data.items()}
     if isinstance(data, list):
         return [redact(v) for v in data]
     return data

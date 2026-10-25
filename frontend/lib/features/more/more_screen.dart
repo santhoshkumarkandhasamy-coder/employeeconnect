@@ -16,6 +16,8 @@ import '../food/presentation/food_report_screen.dart';
 import '../late/presentation/late_screen.dart';
 import '../leave/domain/leave_logic.dart';
 import '../leave/presentation/approvals_screen.dart';
+import '../payroll/domain/payroll_models.dart' show canViewOwnPayslips;
+import '../payroll/presentation/payslips_screen.dart';
 import '../placeholders/placeholder_screen.dart';
 import '../profile/presentation/profile_screen.dart';
 
@@ -102,6 +104,13 @@ class MoreScreen extends ConsumerWidget {
               'Manage announcements',
               Icons.edit_notifications_outlined,
               builder: (_) => const AdminAnnouncementsScreen(),
+            ),
+          if (user != null && canViewOwnPayslips(user.permissions))
+            _navTile(
+              context,
+              'Payslips',
+              Icons.receipt_long_outlined,
+              builder: (_) => const PayslipsScreen(),
             ),
           _navTile(
             context,

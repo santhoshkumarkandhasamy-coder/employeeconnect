@@ -4,7 +4,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'console/console_api.dart';
 import 'console/console_app.dart';
 import 'console/console_auth.dart';
+import 'console/console_delivery.dart';
 import 'core/storage/app_state_store.dart';
+import 'features/payroll/data/payroll_delivery.dart';
 
 /// Admin web console entrypoint (Flutter web, served at /console/):
 ///
@@ -30,6 +32,8 @@ void main() {
           ),
         ),
         appStateStoreProvider.overrideWithValue(MemoryAppStateStore()),
+        // Payslip PDFs and the register are saved as browser blob downloads.
+        payrollDeliveryProvider.overrideWithValue(const BrowserFileDelivery()),
       ],
       child: const ConsoleApp(),
     ),

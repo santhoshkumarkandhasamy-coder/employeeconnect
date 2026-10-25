@@ -30,6 +30,10 @@ REAUTH_PER_MINUTE = 5
 ADMIN_CAPABLE = frozenset({"role.assign", "role.manage"})
 
 
+# Permissions every role holds for its own data: they do NOT make a role "elevated" (plain self-service stays plain).
+SELF_SERVICE_PERMISSIONS = frozenset({"payroll.view_own"})
+
+
 def is_admin_capable(permissions: frozenset[str] | set[str]) -> bool:
     return bool(ADMIN_CAPABLE & set(permissions))
 
@@ -125,7 +129,7 @@ async def notify_reset_request(session: AsyncSession, redis: Redis, requester: U
             .scalars()
             .all()
         )
-        target = frozenset(p.code for p in requester.role.permissions)
+        target = frozenset(p.code for p in requester.role.permissions) - SELF_SERVICE_PERMISSIONS
         ids = []
         for h in holders:
             perms = frozenset(p.code for p in h.role.permissions)

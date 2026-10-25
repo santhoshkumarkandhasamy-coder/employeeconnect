@@ -47,6 +47,7 @@ _READ_ONLY_EXEMPT = (
     ("POST", re.compile(r"^/api/admin/employees/[^/]+/(deactivate|revoke-sessions)$")),
     ("DELETE", re.compile(r"^/api/admin/sessions/[^/]+$")),
     ("PUT", re.compile(r"^/api/admin/license$")),
+    ("POST", re.compile(r"^/api/admin/payroll/runs/[^/]+/register$")),  # an export, i.e. a read (contract 13.0)
     ("*", re.compile(r"^/api/auth/")),  # login/refresh/logout/change-password keep working
     ("*", re.compile(r"^/api/me/device-tokens")),
 )

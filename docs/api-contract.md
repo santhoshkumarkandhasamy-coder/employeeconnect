@@ -670,6 +670,7 @@ Audit log item: `{ id,ts,actor:UserSummary|null,action:"employee.create",entity_
 Sent to device tokens only; no sensitive data in payload (no coordinates). Known limitation: `announcement` pushes currently carry the title and the
 first 100 characters of the body through FCM; once the app has a push receiver, `important`/`urgent` ones should carry only type, id and a generic title.
 Announcement push volume is limited server side (re-send cooldown, daily per-admin budget, high priority once per announcement; see section 7).
+PROPOSED (section 13): `payslip_published` (id = payslip id, generic title/body, never amounts).
 
 ---
 
@@ -783,3 +784,218 @@ A license with fewer seats than active users deactivates nobody; new creates/act
 After `expires_at` the status is `grace` for `grace_days` (nothing blocked; daily `admin_alert` push to `license.manage` holders), then `expired`: seat-consuming actions answer 403 `LICENSE_EXPIRED`.
 Expired + signed `on_expiry=read_only`: every non-GET request answers 403 `LICENSE_EXPIRED` except `/auth/*`, `/me/device-tokens`, deactivate, delete, revoke-sessions, `DELETE /admin/sessions/{id}` and `PUT /admin/license`. Reads, auth, change-password and export keep working.
 New error codes: 409 `USER_LIMIT_REACHED`, 403 `LICENSE_EXPIRED`, 422 `LICENSE_INVALID`, 409 `LICENSE_OUTDATED`.
+
+---
+
+## 13. Payroll and Payslips (plan 12) - IMPLEMENTED (backend)
+
+> Status: backend IMPLEMENTED (migration `0018_payroll`, `app/routers/payroll.py`). Plan: `docs/plans/12-payroll.md`. Flutter builds against this section; the "13.8 Implementation notes" below list every place where the backend settled something the plan left open. Errors use the standard envelope `{"error": {"code","message","details":[{"field","message"}],"request_id"}}` (section 1).
+
+### 13.0 Conventions for this section
+- **Money** is a JSON **string** with exactly 2 decimals, `^\d{1,8}\.\d{2}$`, range `"0.00"`..`"10000000.00"` (requests accept 0-2 decimals, e.g. `"25000"`). Never a float. Days are numbers with one decimal (`29.5`).
+- `period` is `YYYY-MM` in JSON (stored as the 1st of the month).
+- Every money, bank and identity field is encrypted at rest. None of them is ever written to audit rows, logs, push payloads or error messages.
+- **Self rule:** no caller can change, revise, process or publish their OWN structure, payroll details or payslip -> 403 `FORBIDDEN`. Admin endpoints otherwise cover all employees (the s.9 privilege rules do not apply).
+- Admin payroll routes: unknown ids -> 404. Employee routes: anything that is not the caller's published/superseded payslip -> 404.
+- Codes: `^[A-Z][A-Z0-9_]{1,15}$`. Reserved codes (not usable for structure allowances/fixed deductions): `BASIC, HRA, PF, ESI, PT, TDS, LOP`, earnings adjustments `BONUS, ARREARS, INCENTIVE, REIMBURSEMENT, OTHER_EARNING`, deduction adjustments `ADVANCE_RECOVERY, LOAN_EMI, OTHER_DEDUCTION`.
+- Labels/names: 1-40 chars, cleaned (control chars and markup stripped). Unknown body fields -> 422 (`extra=forbid`).
+- Rate limits (per user, Redis; writes/exports fail closed -> 503 `TEMPORARILY_UNAVAILABLE`): employee payslip detail + PDF 30/min and 200/day; admin reads 120/min; draft writes 60/min; run/payslip actions 10/min; register 5/min; details `reveal` 30/min and 200/day; step-up 5/min (shared with s.9).
+- License `read_only` mode (12.6): `POST /admin/payroll/runs/{id}/register` is treated as a read (exempt), like export.
+
+### 13.1 Permissions
+`payroll.view_own` (admin, hr, manager, employee; granted to every existing role by 0018), `payroll.view_all` (admin, hr; read-only admin views), `payroll.manage` (admin, hr; all writes except publish), `payroll.publish` (admin, hr).
+
+### 13.2 Employee endpoints
+| Method | Path | Perm |
+|---|---|---|
+| GET | /payslips?year=2026 | `payroll.view_own` |
+| GET | /payslips/{id} | `payroll.view_own` (owner; status published or superseded) |
+| GET | /payslips/{id}/pdf | same |
+
+**GET /payslips?year=** (default current year, 2000..2200) -> un-paginated, newest month first, only the LIVE (published) revision per month. **No amounts.**
+```json
+{ "year": 2026,
+  "items": [ { "id":"uuid","period":"2026-10","revision":2,"published_at":"2026-10-31T09:00:00Z","revised":true,"pay_date":"2026-10-31"|null } ] }
+```
+**GET /payslips/{id}** -> `Payslip` (audit `payroll.payslip.view_own`):
+```json
+{ "id":"uuid","period":"2026-10","revision":2,"status":"published|superseded","published_at":"ts","pay_date":"2026-10-31"|null,
+  "company": { "name":"Aksan Capital Advisory Private Limited","address":"..."|null,"logo_url":"/api/public/company/logo?v=3"|null },
+  "employee": { "employee_id":"EMP001","full_name":"A B","department":"Advisory"|null,"designation":"Analyst"|null,"join_date":"2024-06-01"|null,
+                "pan":"XXXXX1234X"|null,"uan":"100200300400"|null,"esi_ip_number":"1234567890"|null,
+                "bank_name":"HDFC Bank"|null,"bank_account":"XXXXXX1234"|null,"payment_mode":"bank_transfer|cheque|cash" },
+  "days": { "basis_days":31.0,"employed_days":31.0,"lop_days":1.5,"paid_days":29.5 },
+  "earnings":   [ { "code":"BASIC","label":"Basic","monthly":"20000.00","amount":"19032.00" },
+                  { "code":"BONUS","label":"Diwali bonus","monthly":null,"amount":"5000.00" } ],
+  "deductions": [ { "code":"PF","label":"Provident Fund","amount":"1800.00" },
+                  { "code":"TDS","label":"Income Tax (TDS)","amount":"1200.00" } ],
+  "employer_contributions": [ { "code":"PF_ER","label":"Employer PF","amount":"1800.00" } ] | null,
+  "totals": { "gross_earnings":"38500.00","total_deductions":"3200.00","net_pay":"35300.00",
+              "net_pay_words":"Rupees Thirty-Five Thousand Three Hundred Only" },
+  "revision_info": { "reason":"Leave approved late","supersedes_id":"uuid","superseded_by_id":null } | null }
+```
+`monthly` = structure amount before proration (null for adjustments). `employer_contributions` is null unless `payroll.show_employer_contributions`. `pan` is masked when `payroll.mask_pan` (default); `bank_account` is always masked to the last 4.
+`revision_info` is null for revision 1 with no successor. A superseded payslip is still readable by its owner (`superseded_by_id` set) so the app can show history.
+**GET /payslips/{id}/pdf** -> `application/pdf`, `Content-Disposition: attachment; filename="payslip-EMP001-2026-10.pdf"` (`-r2` suffix for revisions), `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`. Audit `payroll.payslip.download`.
+Errors: 404, 429, 503 `DATA_UNREADABLE` (undecryptable), 503 `TEMPORARILY_UNAVAILABLE` (PDF slots busy, `Retry-After`).
+
+### 13.3 Payroll settings
+| GET | /admin/payroll/settings | `payroll.view_all` |
+| PUT | /admin/payroll/settings | `payroll.manage` (merge; audit `payroll.settings.update` with key/before/after). Changing `payroll.publish_requires_second_person` additionally needs `role.assign` AND `current_password` (see below) |
+
+```json
+{ "settings": {
+  "payroll.pay_days_basis":"calendar",            // calendar | fixed_30 | working_days
+  "payroll.lop_absent_days":true, "payroll.lop_half_day_attendance":true,
+  "payroll.pf_employee_rate_pct":12, "payroll.pf_employer_rate_pct":12, "payroll.pf_wage_ceiling":15000,   // 0..20, 0..20, 0..1000000 (0 = none)
+  "payroll.esi_wage_threshold":20000, "payroll.esi_employee_rate_pct":0.75, "payroll.esi_employer_rate_pct":3.25,  // 0..1000000, 0..10, 0..10
+  "payroll.pt_frequency":"half_yearly",           // monthly | half_yearly (default half_yearly = Tamil Nadu: PT in Mar + Sep, slab on half-yearly gross)
+  "payroll.pt_slabs":[ { "min_gross":"25000.00","max_gross":null,"amount":"200.00","months":null },
+                       { "min_gross":"25000.00","max_gross":null,"amount":"300.00","months":[2] } ],
+  "payroll.rounding":"rupee",                     // rupee | paise
+  "payroll.show_employer_contributions":false, "payroll.employer_share_from_employee":true, "payroll.mask_pan":true, "payroll.publish_requires_second_person":false,
+  "payroll.company_address":"", "payroll.payslip_footer":"This is a computer-generated payslip and does not require a signature." } }
+```
+PT slabs: <= 20 rows, `min_gross <= max_gross`. For any month, the slabs that apply to that month must not overlap. A slab with `months` wins over one with `months:null` for the same range. Default = the Tamil Nadu half-yearly slabs (see plan 12 section 4.1; to be verified against current rules), `months:[3,9]`; `[]` = no PT.
+PUT body: `{ "settings": { ... }, "current_password": "<optional>" }`. `current_password` (the caller's OWN password) is required ONLY when the request changes the stored value of `payroll.publish_requires_second_person` (turning it on or off; sending the value it already has is not a change). That change also needs the `role.assign` permission (admin; `payroll.manage` alone is not enough). Errors for it: 403 `FORBIDDEN` (no `role.assign`), 422 `VALIDATION_ERROR` (`current_password` missing), 403 `REAUTH_FAILED`. All other keys behave as before and need no password. Existing clients that never touch this key are unaffected.
+Rates allow 2 decimals. Errors: 422 `VALIDATION_ERROR` (`details.field` = key). These keys are not accepted by `PUT /admin/settings`. Changes never affect existing runs until `refresh` (draft) because runs snapshot the settings.
+
+### 13.4 Employees, structures, payroll details
+| Method | Path | Perm |
+|---|---|---|
+| GET | /admin/payroll/employees?q=&department_id=&has_structure=true\|false&status=active\|inactive&page=&page_size= | `payroll.view_all` |
+| GET | /admin/payroll/employees/{user_id}/structures | `payroll.view_all` (audit `payroll.structure.view`) |
+| POST | /admin/payroll/employees/{user_id}/structures | `payroll.manage` |
+| PUT | /admin/payroll/structures/{id} | `payroll.manage` |
+| DELETE | /admin/payroll/structures/{id} | `payroll.manage` |
+| GET | /admin/payroll/employees/{user_id}/details?reveal=false | `payroll.view_all` (audit `payroll.details.view`, `after.revealed`) |
+| PUT | /admin/payroll/employees/{user_id}/details | `payroll.manage` + step-up (`current_password` always required) |
+
+Employees list item: `{ "user":UserSummary, "status":"active|inactive", "include_in_payroll":true, "current_structure": { "id","effective_from":"2026-04-01","monthly_gross":"40000.00" } | null, "flags":["NO_BANK_DETAILS","NO_PAN"] }` (paginated).
+**Structure** (request = the same fields without the read-only ones):
+```json
+{ "id":"uuid","user_id":"uuid","effective_from":"2026-04-01","effective_to":"2026-09-30"|null,
+  "basic":"20000.00","hra":"8000.00",
+  "allowances":[ { "code":"SPECIAL","name":"Special allowance","amount":"10000.00","prorate":true,"esi_wage":true } ],
+  "fixed_deductions":[ { "code":"CANTEEN","name":"Canteen","amount":"500.00" } ],
+  "tds_monthly":"1200.00",
+  "pf_applicable":true,"pf_on_full_basic":false,"esi_applicable":true,"pt_applicable":true,
+  "monthly_gross":"38000.00","in_use":true,
+  "created_at":"ts","created_by":UserSummary|null,"updated_at":"ts" }
+```
+Read-only: `id, user_id, effective_to` (day before the next structure), `monthly_gross` (basic + hra + allowances), `in_use`, `created_*`, `updated_at`. `effective_from` must be the 1st of a month (422 `INVALID_PERIOD`). `basic` > 0; <= 15 allowances, <= 10 fixed deductions, unique codes.
+GET structures -> `{ "items":[Structure] }`, newest first. POST -> 201. PUT = full replace. DELETE -> 204.
+Errors: 409 `STRUCTURE_EXISTS` (same `effective_from`), 409 `STRUCTURE_IN_USE` (PUT/DELETE when a processed/published payslip uses it), 403 `FORBIDDEN` (own), 422.
+Audit `payroll.structure.create|update|delete` with `after={effective_from, fields:[changed names]}`.
+**Payroll details**:
+```json
+{ "user_id":"uuid","designation":"Analyst"|null,"payment_mode":"bank_transfer","include_in_payroll":true,
+  "bank_name":"HDFC Bank"|null,"bank_account":"XXXXXX1234"|null,"bank_ifsc":"HDFC0001234"|null,
+  "pan":"XXXXX1234X"|null,"uan":"XXXXXXXX0400"|null,"esi_ip_number":"XXXXXX7890"|null,
+  "revealed":false,"updated_at":"ts|null","updated_by":UserSummary|null }
+```
+`?reveal=true` returns unmasked values. PUT body: the same editable fields (`designation, payment_mode, include_in_payroll, bank_name, bank_account, bank_ifsc, pan, uan, esi_ip_number`) + `current_password`. Only sent keys change; `null` clears. Formats: PAN `^[A-Z]{5}[0-9]{4}[A-Z]$`, IFSC `^[A-Z]{4}0[A-Z0-9]{6}$`, account `^\d{9,18}$`, UAN `^\d{12}$`, ESI IP `^\d{10}$` (upper-cased, spaces removed) -> 200 masked object. Errors: 403 `REAUTH_FAILED`, 403 `FORBIDDEN` (own), 422. Audit `payroll.details.update` `after={fields:[names]}`.
+
+### 13.5 Runs
+| Method | Path | Perm |
+|---|---|---|
+| GET | /admin/payroll/runs?year= | `payroll.view_all` |
+| POST | /admin/payroll/runs | `payroll.manage` |
+| GET | /admin/payroll/runs/{id} | `payroll.view_all` (audit `payroll.run.view`) |
+| DELETE | /admin/payroll/runs/{id} | `payroll.manage` (draft and never published) -> 204 |
+| POST | /admin/payroll/runs/{id}/refresh | `payroll.manage` (draft) |
+| POST | /admin/payroll/runs/{id}/process | `payroll.manage` (draft) |
+| POST | /admin/payroll/runs/{id}/reopen | `payroll.manage` (processed) |
+| POST | /admin/payroll/runs/{id}/publish | `payroll.publish` + step-up |
+| GET | /admin/payroll/runs/{id}/payslips?q=&status=&flag=error\|warning\|hold&page=&page_size= | `payroll.view_all` |
+| POST | /admin/payroll/runs/{id}/employees/{user_id}/revise | `payroll.manage` |
+| POST | /admin/payroll/runs/{id}/register | `payroll.view_all` (+ `payroll.manage` and step-up when `include_bank`) |
+
+**POST /admin/payroll/runs** `{ "period":"2026-10","pay_date":"2026-10-31"|null }` -> 201 `Run`. Draft payslips are created for every eligible employee (plan 4.2).
+Errors: 409 `PAYROLL_RUN_EXISTS`, 422 `INVALID_PERIOD` (future month, malformed, outside 2000..2200).
+**Run**:
+```json
+{ "id":"uuid","period":"2026-10","status":"draft|processed|published","pay_date":"2026-10-31"|null,"attendance_cutoff":"2026-10-25",
+  "counts": { "employees":48,"draft":2,"processed":45,"published":0,"held":1,"errors":0,"warnings":3,"open_revisions":0 },
+  "totals": { "gross_earnings":"1850000.00","total_deductions":"160000.00","net_pay":"1690000.00","employer_pf":"95000.00","employer_esi":"4200.00" },
+  "config": { "pay_days_basis":"calendar","pf_employee_rate_pct":12, "...":"snapshot of payroll.* settings" },
+  "company_name":null,"created_at":"ts","created_by":UserSummary,"processed_at":"ts|null","processed_by":UserSummary|null,
+  "published_at":"ts|null","published_by":UserSummary|null }
+```
+`totals` cover the live copy per employee (published, else the open one), excluding held payslips. List item: `{ id, period, status, employees, net_pay_total, published_at }` (un-paginated, newest first).
+**refresh** -> 200 Run (re-snapshots settings, sets `attendance_cutoff` = min(period end, today), re-pulls structures/LOP/identity for drafts, adds newly eligible employees, keeps manual inputs).
+**process** -> 200 Run. Blocked -> 409 `PAYROLL_BLOCKED` `details:[{ "field":"EMP014","message":"STRUCTURE_MISSING" }, ...]` and nothing changes. Held payslips stay draft.
+**reopen** -> 200 Run (processed payslips back to draft). 409 `PAYROLL_LOCKED` after publish.
+**publish** `{ "current_password":"..." }` -> 200 Run. Publishes every processed, non-held payslip and locks the run. After commit, a push `payslip_published` goes to each employee.
+Errors: 409 `PAYROLL_LOCKED` (not processed / already published), 409 `NOTHING_TO_PUBLISH`, 403 `REAUTH_FAILED`, 403 `SECOND_PERSON_REQUIRED` (rule on, and the caller processed the run or is the last editor / processor of a payslip being published; see 13.8).
+Self rule at publish: a run that contains the caller's own processed payslip CAN be published by the caller (otherwise a company with one HR person could never publish), but the caller can never have edited that payslip. The audit row records `self_included:true`. The single-payslip publish (13.6) of your own payslip is 403 `FORBIDDEN`.
+**Payslip list item** (admin): `{ "id","user":UserSummary,"revision":1,"status","hold":false,"paid_days":29.5,"lop_days":1.5,"gross_earnings":"..","total_deductions":"..","net_pay":"..","errors":["NEGATIVE_NET_PAY"],"warnings":["PENDING_LEAVE"] }`. Draft rows with an error have null money fields.
+**revise** `{ "reason":"Leave approved after payroll" }` (3-200 chars) -> 201 `AdminPayslip` (new draft `revision+1` copied from the live published payslip, LOP re-pulled, inputs kept; or revision 1 when the employee has no payslip in a published run).
+Errors: 409 `PAYROLL_LOCKED` (run not published), 409 `CONFLICT` (an open revision already exists), 403 `FORBIDDEN` (own), 404.
+**register** `{ "include_bank":false,"current_password":"<only when include_bank>" }` -> `.xlsx` (sheets `Register`, `Summary`, and `Bank` when `include_bank`; plan section 5).
+`filename="payroll-register-2026-10.xlsx"`, `Cache-Control: no-store`. Audit `payroll.register.export` (`after={include_bank, rows}`). Errors: 403 `FORBIDDEN`, 403 `REAUTH_FAILED`, 429, 503.
+
+### 13.6 Payslips (admin)
+| Method | Path | Perm |
+|---|---|---|
+| GET | /admin/payroll/payslips/{id} | `payroll.view_all` (audit `payroll.payslip.view`) |
+| PUT | /admin/payroll/payslips/{id} | `payroll.manage` (draft only) |
+| DELETE | /admin/payroll/payslips/{id} | `payroll.manage` (draft only) -> 204 |
+| POST | /admin/payroll/payslips/{id}/process | `payroll.manage` (draft, run published = held or revision) |
+| POST | /admin/payroll/payslips/{id}/reopen | `payroll.manage` (processed, run published) |
+| POST | /admin/payroll/payslips/{id}/publish | `payroll.publish` + step-up (processed, run published) |
+| GET | /admin/payroll/payslips/{id}/pdf | `payroll.view_all` (non-published copies watermarked "DRAFT - NOT VALID"; audit `payroll.payslip.download`) |
+
+**AdminPayslip** = `Payslip` (13.2) plus (note: in AdminPayslip `employee.pan`, `employee.uan` and `employee.esi_ip_number` are ALWAYS masked, e.g. `XXXXX1234X`, `XXXXXXXX0400`, `XXXXXX7890`, whatever `payroll.mask_pan` says; the admin PDF is masked the same way. Unmasked values only via `GET .../details?reveal=true`. The employee's own `Payslip` / PDF is unchanged):
+```json
+{ "run_id":"uuid","user":UserSummary,"status":"draft|processed|published|superseded","hold":false,"version":3,"structure_id":"uuid"|null,
+  "lop": { "auto":1.5,"override":null,"override_reason":null,
+           "breakdown": { "unpaid_leave":1.0,"absent":0.0,"half_day_attendance":0.5,"not_employed":0.0,"pending_leave_days":0.0 } },
+  "inputs": { "tds":"1200.00","pt_override":null,
+              "adjustments":[ { "code":"BONUS","label":"Diwali bonus","amount":"5000.00" } ],"note":"..."|null },
+  "errors":[],"warnings":["LOP_OVERRIDDEN"],
+  "processed_at":"ts|null","processed_by":UserSummary|null,"published_by":UserSummary|null,"updated_at":"ts" }
+```
+In a draft with an error, `earnings`/`deductions` are `[]` and `totals` is null.
+**PUT** (draft only):
+```json
+{ "expected_version":3,
+  "lop_override":1.0, "lop_override_reason":"Forgot to check in on 14th, confirmed present",
+  "tds":"1200.00","pt_override":null,
+  "adjustments":[ { "code":"ARREARS","label":"Sept increment arrears","amount":"2500.00" } ],
+  "hold":false,"note":null }
+```
+Only sent keys change; `null` clears an override. `lop_override` 0..employed_days in 0.5 steps, reason 3-200 chars required with it. <= 10 adjustments. `pt_override` >= 0.
+-> 200 AdminPayslip, recomputed. Audit `payroll.payslip.update` `after={fields:[names]}`.
+Errors: 409 `VERSION_CONFLICT` (reload), 409 `PAYROLL_LOCKED` (not draft), 403 `FORBIDDEN` (own payslip), 422.
+**process** -> 200 (409 `PAYROLL_BLOCKED` as for runs). **publish** `{ "current_password" }` -> 200. If it is a revision, the previous published copy becomes `superseded` in the same transaction. After commit, push `payslip_published`. Same errors as run publish.
+Audit actions: `payroll.payslip.process|reopen|publish|delete|revise`.
+
+### 13.7 Push, errors
+- Push (section 11) `{ "type":"payslip_published", "id":"<payslip id>", "title":"Payslip available"|"Revised payslip available", "body":"Your payslip for October 2026 is ready." }`. Never amounts. Best effort, after commit.
+- New error codes: 409 `PAYROLL_RUN_EXISTS`, `PAYROLL_LOCKED`, `PAYROLL_BLOCKED`, `NOTHING_TO_PUBLISH`, `STRUCTURE_EXISTS`, `STRUCTURE_IN_USE`, `VERSION_CONFLICT`; 422 `INVALID_PERIOD`; 403 `SECOND_PERSON_REQUIRED`. Reused: `FORBIDDEN`, `REAUTH_FAILED`, `DATA_UNREADABLE`, `TEMPORARILY_UNAVAILABLE`, `RATE_LIMITED`.
+- Payslip error codes (in `errors`, block processing): `STRUCTURE_MISSING`, `NEGATIVE_NET_PAY`. Warning codes: `NO_SHIFT`, `PENDING_LEAVE`, `LOP_OVERRIDDEN`, `ZERO_PAID_DAYS`, `NO_BANK_DETAILS`, `NO_PAN`, `STRUCTURE_CHANGED`, `NOT_ELIGIBLE`.
+
+### 13.8 Implementation notes (decisions the backend took; none changes a shape above unless stated)
+- **ESI threshold (changed):** `payroll.esi_wage_threshold` defaults to 20000 (was 21000). Eligibility is still decided on the monthly gross with an inclusive comparison: gross <= 20000 gets ESI, gross above 20000 gets none. Editable setting.
+- **Employer share recovery (new):** `payroll.employer_share_from_employee` (bool, default true). When true the payslip `deductions` contain extra lines `PF_ER_REC` "PF - employer share (recovered)" and `ESI_ER_REC` "ESI - employer share (recovered)" (equal to the employer contribution), and the `PF`/`ESI` lines are labelled "PF - employee share" / "ESI - employee share"; `total_deductions` and `net_pay` include both. `employer_contributions` (if shown) still lists what the company remits. `Run.totals` gains `employer_recovered` (sum of the recovered lines) and `employer_cost` (= employer_pf + employer_esi - employer_recovered, so 0 when on and the rule is applied to everyone). Register columns: `PF`, `ESI` (employee share), `PF Employer Share Recovered`, `ESI Employer Share Recovered`, `Employer PF`, `Employer ESI` (remitted), `Employer Cost (net of recovery)`. Clients must not hard-code the PF/ESI deduction lines: render `deductions` as sent. Codes `PF_ER_REC`, `ESI_ER_REC` are reserved.
+- **Money in lists:** `Run.totals`, payslip list money and register amounts are computed in Python from the decrypted live copy. `net_pay_total` of a run list item = the run's `totals.net_pay`.
+- **Rounding:** `payroll.rounding=rupee` rounds every COMPUTED line (prorated earnings, PF, ESI, PT) half-up to the rupee. Amounts typed by HR (adjustments, fixed deductions, TDS, PT override) are used exactly as entered. **ESI contributions (employee and employer) are always rounded UP to the next rupee** (statutory rule; the plan said "ESI wage"). BASIC and HRA are always ESI wages; allowances use their `esi_wage` flag.
+- **PT:** the slab is looked up on the gross rounded UP to a whole rupee. `half_yearly` = gross of this month plus the live copy (published, else open) of the previous 5 calendar months that exist in payroll (missing months count as 0). A slab with `months: null` deducts in every month in `half_yearly` mode too. `pt_override` applies whenever it is set (also when the structure has `pt_applicable=false`).
+- **TDS:** the payslip stores `inputs.tds = null` meaning "structure default"; the API returns the EFFECTIVE value in `inputs.tds` (so the editor shows the default). Sending `tds: null` returns to the default.
+- **Errors vs warnings:** both are stored as codes in `payslips.warnings`; `errors` (`STRUCTURE_MISSING`, `NEGATIVE_NET_PAY`) are split out when reading. A payslip with an error has no stored result, so `earnings: []`, `totals: null` and null money in lists.
+- **LOP:** approved leave covers an absent day; a pending request does NOT (the day stays absent LOP and `pending_leave_days` + warning `PENDING_LEAVE` tell HR to resolve it, then refresh). An approved half-day leave with no attendance row leaves 0.5 day absent. `lop_auto` is capped at the employed days. `lop_override_reason` (3-200 chars) is REQUIRED whenever `lop_override` is sent with a value.
+- **Run/payslip status codes:** `process`/`refresh` on a published run -> 409 `PAYROLL_LOCKED`; on a run that is already `processed` -> 409 `CONFLICT`. `reopen` on a draft run -> 409 `CONFLICT`. Payslip-level `process` on a run that is not published -> 409 `CONFLICT`. A draft payslip that is `processed` individually leaves `hold` (set to false). `PUT`/`DELETE` of a non-draft payslip -> 409 `PAYROLL_LOCKED`.
+- **Lists:** `GET /admin/payroll/runs/{id}/payslips` lists every non-superseded copy, so an employee with an open revision appears twice (`published` revision 1 and `draft` revision 2); `status=superseded` shows old copies. Sorted by employee name. `GET .../employees` items also carry `include_in_payroll`.
+- **Structures:** deleting a structure that only DRAFT payslips reference clears `structure_id` on those drafts (they re-resolve on the next refresh/process). A draft saved with `PUT` keeps the structure it was computed with and shows `STRUCTURE_CHANGED` when a newer one applies; `refresh` and `process` adopt the newest.
+- **Details:** `GET .../details` for an employee without a row returns the defaults (`payment_mode: bank_transfer`, `include_in_payroll: true`, all else null). `PUT` audit `after.fields` lists only the fields that actually changed.
+- **Payslip PDF:** extra watermark `SUPERSEDED` for superseded copies; draft/processed copies carry `DRAFT - NOT VALID`. Response also sends `Content-Security-Policy: default-src 'none'`.
+- **Audit:** `include_bank` and `self_included` are allow-listed in the audit redactor; `payroll.settings.update` records `payroll.pt_slabs` as a JSON string (the generic redactor would otherwise mask the slab `amount`s). `payroll.denied` is written for the self rule and for employee-route 404 probes; a plain missing-permission 403 is not audited.
+- **Locking:** database trigger errors (SQLSTATE 23000) are mapped to 409 `PAYROLL_LOCKED`; unique violations (23505) to 409 `CONFLICT` (`PAYROLL_RUN_EXISTS` / `STRUCTURE_EXISTS` on the creating endpoints).
+- **Maker-checker (review 10, M1):** `SECOND_PERSON_REQUIRED` is enforced at run publish and payslip publish when the run's snapshot OR the CURRENT `payroll.publish_requires_second_person` setting is on (switching it off after a run was created does not release that run). The publisher must not be the person who processed the run (`processed_by`), nor the `processed_by` / `updated_by` (last editor) of any payslip being published. Changing the setting needs `role.assign` + `current_password` (13.3).
+- **Admin masking (review 10, M2):** AdminPayslip JSON and the admin PDF always mask PAN / UAN / ESI IP number (13.6). The employee's own payslip JSON/PDF still shows UAN / ESI IP in full and PAN per `payroll.mask_pan`.
+- **Successor lookup (review 10, L2):** `revision_info.superseded_by_id` in the EMPLOYEE view only points to a published (or already superseded) successor; an unpublished draft revision is invisible to the employee. The admin view still shows it.
+- **Structures (review 10, L1):** process and publish share-lock (`FOR SHARE`) the structures they read, so a structure cannot change between the calculation and the payslip becoming processed; delete clears `structure_id` only on DRAFT payslips. The database refuses UPDATE / DELETE of a structure used by a processed / published / superseded payslip.
+- **PDF (review 10, L3/L4):** both PDF endpoints fail closed (503 `TEMPORARILY_UNAVAILABLE`) when the rate-limit store is down. A timed-out PDF build keeps its slot until its worker thread ends; logos over 1 MB or 4 million pixels are not drawn.
+- **Database locks (review 10, H1/L6):** migration 0018 allows `*_enc`-only updates of payslips and structures when the transaction has `SET LOCAL app.key_rotation = 'on'` (set only by `python -m scripts.rotate_keys`), so key rotation works on published/superseded rows. A published -> superseded change without a published successor in the same transaction fails at commit.
+- **Rate limit keys** (per user): `payroll:own_list` 60/min, `own_detail` 30/min + 200/day (detail and pdf share it), `admin_read` 120/min, `write` 60/min (fail closed), `action` 10/min (fail closed), `register` 5/min (fail closed), `reveal` 30/min + 200/day (fail closed).

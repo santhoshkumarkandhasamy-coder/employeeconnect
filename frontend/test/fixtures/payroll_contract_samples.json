@@ -1,0 +1,1805 @@
+{
+ "details_put": {
+  "user_id": "62acda11-38bc-477b-85f9-24ce02f2c6b6",
+  "designation": "Analyst",
+  "payment_mode": "bank_transfer",
+  "include_in_payroll": true,
+  "bank_name": "HDFC Bank",
+  "bank_account": "XXXXXXXX9012",
+  "bank_ifsc": "HDFC0001234",
+  "pan": "XXXXX1234X",
+  "uan": "XXXXXXXX0400",
+  "esi_ip_number": "XXXXXX7890",
+  "revealed": false,
+  "updated_at": "2026-10-25T15:13:38Z",
+  "updated_by": {
+   "id": "7218cddc-6083-4b29-ae21-b13bb57d7178",
+   "employee_id": "ADM001",
+   "full_name": "Test Admin",
+   "department": "General",
+   "photo_url": null
+  }
+ },
+ "settings": {
+  "settings": {
+   "payroll.pay_days_basis": "calendar",
+   "payroll.lop_absent_days": false,
+   "payroll.lop_half_day_attendance": true,
+   "payroll.pf_employee_rate_pct": 12,
+   "payroll.pf_employer_rate_pct": 12,
+   "payroll.pf_wage_ceiling": 15000,
+   "payroll.esi_wage_threshold": 21000,
+   "payroll.esi_employee_rate_pct": 0.75,
+   "payroll.esi_employer_rate_pct": 3.25,
+   "payroll.pt_frequency": "half_yearly",
+   "payroll.pt_slabs": [
+    {
+     "min_gross": "0.00",
+     "max_gross": "21000.00",
+     "amount": "0.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "21001.00",
+     "max_gross": "30000.00",
+     "amount": "135.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "30001.00",
+     "max_gross": "45000.00",
+     "amount": "315.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "45001.00",
+     "max_gross": "60000.00",
+     "amount": "690.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "60001.00",
+     "max_gross": "75000.00",
+     "amount": "1025.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "75001.00",
+     "max_gross": null,
+     "amount": "1250.00",
+     "months": [
+      3,
+      9
+     ]
+    }
+   ],
+   "payroll.rounding": "rupee",
+   "payroll.show_employer_contributions": true,
+   "payroll.employer_share_from_employee": true,
+   "payroll.mask_pan": true,
+   "payroll.publish_requires_second_person": false,
+   "payroll.company_address": "",
+   "payroll.payslip_footer": "This is a computer-generated payslip and does not require a signature."
+  }
+ },
+ "employees": {
+  "items": [
+   {
+    "user": {
+     "id": "f2ceee80-77ed-413c-b31d-ab4cd7123a76",
+     "employee_id": "LEAV01",
+     "full_name": "Leaver",
+     "department": "General",
+     "photo_url": null
+    },
+    "status": "inactive",
+    "include_in_payroll": true,
+    "current_structure": {
+     "id": "64ee505a-9cab-4e97-89c3-6678904ce455",
+     "effective_from": "2025-01-01",
+     "monthly_gross": "50000.00"
+    },
+    "flags": [
+     "NO_BANK_DETAILS",
+     "NO_PAN"
+    ]
+   },
+   {
+    "user": {
+     "id": "949b9a82-ebe8-4776-8df1-8e932f3fa964",
+     "employee_id": "LOW001",
+     "full_name": "Low Paid",
+     "department": "General",
+     "photo_url": null
+    },
+    "status": "active",
+    "include_in_payroll": true,
+    "current_structure": {
+     "id": "d0c777f5-b29e-4620-99e5-1db2e68ccf6f",
+     "effective_from": "2025-01-01",
+     "monthly_gross": "18850.00"
+    },
+    "flags": [
+     "NO_BANK_DETAILS",
+     "NO_PAN"
+    ]
+   },
+   {
+    "user": {
+     "id": "eb082332-61b3-45b0-9500-c8104379ce49",
+     "employee_id": "JOIN01",
+     "full_name": "New Joiner",
+     "department": "General",
+     "photo_url": null
+    },
+    "status": "active",
+    "include_in_payroll": true,
+    "current_structure": {
+     "id": "4aa01214-3fbc-4177-a2d5-467d55218e5a",
+     "effective_from": "2025-01-01",
+     "monthly_gross": "21000.00"
+    },
+    "flags": [
+     "NO_BANK_DETAILS",
+     "NO_PAN"
+    ]
+   },
+   {
+    "user": {
+     "id": "7218cddc-6083-4b29-ae21-b13bb57d7178",
+     "employee_id": "ADM001",
+     "full_name": "Test Admin",
+     "department": "General",
+     "photo_url": null
+    },
+    "status": "active",
+    "include_in_payroll": false,
+    "current_structure": null,
+    "flags": [
+     "NO_BANK_DETAILS",
+     "NO_PAN"
+    ]
+   },
+   {
+    "user": {
+     "id": "62acda11-38bc-477b-85f9-24ce02f2c6b6",
+     "employee_id": "EMP001",
+     "full_name": "Test Employee",
+     "department": "General",
+     "photo_url": null
+    },
+    "status": "active",
+    "include_in_payroll": true,
+    "current_structure": {
+     "id": "fc41dd2d-9274-4cca-a2f1-e3eefc08f444",
+     "effective_from": "2025-01-01",
+     "monthly_gross": "28000.00"
+    },
+    "flags": []
+   },
+   {
+    "user": {
+     "id": "6b00f108-82ea-4ee9-a960-5246f3b78a5d",
+     "employee_id": "HR001",
+     "full_name": "Test Hr",
+     "department": "General",
+     "photo_url": null
+    },
+    "status": "active",
+    "include_in_payroll": true,
+    "current_structure": {
+     "id": "72a72a44-2333-4e73-b2ee-c400e0c6f8c1",
+     "effective_from": "2025-01-01",
+     "monthly_gross": "50000.00"
+    },
+    "flags": [
+     "NO_BANK_DETAILS",
+     "NO_PAN"
+    ]
+   },
+   {
+    "user": {
+     "id": "ed2717f7-ba92-433e-a3e4-124593145193",
+     "employee_id": "MGR001",
+     "full_name": "Test Manager",
+     "department": "General",
+     "photo_url": null
+    },
+    "status": "active",
+    "include_in_payroll": true,
+    "current_structure": {
+     "id": "94b0c20b-1d91-46a1-bde6-857d64512ec6",
+     "effective_from": "2025-01-01",
+     "monthly_gross": "40000.00"
+    },
+    "flags": [
+     "NO_BANK_DETAILS",
+     "NO_PAN"
+    ]
+   }
+  ],
+  "page": 1,
+  "page_size": 20,
+  "total": 7
+ },
+ "structures": {
+  "items": [
+   {
+    "id": "94b0c20b-1d91-46a1-bde6-857d64512ec6",
+    "user_id": "ed2717f7-ba92-433e-a3e4-124593145193",
+    "effective_from": "2025-01-01",
+    "effective_to": null,
+    "basic": "30000.00",
+    "hra": "10000.00",
+    "allowances": [],
+    "fixed_deductions": [
+     {
+      "code": "CANTEEN",
+      "name": "Canteen",
+      "amount": "500.00"
+     }
+    ],
+    "tds_monthly": "3000.00",
+    "pf_applicable": true,
+    "pf_on_full_basic": true,
+    "esi_applicable": true,
+    "pt_applicable": true,
+    "monthly_gross": "40000.00",
+    "in_use": false,
+    "created_at": "2026-10-25T15:13:38Z",
+    "created_by": {
+     "id": "7218cddc-6083-4b29-ae21-b13bb57d7178",
+     "employee_id": "ADM001",
+     "full_name": "Test Admin",
+     "department": "General",
+     "photo_url": null
+    },
+    "updated_at": "2026-10-25T15:13:38Z"
+   }
+  ]
+ },
+ "details": {
+  "user_id": "62acda11-38bc-477b-85f9-24ce02f2c6b6",
+  "designation": "Analyst",
+  "payment_mode": "bank_transfer",
+  "include_in_payroll": true,
+  "bank_name": "HDFC Bank",
+  "bank_account": "XXXXXXXX9012",
+  "bank_ifsc": "HDFC0001234",
+  "pan": "XXXXX1234X",
+  "uan": "XXXXXXXX0400",
+  "esi_ip_number": "XXXXXX7890",
+  "revealed": false,
+  "updated_at": "2026-10-25T15:13:38Z",
+  "updated_by": {
+   "id": "7218cddc-6083-4b29-ae21-b13bb57d7178",
+   "employee_id": "ADM001",
+   "full_name": "Test Admin",
+   "department": "General",
+   "photo_url": null
+  }
+ },
+ "run_create": {
+  "id": "edb2b823-a83b-4cfc-9d9a-dd4de8e32494",
+  "period": "2025-06",
+  "status": "draft",
+  "pay_date": "2025-06-30",
+  "attendance_cutoff": "2025-06-30",
+  "counts": {
+   "employees": 6,
+   "draft": 6,
+   "processed": 0,
+   "published": 0,
+   "held": 0,
+   "errors": 0,
+   "warnings": 5,
+   "open_revisions": 0
+  },
+  "totals": {
+   "gross_earnings": "175850.00",
+   "total_deductions": "18587.00",
+   "net_pay": "157263.00",
+   "employer_pf": "11640.00",
+   "employer_esi": "1068.00"
+  },
+  "config": {
+   "pay_days_basis": "calendar",
+   "lop_absent_days": false,
+   "lop_half_day_attendance": true,
+   "pf_employee_rate_pct": 12,
+   "pf_employer_rate_pct": 12,
+   "pf_wage_ceiling": 15000,
+   "esi_wage_threshold": 20000,
+   "esi_employee_rate_pct": 0.75,
+   "esi_employer_rate_pct": 3.25,
+   "pt_frequency": "half_yearly",
+   "pt_slabs": [
+    {
+     "min_gross": "0.00",
+     "max_gross": "21000.00",
+     "amount": "0.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "21001.00",
+     "max_gross": "30000.00",
+     "amount": "135.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "30001.00",
+     "max_gross": "45000.00",
+     "amount": "315.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "45001.00",
+     "max_gross": "60000.00",
+     "amount": "690.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "60001.00",
+     "max_gross": "75000.00",
+     "amount": "1025.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "75001.00",
+     "max_gross": null,
+     "amount": "1250.00",
+     "months": [
+      3,
+      9
+     ]
+    }
+   ],
+   "rounding": "rupee",
+   "show_employer_contributions": true,
+   "mask_pan": true,
+   "publish_requires_second_person": false,
+   "company_address": "",
+   "payslip_footer": "This is a computer-generated payslip and does not require a signature."
+  },
+  "company_name": null,
+  "created_at": "2026-10-25T15:13:38Z",
+  "created_by": {
+   "id": "7218cddc-6083-4b29-ae21-b13bb57d7178",
+   "employee_id": "ADM001",
+   "full_name": "Test Admin",
+   "department": "General",
+   "photo_url": null
+  },
+  "processed_at": null,
+  "processed_by": null,
+  "published_at": null,
+  "published_by": null
+ },
+ "runs": {
+  "year": 2025,
+  "items": [
+   {
+    "id": "edb2b823-a83b-4cfc-9d9a-dd4de8e32494",
+    "period": "2025-06",
+    "status": "draft",
+    "employees": 6,
+    "net_pay_total": "157263.00",
+    "published_at": null
+   }
+  ]
+ },
+ "run_payslips": {
+  "items": [
+   {
+    "id": "8ca1820a-4386-49e6-b278-56ef0c1b95c2",
+    "user": {
+     "id": "f2ceee80-77ed-413c-b31d-ab4cd7123a76",
+     "employee_id": "LEAV01",
+     "full_name": "Leaver",
+     "department": "General",
+     "photo_url": null
+    },
+    "revision": 1,
+    "status": "draft",
+    "hold": false,
+    "paid_days": 15.0,
+    "lop_days": 0.0,
+    "gross_earnings": "25000.00",
+    "total_deductions": "3800.00",
+    "net_pay": "21200.00",
+    "errors": [],
+    "warnings": [
+     "NO_BANK_DETAILS",
+     "NO_PAN"
+    ]
+   },
+   {
+    "id": "a14453c1-542a-4fbc-baad-892aa1b828fc",
+    "user": {
+     "id": "949b9a82-ebe8-4776-8df1-8e932f3fa964",
+     "employee_id": "LOW001",
+     "full_name": "Low Paid",
+     "department": "General",
+     "photo_url": null
+    },
+    "revision": 1,
+    "status": "draft",
+    "hold": false,
+    "paid_days": 30.0,
+    "lop_days": 0.0,
+    "gross_earnings": "18850.00",
+    "total_deductions": "1582.00",
+    "net_pay": "17268.00",
+    "errors": [],
+    "warnings": [
+     "NO_BANK_DETAILS",
+     "NO_PAN"
+    ]
+   },
+   {
+    "id": "9d0adc29-32bb-4e19-a21d-a640d8d27672",
+    "user": {
+     "id": "eb082332-61b3-45b0-9500-c8104379ce49",
+     "employee_id": "JOIN01",
+     "full_name": "New Joiner",
+     "department": "General",
+     "photo_url": null
+    },
+    "revision": 1,
+    "status": "draft",
+    "hold": false,
+    "paid_days": 20.0,
+    "lop_days": 0.0,
+    "gross_earnings": "14000.00",
+    "total_deductions": "1305.00",
+    "net_pay": "12695.00",
+    "errors": [],
+    "warnings": [
+     "NO_BANK_DETAILS",
+     "NO_PAN"
+    ]
+   },
+   {
+    "id": "ab2323d1-fea0-4e44-bb2b-cd9a6431c4e4",
+    "user": {
+     "id": "62acda11-38bc-477b-85f9-24ce02f2c6b6",
+     "employee_id": "EMP001",
+     "full_name": "Test Employee",
+     "department": "General",
+     "photo_url": null
+    },
+    "revision": 1,
+    "status": "draft",
+    "hold": false,
+    "paid_days": 30.0,
+    "lop_days": 0.0,
+    "gross_earnings": "28000.00",
+    "total_deductions": "3000.00",
+    "net_pay": "25000.00",
+    "errors": [],
+    "warnings": []
+   },
+   {
+    "id": "7c4ee345-3f04-4667-87b4-62f4979cb401",
+    "user": {
+     "id": "6b00f108-82ea-4ee9-a960-5246f3b78a5d",
+     "employee_id": "HR001",
+     "full_name": "Test Hr",
+     "department": "General",
+     "photo_url": null
+    },
+    "revision": 1,
+    "status": "draft",
+    "hold": false,
+    "paid_days": 30.0,
+    "lop_days": 0.0,
+    "gross_earnings": "50000.00",
+    "total_deductions": "1800.00",
+    "net_pay": "48200.00",
+    "errors": [],
+    "warnings": [
+     "NO_BANK_DETAILS",
+     "NO_PAN"
+    ]
+   },
+   {
+    "id": "c7a5e4a9-f087-43a0-a492-d869c671ebe1",
+    "user": {
+     "id": "ed2717f7-ba92-433e-a3e4-124593145193",
+     "employee_id": "MGR001",
+     "full_name": "Test Manager",
+     "department": "General",
+     "photo_url": null
+    },
+    "revision": 1,
+    "status": "draft",
+    "hold": false,
+    "paid_days": 30.0,
+    "lop_days": 0.0,
+    "gross_earnings": "40000.00",
+    "total_deductions": "7100.00",
+    "net_pay": "32900.00",
+    "errors": [],
+    "warnings": [
+     "NO_BANK_DETAILS",
+     "NO_PAN"
+    ]
+   }
+  ],
+  "page": 1,
+  "page_size": 20,
+  "total": 6
+ },
+ "admin_payslip": {
+  "id": "ab2323d1-fea0-4e44-bb2b-cd9a6431c4e4",
+  "period": "2025-06",
+  "revision": 1,
+  "status": "draft",
+  "published_at": null,
+  "pay_date": "2025-06-30",
+  "company": {
+   "name": "",
+   "address": null,
+   "logo_url": null
+  },
+  "employee": {
+   "employee_id": "EMP001",
+   "full_name": "Test Employee",
+   "department": "General",
+   "designation": "Analyst",
+   "join_date": null,
+   "pan": "XXXXX1234X",
+   "uan": "XXXXXXXX0400",
+   "esi_ip_number": "XXXXXX7890",
+   "bank_name": "HDFC Bank",
+   "bank_account": "XXXXXXXX9012",
+   "payment_mode": "bank_transfer"
+  },
+  "days": {
+   "basis_days": 30.0,
+   "employed_days": 30.0,
+   "lop_days": 0.0,
+   "paid_days": 30.0
+  },
+  "earnings": [
+   {
+    "code": "BASIC",
+    "label": "Basic",
+    "monthly": "20000.00",
+    "amount": "20000.00"
+   },
+   {
+    "code": "HRA",
+    "label": "House Rent Allowance",
+    "monthly": "8000.00",
+    "amount": "8000.00"
+   }
+  ],
+  "deductions": [
+   {
+    "code": "PF",
+    "label": "Provident Fund",
+    "amount": "1800.00"
+   },
+   {
+    "code": "TDS",
+    "label": "Income Tax (TDS)",
+    "amount": "1200.00"
+   }
+  ],
+  "employer_contributions": [
+   {
+    "code": "PF_ER",
+    "label": "Employer PF",
+    "amount": "1800.00"
+   }
+  ],
+  "totals": {
+   "gross_earnings": "28000.00",
+   "total_deductions": "3000.00",
+   "net_pay": "25000.00",
+   "net_pay_words": "Rupees Twenty-Five Thousand Only"
+  },
+  "revision_info": null,
+  "run_id": "edb2b823-a83b-4cfc-9d9a-dd4de8e32494",
+  "user": {
+   "id": "62acda11-38bc-477b-85f9-24ce02f2c6b6",
+   "employee_id": "EMP001",
+   "full_name": "Test Employee",
+   "department": "General",
+   "photo_url": null
+  },
+  "hold": false,
+  "version": 1,
+  "structure_id": "fc41dd2d-9274-4cca-a2f1-e3eefc08f444",
+  "lop": {
+   "auto": 0.0,
+   "override": null,
+   "override_reason": null,
+   "breakdown": {
+    "unpaid_leave": 0.0,
+    "absent": 0.0,
+    "half_day_attendance": 0.0,
+    "not_employed": 0.0,
+    "pending_leave_days": 0.0
+   }
+  },
+  "inputs": {
+   "tds": "1200.00",
+   "pt_override": null,
+   "adjustments": [],
+   "note": null
+  },
+  "errors": [],
+  "warnings": [],
+  "processed_at": null,
+  "processed_by": null,
+  "published_by": null,
+  "updated_at": "2026-10-25T15:13:38Z"
+ },
+ "admin_payslip_put": {
+  "id": "ab2323d1-fea0-4e44-bb2b-cd9a6431c4e4",
+  "period": "2025-06",
+  "revision": 1,
+  "status": "draft",
+  "published_at": null,
+  "pay_date": "2025-06-30",
+  "company": {
+   "name": "",
+   "address": null,
+   "logo_url": null
+  },
+  "employee": {
+   "employee_id": "EMP001",
+   "full_name": "Test Employee",
+   "department": "General",
+   "designation": "Analyst",
+   "join_date": null,
+   "pan": "XXXXX1234X",
+   "uan": "XXXXXXXX0400",
+   "esi_ip_number": "XXXXXX7890",
+   "bank_name": "HDFC Bank",
+   "bank_account": "XXXXXXXX9012",
+   "payment_mode": "bank_transfer"
+  },
+  "days": {
+   "basis_days": 30.0,
+   "employed_days": 30.0,
+   "lop_days": 1.5,
+   "paid_days": 28.5
+  },
+  "earnings": [
+   {
+    "code": "BASIC",
+    "label": "Basic",
+    "monthly": "20000.00",
+    "amount": "19000.00"
+   },
+   {
+    "code": "HRA",
+    "label": "House Rent Allowance",
+    "monthly": "8000.00",
+    "amount": "7600.00"
+   },
+   {
+    "code": "ARREARS",
+    "label": "Arrears",
+    "monthly": null,
+    "amount": "2500.00"
+   }
+  ],
+  "deductions": [
+   {
+    "code": "PF",
+    "label": "Provident Fund",
+    "amount": "1800.00"
+   },
+   {
+    "code": "TDS",
+    "label": "Income Tax (TDS)",
+    "amount": "1200.00"
+   }
+  ],
+  "employer_contributions": [
+   {
+    "code": "PF_ER",
+    "label": "Employer PF",
+    "amount": "1800.00"
+   }
+  ],
+  "totals": {
+   "gross_earnings": "29100.00",
+   "total_deductions": "3000.00",
+   "net_pay": "26100.00",
+   "net_pay_words": "Rupees Twenty-Six Thousand One Hundred Only"
+  },
+  "revision_info": null,
+  "run_id": "edb2b823-a83b-4cfc-9d9a-dd4de8e32494",
+  "user": {
+   "id": "62acda11-38bc-477b-85f9-24ce02f2c6b6",
+   "employee_id": "EMP001",
+   "full_name": "Test Employee",
+   "department": "General",
+   "photo_url": null
+  },
+  "hold": false,
+  "version": 2,
+  "structure_id": "fc41dd2d-9274-4cca-a2f1-e3eefc08f444",
+  "lop": {
+   "auto": 0.0,
+   "override": 1.5,
+   "override_reason": "Unpaid leave",
+   "breakdown": {
+    "unpaid_leave": 0.0,
+    "absent": 0.0,
+    "half_day_attendance": 0.0,
+    "not_employed": 0.0,
+    "pending_leave_days": 0.0
+   }
+  },
+  "inputs": {
+   "tds": "1200.00",
+   "pt_override": null,
+   "adjustments": [
+    {
+     "code": "ARREARS",
+     "label": "Arrears",
+     "amount": "2500.00"
+    }
+   ],
+   "note": null
+  },
+  "errors": [],
+  "warnings": [
+   "LOP_OVERRIDDEN"
+  ],
+  "processed_at": null,
+  "processed_by": null,
+  "published_by": null,
+  "updated_at": "2026-10-25T15:13:38Z"
+ },
+ "run_process": {
+  "id": "edb2b823-a83b-4cfc-9d9a-dd4de8e32494",
+  "period": "2025-06",
+  "status": "processed",
+  "pay_date": "2025-06-30",
+  "attendance_cutoff": "2025-06-30",
+  "counts": {
+   "employees": 6,
+   "draft": 0,
+   "processed": 6,
+   "published": 0,
+   "held": 0,
+   "errors": 0,
+   "warnings": 6,
+   "open_revisions": 0
+  },
+  "totals": {
+   "gross_earnings": "176950.00",
+   "total_deductions": "18587.00",
+   "net_pay": "158363.00",
+   "employer_pf": "11640.00",
+   "employer_esi": "1068.00"
+  },
+  "config": {
+   "pay_days_basis": "calendar",
+   "lop_absent_days": false,
+   "lop_half_day_attendance": true,
+   "pf_employee_rate_pct": 12,
+   "pf_employer_rate_pct": 12,
+   "pf_wage_ceiling": 15000,
+   "esi_wage_threshold": 20000,
+   "esi_employee_rate_pct": 0.75,
+   "esi_employer_rate_pct": 3.25,
+   "pt_frequency": "half_yearly",
+   "pt_slabs": [
+    {
+     "min_gross": "0.00",
+     "max_gross": "21000.00",
+     "amount": "0.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "21001.00",
+     "max_gross": "30000.00",
+     "amount": "135.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "30001.00",
+     "max_gross": "45000.00",
+     "amount": "315.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "45001.00",
+     "max_gross": "60000.00",
+     "amount": "690.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "60001.00",
+     "max_gross": "75000.00",
+     "amount": "1025.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "75001.00",
+     "max_gross": null,
+     "amount": "1250.00",
+     "months": [
+      3,
+      9
+     ]
+    }
+   ],
+   "rounding": "rupee",
+   "show_employer_contributions": true,
+   "mask_pan": true,
+   "publish_requires_second_person": false,
+   "company_address": "",
+   "payslip_footer": "This is a computer-generated payslip and does not require a signature."
+  },
+  "company_name": null,
+  "created_at": "2026-10-25T15:13:38Z",
+  "created_by": {
+   "id": "7218cddc-6083-4b29-ae21-b13bb57d7178",
+   "employee_id": "ADM001",
+   "full_name": "Test Admin",
+   "department": "General",
+   "photo_url": null
+  },
+  "processed_at": "2026-10-25T15:13:38Z",
+  "processed_by": {
+   "id": "7218cddc-6083-4b29-ae21-b13bb57d7178",
+   "employee_id": "ADM001",
+   "full_name": "Test Admin",
+   "department": "General",
+   "photo_url": null
+  },
+  "published_at": null,
+  "published_by": null
+ },
+ "run_reopen": {
+  "id": "edb2b823-a83b-4cfc-9d9a-dd4de8e32494",
+  "period": "2025-06",
+  "status": "draft",
+  "pay_date": "2025-06-30",
+  "attendance_cutoff": "2025-06-30",
+  "counts": {
+   "employees": 6,
+   "draft": 6,
+   "processed": 0,
+   "published": 0,
+   "held": 0,
+   "errors": 0,
+   "warnings": 6,
+   "open_revisions": 0
+  },
+  "totals": {
+   "gross_earnings": "176950.00",
+   "total_deductions": "18587.00",
+   "net_pay": "158363.00",
+   "employer_pf": "11640.00",
+   "employer_esi": "1068.00"
+  },
+  "config": {
+   "pay_days_basis": "calendar",
+   "lop_absent_days": false,
+   "lop_half_day_attendance": true,
+   "pf_employee_rate_pct": 12,
+   "pf_employer_rate_pct": 12,
+   "pf_wage_ceiling": 15000,
+   "esi_wage_threshold": 20000,
+   "esi_employee_rate_pct": 0.75,
+   "esi_employer_rate_pct": 3.25,
+   "pt_frequency": "half_yearly",
+   "pt_slabs": [
+    {
+     "min_gross": "0.00",
+     "max_gross": "21000.00",
+     "amount": "0.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "21001.00",
+     "max_gross": "30000.00",
+     "amount": "135.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "30001.00",
+     "max_gross": "45000.00",
+     "amount": "315.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "45001.00",
+     "max_gross": "60000.00",
+     "amount": "690.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "60001.00",
+     "max_gross": "75000.00",
+     "amount": "1025.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "75001.00",
+     "max_gross": null,
+     "amount": "1250.00",
+     "months": [
+      3,
+      9
+     ]
+    }
+   ],
+   "rounding": "rupee",
+   "show_employer_contributions": true,
+   "mask_pan": true,
+   "publish_requires_second_person": false,
+   "company_address": "",
+   "payslip_footer": "This is a computer-generated payslip and does not require a signature."
+  },
+  "company_name": null,
+  "created_at": "2026-10-25T15:13:38Z",
+  "created_by": {
+   "id": "7218cddc-6083-4b29-ae21-b13bb57d7178",
+   "employee_id": "ADM001",
+   "full_name": "Test Admin",
+   "department": "General",
+   "photo_url": null
+  },
+  "processed_at": null,
+  "processed_by": null,
+  "published_at": null,
+  "published_by": null
+ },
+ "run_publish": {
+  "id": "edb2b823-a83b-4cfc-9d9a-dd4de8e32494",
+  "period": "2025-06",
+  "status": "published",
+  "pay_date": "2025-06-30",
+  "attendance_cutoff": "2025-06-30",
+  "counts": {
+   "employees": 6,
+   "draft": 0,
+   "processed": 0,
+   "published": 6,
+   "held": 0,
+   "errors": 0,
+   "warnings": 0,
+   "open_revisions": 0
+  },
+  "totals": {
+   "gross_earnings": "176950.00",
+   "total_deductions": "18587.00",
+   "net_pay": "158363.00",
+   "employer_pf": "11640.00",
+   "employer_esi": "1068.00"
+  },
+  "config": {
+   "pay_days_basis": "calendar",
+   "lop_absent_days": false,
+   "lop_half_day_attendance": true,
+   "pf_employee_rate_pct": 12,
+   "pf_employer_rate_pct": 12,
+   "pf_wage_ceiling": 15000,
+   "esi_wage_threshold": 20000,
+   "esi_employee_rate_pct": 0.75,
+   "esi_employer_rate_pct": 3.25,
+   "pt_frequency": "half_yearly",
+   "pt_slabs": [
+    {
+     "min_gross": "0.00",
+     "max_gross": "21000.00",
+     "amount": "0.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "21001.00",
+     "max_gross": "30000.00",
+     "amount": "135.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "30001.00",
+     "max_gross": "45000.00",
+     "amount": "315.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "45001.00",
+     "max_gross": "60000.00",
+     "amount": "690.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "60001.00",
+     "max_gross": "75000.00",
+     "amount": "1025.00",
+     "months": [
+      3,
+      9
+     ]
+    },
+    {
+     "min_gross": "75001.00",
+     "max_gross": null,
+     "amount": "1250.00",
+     "months": [
+      3,
+      9
+     ]
+    }
+   ],
+   "rounding": "rupee",
+   "show_employer_contributions": true,
+   "mask_pan": true,
+   "publish_requires_second_person": false,
+   "company_address": "",
+   "payslip_footer": "This is a computer-generated payslip and does not require a signature."
+  },
+  "company_name": null,
+  "created_at": "2026-10-25T15:13:38Z",
+  "created_by": {
+   "id": "7218cddc-6083-4b29-ae21-b13bb57d7178",
+   "employee_id": "ADM001",
+   "full_name": "Test Admin",
+   "department": "General",
+   "photo_url": null
+  },
+  "processed_at": "2026-10-25T15:13:38Z",
+  "processed_by": {
+   "id": "7218cddc-6083-4b29-ae21-b13bb57d7178",
+   "employee_id": "ADM001",
+   "full_name": "Test Admin",
+   "department": "General",
+   "photo_url": null
+  },
+  "published_at": "2026-10-25T15:13:38Z",
+  "published_by": {
+   "id": "6b00f108-82ea-4ee9-a960-5246f3b78a5d",
+   "employee_id": "HR001",
+   "full_name": "Test Hr",
+   "department": "General",
+   "photo_url": null
+  }
+ },
+ "revise": {
+  "id": "80827f3b-f90d-4f66-9687-521e5bd6dbf7",
+  "period": "2025-06",
+  "revision": 2,
+  "status": "draft",
+  "published_at": null,
+  "pay_date": "2025-06-30",
+  "company": {
+   "name": "",
+   "address": null,
+   "logo_url": null
+  },
+  "employee": {
+   "employee_id": "EMP001",
+   "full_name": "Test Employee",
+   "department": "General",
+   "designation": "Analyst",
+   "join_date": null,
+   "pan": "XXXXX1234X",
+   "uan": "XXXXXXXX0400",
+   "esi_ip_number": "XXXXXX7890",
+   "bank_name": "HDFC Bank",
+   "bank_account": "XXXXXXXX9012",
+   "payment_mode": "bank_transfer"
+  },
+  "days": {
+   "basis_days": 30.0,
+   "employed_days": 30.0,
+   "lop_days": 1.5,
+   "paid_days": 28.5
+  },
+  "earnings": [
+   {
+    "code": "BASIC",
+    "label": "Basic",
+    "monthly": "20000.00",
+    "amount": "19000.00"
+   },
+   {
+    "code": "HRA",
+    "label": "House Rent Allowance",
+    "monthly": "8000.00",
+    "amount": "7600.00"
+   },
+   {
+    "code": "ARREARS",
+    "label": "Arrears",
+    "monthly": null,
+    "amount": "2500.00"
+   }
+  ],
+  "deductions": [
+   {
+    "code": "PF",
+    "label": "Provident Fund",
+    "amount": "1800.00"
+   },
+   {
+    "code": "TDS",
+    "label": "Income Tax (TDS)",
+    "amount": "1200.00"
+   }
+  ],
+  "employer_contributions": [
+   {
+    "code": "PF_ER",
+    "label": "Employer PF",
+    "amount": "1800.00"
+   }
+  ],
+  "totals": {
+   "gross_earnings": "29100.00",
+   "total_deductions": "3000.00",
+   "net_pay": "26100.00",
+   "net_pay_words": "Rupees Twenty-Six Thousand One Hundred Only"
+  },
+  "revision_info": {
+   "reason": "Leave approved",
+   "supersedes_id": "ab2323d1-fea0-4e44-bb2b-cd9a6431c4e4",
+   "superseded_by_id": null
+  },
+  "run_id": "edb2b823-a83b-4cfc-9d9a-dd4de8e32494",
+  "user": {
+   "id": "62acda11-38bc-477b-85f9-24ce02f2c6b6",
+   "employee_id": "EMP001",
+   "full_name": "Test Employee",
+   "department": "General",
+   "photo_url": null
+  },
+  "hold": false,
+  "version": 1,
+  "structure_id": "fc41dd2d-9274-4cca-a2f1-e3eefc08f444",
+  "lop": {
+   "auto": 0.0,
+   "override": 1.5,
+   "override_reason": "Unpaid leave",
+   "breakdown": {
+    "unpaid_leave": 0.0,
+    "absent": 0.0,
+    "half_day_attendance": 0.0,
+    "not_employed": 0.0,
+    "pending_leave_days": 0.0
+   }
+  },
+  "inputs": {
+   "tds": "1200.00",
+   "pt_override": null,
+   "adjustments": [
+    {
+     "code": "ARREARS",
+     "label": "Arrears",
+     "amount": "2500.00"
+    }
+   ],
+   "note": null
+  },
+  "errors": [],
+  "warnings": [
+   "LOP_OVERRIDDEN"
+  ],
+  "processed_at": null,
+  "processed_by": null,
+  "published_by": null,
+  "updated_at": "2026-10-25T15:13:38Z"
+ },
+ "my_list": {
+  "year": 2025,
+  "items": [
+   {
+    "id": "ab2323d1-fea0-4e44-bb2b-cd9a6431c4e4",
+    "period": "2025-06",
+    "revision": 1,
+    "published_at": "2026-10-25T15:13:38Z",
+    "revised": false,
+    "pay_date": "2025-06-30"
+   }
+  ]
+ },
+ "my_payslip": {
+  "id": "ab2323d1-fea0-4e44-bb2b-cd9a6431c4e4",
+  "period": "2025-06",
+  "revision": 1,
+  "status": "published",
+  "published_at": "2026-10-25T15:13:38Z",
+  "pay_date": "2025-06-30",
+  "company": {
+   "name": "",
+   "address": null,
+   "logo_url": null
+  },
+  "employee": {
+   "employee_id": "EMP001",
+   "full_name": "Test Employee",
+   "department": "General",
+   "designation": "Analyst",
+   "join_date": null,
+   "pan": "XXXXX1234X",
+   "uan": "100200300400",
+   "esi_ip_number": "1234567890",
+   "bank_name": "HDFC Bank",
+   "bank_account": "XXXXXXXX9012",
+   "payment_mode": "bank_transfer"
+  },
+  "days": {
+   "basis_days": 30.0,
+   "employed_days": 30.0,
+   "lop_days": 1.5,
+   "paid_days": 28.5
+  },
+  "earnings": [
+   {
+    "code": "BASIC",
+    "label": "Basic",
+    "monthly": "20000.00",
+    "amount": "19000.00"
+   },
+   {
+    "code": "HRA",
+    "label": "House Rent Allowance",
+    "monthly": "8000.00",
+    "amount": "7600.00"
+   },
+   {
+    "code": "ARREARS",
+    "label": "Arrears",
+    "monthly": null,
+    "amount": "2500.00"
+   }
+  ],
+  "deductions": [
+   {
+    "code": "PF",
+    "label": "Provident Fund",
+    "amount": "1800.00"
+   },
+   {
+    "code": "TDS",
+    "label": "Income Tax (TDS)",
+    "amount": "1200.00"
+   }
+  ],
+  "employer_contributions": [
+   {
+    "code": "PF_ER",
+    "label": "Employer PF",
+    "amount": "1800.00"
+   }
+  ],
+  "totals": {
+   "gross_earnings": "29100.00",
+   "total_deductions": "3000.00",
+   "net_pay": "26100.00",
+   "net_pay_words": "Rupees Twenty-Six Thousand One Hundred Only"
+  },
+  "revision_info": null
+ },
+ "payslip_publish": {
+  "id": "80827f3b-f90d-4f66-9687-521e5bd6dbf7",
+  "period": "2025-06",
+  "revision": 2,
+  "status": "published",
+  "published_at": "2026-10-25T15:13:38Z",
+  "pay_date": "2025-06-30",
+  "company": {
+   "name": "",
+   "address": null,
+   "logo_url": null
+  },
+  "employee": {
+   "employee_id": "EMP001",
+   "full_name": "Test Employee",
+   "department": "General",
+   "designation": "Analyst",
+   "join_date": null,
+   "pan": "XXXXX1234X",
+   "uan": "XXXXXXXX0400",
+   "esi_ip_number": "XXXXXX7890",
+   "bank_name": "HDFC Bank",
+   "bank_account": "XXXXXXXX9012",
+   "payment_mode": "bank_transfer"
+  },
+  "days": {
+   "basis_days": 30.0,
+   "employed_days": 30.0,
+   "lop_days": 0.0,
+   "paid_days": 30.0
+  },
+  "earnings": [
+   {
+    "code": "BASIC",
+    "label": "Basic",
+    "monthly": "20000.00",
+    "amount": "20000.00"
+   },
+   {
+    "code": "HRA",
+    "label": "House Rent Allowance",
+    "monthly": "8000.00",
+    "amount": "8000.00"
+   },
+   {
+    "code": "ARREARS",
+    "label": "Arrears",
+    "monthly": null,
+    "amount": "2500.00"
+   }
+  ],
+  "deductions": [
+   {
+    "code": "PF",
+    "label": "Provident Fund",
+    "amount": "1800.00"
+   },
+   {
+    "code": "TDS",
+    "label": "Income Tax (TDS)",
+    "amount": "1200.00"
+   }
+  ],
+  "employer_contributions": [
+   {
+    "code": "PF_ER",
+    "label": "Employer PF",
+    "amount": "1800.00"
+   }
+  ],
+  "totals": {
+   "gross_earnings": "30500.00",
+   "total_deductions": "3000.00",
+   "net_pay": "27500.00",
+   "net_pay_words": "Rupees Twenty-Seven Thousand Five Hundred Only"
+  },
+  "revision_info": {
+   "reason": "Leave approved",
+   "supersedes_id": "ab2323d1-fea0-4e44-bb2b-cd9a6431c4e4",
+   "superseded_by_id": null
+  },
+  "run_id": "edb2b823-a83b-4cfc-9d9a-dd4de8e32494",
+  "user": {
+   "id": "62acda11-38bc-477b-85f9-24ce02f2c6b6",
+   "employee_id": "EMP001",
+   "full_name": "Test Employee",
+   "department": "General",
+   "photo_url": null
+  },
+  "hold": false,
+  "version": 3,
+  "structure_id": "fc41dd2d-9274-4cca-a2f1-e3eefc08f444",
+  "lop": {
+   "auto": 0.0,
+   "override": 0.0,
+   "override_reason": "Leave approved as paid",
+   "breakdown": {
+    "unpaid_leave": 0.0,
+    "absent": 0.0,
+    "half_day_attendance": 0.0,
+    "not_employed": 0.0,
+    "pending_leave_days": 0.0
+   }
+  },
+  "inputs": {
+   "tds": "1200.00",
+   "pt_override": null,
+   "adjustments": [
+    {
+     "code": "ARREARS",
+     "label": "Arrears",
+     "amount": "2500.00"
+    }
+   ],
+   "note": null
+  },
+  "errors": [],
+  "warnings": [
+   "LOP_OVERRIDDEN"
+  ],
+  "processed_at": "2026-10-25T15:13:38Z",
+  "processed_by": {
+   "id": "7218cddc-6083-4b29-ae21-b13bb57d7178",
+   "employee_id": "ADM001",
+   "full_name": "Test Admin",
+   "department": "General",
+   "photo_url": null
+  },
+  "published_by": {
+   "id": "7218cddc-6083-4b29-ae21-b13bb57d7178",
+   "employee_id": "ADM001",
+   "full_name": "Test Admin",
+   "department": "General",
+   "photo_url": null
+  },
+  "updated_at": "2026-10-25T15:13:38Z"
+ },
+ "my_list_after": {
+  "year": 2025,
+  "items": [
+   {
+    "id": "80827f3b-f90d-4f66-9687-521e5bd6dbf7",
+    "period": "2025-06",
+    "revision": 2,
+    "published_at": "2026-10-25T15:13:38Z",
+    "revised": true,
+    "pay_date": "2025-06-30"
+   }
+  ]
+ },
+ "my_payslip_old": {
+  "id": "ab2323d1-fea0-4e44-bb2b-cd9a6431c4e4",
+  "period": "2025-06",
+  "revision": 1,
+  "status": "superseded",
+  "published_at": "2026-10-25T15:13:38Z",
+  "pay_date": "2025-06-30",
+  "company": {
+   "name": "",
+   "address": null,
+   "logo_url": null
+  },
+  "employee": {
+   "employee_id": "EMP001",
+   "full_name": "Test Employee",
+   "department": "General",
+   "designation": "Analyst",
+   "join_date": null,
+   "pan": "XXXXX1234X",
+   "uan": "100200300400",
+   "esi_ip_number": "1234567890",
+   "bank_name": "HDFC Bank",
+   "bank_account": "XXXXXXXX9012",
+   "payment_mode": "bank_transfer"
+  },
+  "days": {
+   "basis_days": 30.0,
+   "employed_days": 30.0,
+   "lop_days": 1.5,
+   "paid_days": 28.5
+  },
+  "earnings": [
+   {
+    "code": "BASIC",
+    "label": "Basic",
+    "monthly": "20000.00",
+    "amount": "19000.00"
+   },
+   {
+    "code": "HRA",
+    "label": "House Rent Allowance",
+    "monthly": "8000.00",
+    "amount": "7600.00"
+   },
+   {
+    "code": "ARREARS",
+    "label": "Arrears",
+    "monthly": null,
+    "amount": "2500.00"
+   }
+  ],
+  "deductions": [
+   {
+    "code": "PF",
+    "label": "Provident Fund",
+    "amount": "1800.00"
+   },
+   {
+    "code": "TDS",
+    "label": "Income Tax (TDS)",
+    "amount": "1200.00"
+   }
+  ],
+  "employer_contributions": [
+   {
+    "code": "PF_ER",
+    "label": "Employer PF",
+    "amount": "1800.00"
+   }
+  ],
+  "totals": {
+   "gross_earnings": "29100.00",
+   "total_deductions": "3000.00",
+   "net_pay": "26100.00",
+   "net_pay_words": "Rupees Twenty-Six Thousand One Hundred Only"
+  },
+  "revision_info": {
+   "reason": null,
+   "supersedes_id": null,
+   "superseded_by_id": "80827f3b-f90d-4f66-9687-521e5bd6dbf7"
+  }
+ },
+ "my_payslip_new": {
+  "id": "80827f3b-f90d-4f66-9687-521e5bd6dbf7",
+  "period": "2025-06",
+  "revision": 2,
+  "status": "published",
+  "published_at": "2026-10-25T15:13:38Z",
+  "pay_date": "2025-06-30",
+  "company": {
+   "name": "",
+   "address": null,
+   "logo_url": null
+  },
+  "employee": {
+   "employee_id": "EMP001",
+   "full_name": "Test Employee",
+   "department": "General",
+   "designation": "Analyst",
+   "join_date": null,
+   "pan": "XXXXX1234X",
+   "uan": "100200300400",
+   "esi_ip_number": "1234567890",
+   "bank_name": "HDFC Bank",
+   "bank_account": "XXXXXXXX9012",
+   "payment_mode": "bank_transfer"
+  },
+  "days": {
+   "basis_days": 30.0,
+   "employed_days": 30.0,
+   "lop_days": 0.0,
+   "paid_days": 30.0
+  },
+  "earnings": [
+   {
+    "code": "BASIC",
+    "label": "Basic",
+    "monthly": "20000.00",
+    "amount": "20000.00"
+   },
+   {
+    "code": "HRA",
+    "label": "House Rent Allowance",
+    "monthly": "8000.00",
+    "amount": "8000.00"
+   },
+   {
+    "code": "ARREARS",
+    "label": "Arrears",
+    "monthly": null,
+    "amount": "2500.00"
+   }
+  ],
+  "deductions": [
+   {
+    "code": "PF",
+    "label": "Provident Fund",
+    "amount": "1800.00"
+   },
+   {
+    "code": "TDS",
+    "label": "Income Tax (TDS)",
+    "amount": "1200.00"
+   }
+  ],
+  "employer_contributions": [
+   {
+    "code": "PF_ER",
+    "label": "Employer PF",
+    "amount": "1800.00"
+   }
+  ],
+  "totals": {
+   "gross_earnings": "30500.00",
+   "total_deductions": "3000.00",
+   "net_pay": "27500.00",
+   "net_pay_words": "Rupees Twenty-Seven Thousand Five Hundred Only"
+  },
+  "revision_info": {
+   "reason": "Leave approved",
+   "supersedes_id": "ab2323d1-fea0-4e44-bb2b-cd9a6431c4e4",
+   "superseded_by_id": null
+  }
+ },
+ "err": {
+  "version_conflict": [
+   409,
+   {
+    "error": {
+     "code": "VERSION_CONFLICT",
+     "message": "The payslip was changed by someone else; reload it",
+     "details": [],
+     "request_id": "f13992a3deff491c94db05bfd57a5693"
+    }
+   }
+  ],
+  "publish_unprocessed": [
+   409,
+   {
+    "error": {
+     "code": "PAYROLL_LOCKED",
+     "message": "Only a processed run can be published (it may already be published)",
+     "details": [],
+     "request_id": "e86a9ccf220d48b3a6cc2a9b8591346c"
+    }
+   }
+  ],
+  "run_exists": [
+   409,
+   {
+    "error": {
+     "code": "PAYROLL_RUN_EXISTS",
+     "message": "A payroll run for this month already exists",
+     "details": [],
+     "request_id": "0329cd6ca8144de8bd5142f87ba9c108"
+    }
+   }
+  ],
+  "invalid_period": [
+   422,
+   {
+    "error": {
+     "code": "INVALID_PERIOD",
+     "message": "period year out of range",
+     "details": [
+      {
+       "field": "period",
+       "message": "year 2000-2200"
+      }
+     ],
+     "request_id": "2f7c90aa095645ddbe9993f97e389e91"
+    }
+   }
+  ],
+  "process_twice": [
+   409,
+   {
+    "error": {
+     "code": "CONFLICT",
+     "message": "The run is processed; this action needs a draft run",
+     "details": [],
+     "request_id": "a4495afe22cd4dc0b0552ac335380009"
+    }
+   }
+  ],
+  "reopen_draft": [
+   409,
+   {
+    "error": {
+     "code": "CONFLICT",
+     "message": "The run is draft; this action needs a processed run",
+     "details": [],
+     "request_id": "e903f7bffdb74c21b11d548d82b8d30e"
+    }
+   }
+  ],
+  "reauth": [
+   403,
+   {
+    "error": {
+     "code": "REAUTH_FAILED",
+     "message": "Your password is incorrect",
+     "details": [],
+     "request_id": "1830deb83c4d4a46988e1f93b0853c7e"
+    }
+   }
+  ],
+  "locked": [
+   409,
+   {
+    "error": {
+     "code": "PAYROLL_LOCKED",
+     "message": "Only a draft payslip can be edited (reopen it first)",
+     "details": [],
+     "request_id": "2e8ff82737b448b2bb9c64c56c6d4c72"
+    }
+   }
+  ],
+  "revise_conflict": [
+   409,
+   {
+    "error": {
+     "code": "CONFLICT",
+     "message": "An open revision already exists for this employee",
+     "details": [],
+     "request_id": "bd3f16fd51ef471980adb9cfa79a1e0a"
+    }
+   }
+  ],
+  "forbidden_self": [
+   403,
+   {
+    "error": {
+     "code": "FORBIDDEN",
+     "message": "You cannot change your own payroll data",
+     "details": [],
+     "request_id": "a004eccd3e1d4cd29eeca3d096092f73"
+    }
+   }
+  ],
+  "not_found": [
+   422,
+   {
+    "error": {
+     "code": "VALIDATION_ERROR",
+     "message": "Request validation failed",
+     "details": [
+      {
+       "field": "payslip_id",
+       "message": "Input should be a valid UUID, invalid character: found `x` at 36"
+      }
+     ],
+     "request_id": "688fc45fa5f446198cb741c4c381032c"
+    }
+   }
+  ]
+ }
+}

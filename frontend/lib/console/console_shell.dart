@@ -9,6 +9,7 @@ import '../features/admin/presentation/employees_screen.dart';
 import '../features/admin/presentation/license_screen.dart';
 import '../features/admin/presentation/reset_requests_screen.dart';
 import '../features/admin/presentation/sessions_screen.dart';
+import '../features/payroll/presentation/payroll_home_screen.dart';
 import 'console_auth.dart';
 import 'pages/attendance_day_page.dart';
 import 'pages/dashboard_page.dart';
@@ -29,6 +30,8 @@ final List<ConsoleDestination> consoleDestinations = [
       () => const EmployeesScreen(),),
   ConsoleDestination('Attendance today', Icons.fact_check_outlined, AdminPerm.attendanceViewAll,
       () => const AttendanceDayPage(),),
+  ConsoleDestination('Payroll', Icons.payments_outlined, AdminPerm.payrollViewAll,
+      () => const PayrollHomeScreen(),),
   ConsoleDestination('Password resets', Icons.lock_reset, AdminPerm.employeeResetPassword,
       () => const ResetRequestsScreen(),),
   ConsoleDestination('Sessions', Icons.devices_outlined, AdminPerm.sessionManage,
