@@ -4,6 +4,7 @@ import datetime as dt
 import uuid
 
 from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, Float, Index, Integer, Text, Time, UniqueConstraint, text
+from sqlalchemy import event
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..core.crypto import EncryptedJSON
@@ -29,6 +30,10 @@ class Attendance(TimestampMixin, Base):
         CheckConstraint("minutes_late >= 0", name="ck_attendance_minutes_late"),
         CheckConstraint("worked_minutes IS NULL OR worked_minutes >= 0", name="ck_attendance_worked_minutes"),
         CheckConstraint("check_in_distance_m IS NULL OR check_in_distance_m >= 0", name="ck_attendance_distance"),
+        CheckConstraint("work_mode IN ('office','on_duty','mixed')", name="ck_attendance_work_mode"),
+        CheckConstraint("check_out_source IN ('office','on_duty')", name="ck_attendance_check_out_source"),
+        CheckConstraint("(check_out_at IS NULL) = (check_out_source IS NULL)", name="ck_attendance_check_out_source_pair"),
+        Index("ix_attendance_work_mode", "work_date", postgresql_where=text("work_mode <> 'office'")),
         Index("ix_attendance_work_date", "work_date"),
         Index("ix_attendance_status", "status"),
         Index("ix_attendance_shift_id", "shift_id"),
@@ -71,6 +76,22 @@ class Attendance(TimestampMixin, Base):
     check_in_mock_location: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     check_out_mock_location: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     suspicious: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    # On Duty (migration 0019): the row is the day summary; check_in_within_fence/check_in_distance_m stay NULL for a day that
+    # started on duty. check_out_source is NULL exactly when check_out_at is NULL.
+    work_mode: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'office'"))
+    check_out_source: Mapped[str | None] = mapped_column(Text)
+
+
+@event.listens_for(Attendance, "before_insert")
+@event.listens_for(Attendance, "before_update")
+def _attendance_default_check_out_source(_mapper, _connection, target: Attendance) -> None:
+    """Transitional safety net for the DB pairing CHECK (check_out_at IS NULL) = (check_out_source IS NULL): a closing write that
+    does not say who closed the day is an office check-out (the only kind that existed before On Duty). On Duty code sets
+    check_out_source explicitly, so this never overrides a value."""
+    if target.check_out_at is not None and target.check_out_source is None:
+        target.check_out_source = "office"
+    elif target.check_out_at is None and target.check_out_source is not None:
+        target.check_out_source = None
 
 
 class LateRecord(CreatedMixin, Base):

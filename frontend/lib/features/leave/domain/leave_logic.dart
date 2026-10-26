@@ -162,7 +162,14 @@ String leaveErrorMessage(ApiException e) {
           ? 'You do not have enough leave balance for this request.'
           : 'Not enough balance. You have ${daysLabel(left)} left for this leave type.';
     case 'OVERLAPPING_REQUEST':
-      return 'This overlaps with another pending or approved request (or approved leave) of yours.';
+      final clash = e.detail('date');
+      return clash == null
+          ? 'This overlaps with another pending or approved request (or approved leave) of yours.'
+          : 'This overlaps with another pending or approved request (or approved leave) of yours on $clash.';
+    case 'DUTY_LOCATION_UNAVAILABLE':
+      return 'That location is not available to you. Choose another or "Any assigned location".';
+    case 'ON_DUTY_DISABLED':
+      return 'On Duty is turned off, so requests cannot be made.';
     case 'PERMISSION_LIMIT_EXCEEDED':
       final f = e.details.isEmpty ? '' : e.details.first.field;
       if (f == 'count') return 'You have used all permission requests allowed this month.';
@@ -229,6 +236,8 @@ RequestPushTarget? parseRequestPush(Map<String, dynamic> data) {
     'leave_decision' => RequestPushTarget(RequestPushScreen.myRequests, kind: RequestKind.leave, id: id),
     'permission_decision' =>
       RequestPushTarget(RequestPushScreen.myRequests, kind: RequestKind.permission, id: id),
+    'on_duty_decision' =>
+      RequestPushTarget(RequestPushScreen.myRequests, kind: RequestKind.onDuty, id: id),
     _ => null,
   };
 }

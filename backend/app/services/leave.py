@@ -249,6 +249,11 @@ async def _render(session: AsyncSession, rows: list, *, admin: bool) -> list[dic
         ctypes = {
             fid: ct for fid, ct in (await session.execute(select(File.id, File.content_type).where(File.id.in_(file_ids)))).all()
         }
+    conflicts: dict[uuid.UUID, bool] = {}
+    if admin:
+        from . import on_duty as od_svc  # lazy: on_duty imports this module
+
+        conflicts = await od_svc.conflict_flags(session, [r for r in rows if isinstance(r, LeaveRequest)])
     out = []
     for r in rows:
         tail = {
@@ -273,6 +278,8 @@ async def _render(session: AsyncSession, rows: list, *, admin: bool) -> list[dic
                 "attachment_content_type": ctypes.get(r.attachment_file_id) if r.attachment_file_id else None,
                 **tail,
             }
+            if admin:
+                item["on_duty_conflict"] = conflicts.get(r.id, False)
         else:
             item = {
                 "id": str(r.id),
@@ -924,6 +931,9 @@ async def cancel_pending_for_user(session: AsyncSession, user: User, actor: Prin
             after={"status": "cancelled", "reason": why, "owner": user.employee_id},
         )
         n += 1
+    from . import on_duty as od_svc  # lazy: on_duty imports this module
+
+    n += await od_svc.cancel_pending_for_user(session, user, actor, why=why)
     await session.flush()
     return n
 
@@ -956,6 +966,10 @@ async def _audit_denied(session: AsyncSession, actor: Principal, kind: str, req_
 async def decide(
     session: AsyncSession, actor: Principal, kind: str, req_id: uuid.UUID, *, approve: bool, comment: str | None
 ) -> dict[str, Any]:
+    if kind == "on_duty":  # plan 13: same flow, own tables
+        from . import on_duty as od_svc  # lazy: on_duty imports this module
+
+        return await od_svc.decide(session, actor, req_id, approve=approve, comment=comment)
     decision = "approve" if approve else "reject"
     # 1) authorise on an UNLOCKED read: unknown and out-of-scope ids look identical (404); denied attempts are audited
     probe = await session.get(KINDS[kind], req_id)

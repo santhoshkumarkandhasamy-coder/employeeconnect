@@ -128,7 +128,7 @@ async def test_workday_flow_login_punch_late_leave_approval_export(client, H, cl
     assert r.status_code == 200, r.text
     assert r.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     wb = load_workbook(io.BytesIO(r.content))
-    assert wb.sheetnames == ["Attendance", "Leave", "Late", "Permission"]
+    assert wb.sheetnames == ["Attendance", "Leave", "Late", "Permission", "On Duty"]
     att = sheet_rows(r.content, "Attendance")
     assert len(att) == 1 and att[0]["Employee ID"] == "EMP001" and att[0]["Status"] == "late" and att[0]["Minutes Late"] == 30
     lv = sheet_rows(r.content, "Leave")

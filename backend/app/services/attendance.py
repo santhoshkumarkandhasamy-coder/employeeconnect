@@ -28,12 +28,14 @@ from ..models import (
     LateRecord,
     LeaveRequest,
     LeaveType,
+    OnDutyVisit,
     PermissionRequest,
     Setting,
     Shift,
     User,
 )
 from . import files as files_svc
+from . import punch
 
 log = logging.getLogger("app.attendance")
 
@@ -57,8 +59,6 @@ _MONTH = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])$")
 DEFAULT_WORKING_DAYS = (1, 2, 3, 4, 5)
 MAX_RANGE_DAYS = 366  # cap for team / admin list queries
 OVERNIGHT_BUFFER = dt.timedelta(hours=4)  # a night-shift record may be closed this long after the shift ends
-SELFIE_CLOCK_TOLERANCE_S = 60
-PUNCH_FAIL_CODES = frozenset({"OUTSIDE_GEOFENCE", "LOCATION_ACCURACY_LOW", "LOCATION_FIX_STALE", "MOCK_LOCATION_DETECTED"})
 
 
 # ---------------------------------------------------------------- settings / time helpers
@@ -168,8 +168,11 @@ def user_summary(u: User, photo_file_id: uuid.UUID | None = None) -> dict[str, A
     }
 
 
-def _record_out(a: Attendance, shift: Shift | None, expose_distance: bool = False) -> dict[str, Any]:
-    """`distance_m` is only exposed to HR/admin viewers (to an employee it would map the office boundary)."""
+def _record_out(
+    a: Attendance, shift: Shift | None, expose_distance: bool = False, on_duty_locations: list[str] | None = None
+) -> dict[str, Any]:
+    """`distance_m` is only exposed to HR/admin viewers (to an employee it would map the office boundary).
+    `within_fence` is null for a day that started with a visit (no office check-in)."""
     return {
         "id": str(a.id),
         "work_date": a.work_date.isoformat(),
@@ -182,6 +185,9 @@ def _record_out(a: Attendance, shift: Shift | None, expose_distance: bool = Fals
         "distance_m": a.check_in_distance_m if expose_distance else None,
         "selfie_url": f"/api/files/{a.check_in_selfie_file_id}" if a.check_in_selfie_file_id else None,
         "auto_closed": a.auto_closed,
+        "work_mode": a.work_mode,
+        "check_out_source": a.check_out_source,
+        "on_duty_locations": list(on_duty_locations or []),
         "shift": (
             {"start": _fmt_hm(shift.start_time), "end": _fmt_hm(shift.end_time), "grace_minutes": shift.grace_minutes}
             if shift
@@ -195,59 +201,49 @@ async def _records_out(session: AsyncSession, rows: list[Attendance], expose_dis
     shifts: dict[uuid.UUID, Shift] = {}
     if ids:
         shifts = {s.id: s for s in (await session.execute(select(Shift).where(Shift.id.in_(ids)))).scalars()}
-    return [_record_out(a, shifts.get(a.shift_id), expose_distance) for a in rows]
+    locs = await visit_locations(session, [a.id for a in rows])
+    return [_record_out(a, shifts.get(a.shift_id), expose_distance, locs.get(a.id)) for a in rows]
 
 
-# ---------------------------------------------------------------- punch validation
-async def _validate_selfie(
-    session: AsyncSession,
-    actor: Principal,
-    file_id: uuid.UUID | None,
-    required: bool,
-    cfg: dict[str, Any],
-    now: dt.datetime,
-) -> uuid.UUID | None:
-    """Owner + purpose + freshness + single use (a selfie is bound to exactly one punch of its owner)."""
-    if file_id is None:
-        if required:
-            raise AppError("SELFIE_REQUIRED", "A selfie is required to mark attendance")
-        return None
-    f = await session.get(File, file_id)
-    if f is None or f.owner_id != actor.id or f.purpose != "selfie":
-        raise AppError(
-            "VALIDATION_ERROR", "Invalid selfie file", details=[{"field": "selfie_file_id", "message": "unknown or not yours"}]
+async def visit_locations(session: AsyncSession, attendance_ids: list[uuid.UUID]) -> dict[uuid.UUID, list[str]]:
+    """attendance id -> distinct visit location names (first-visit order). Office-only days are absent."""
+    out: dict[uuid.UUID, list[str]] = {}
+    ids = list(set(attendance_ids))
+    for i in range(0, len(ids), 500):
+        q = (
+            select(OnDutyVisit.attendance_id, OnDutyVisit.location_name)
+            .where(OnDutyVisit.attendance_id.in_(ids[i : i + 500]))
+            .order_by(OnDutyVisit.check_in_at)
         )
-    age = (now - as_utc(f.created_at)).total_seconds()  # type: ignore[operator]
-    if age > float(cfg["attendance.selfie_max_age_s"]) or age < -SELFIE_CLOCK_TOLERANCE_S:
-        raise AppError(
-            "SELFIE_STALE", "This selfie is too old. Take a new one.", details=[{"field": "selfie_file_id", "message": "stale"}]
-        )
-    used = await session.execute(
-        select(Attendance.id)
-        .where(or_(Attendance.check_in_selfie_file_id == f.id, Attendance.check_out_selfie_file_id == f.id))
-        .limit(1)
-    )
-    if used.first() is not None:
-        raise AppError(
-            "SELFIE_REUSED",
-            "This selfie was already used. Take a new one.",
-            details=[{"field": "selfie_file_id", "message": "already used"}],
-        )
-    return f.id
+        for aid, name in (await session.execute(q)).all():
+            names = out.setdefault(aid, [])
+            if name not in names:
+                names.append(name)
+    return out
 
 
-def _skew_s(body: Any, now: dt.datetime) -> int | None:
-    if body.client_time is None:
-        return None
-    return int((now - as_utc(body.client_time)).total_seconds())  # type: ignore[operator]
+def apply_close(rec: Attendance, cfg: dict[str, Any], closed_at: dt.datetime) -> None:
+    """Set check_out_at = max(existing, closed_at) bookkeeping done by the caller; recompute worked minutes and status.
+    Status is re-evaluated on EVERY closing punch: late/present from the check-in, then half_day below the threshold."""
+    ci = as_utc(rec.check_in_at)
+    out = as_utc(rec.check_out_at)
+    worked = max(0, int((out - ci).total_seconds() // 60))  # type: ignore[operator]
+    rec.worked_minutes = worked
+    rec.status = "late" if rec.minutes_late else "present"
+    if worked < int(cfg["attendance.half_day_minutes"]):
+        rec.status = "half_day"
 
 
-def _log_diagnostics(actor: Principal, body: Any, now: dt.datetime) -> None:
-    skew = _skew_s(body, now)
-    if skew is not None and abs(skew) > 300:
-        log.warning("client clock skew %ds for user %s", abs(skew), actor.id)
-    if body.is_mock_location:
-        log.warning("mock location flag reported by user %s", actor.id)
+# ---------------------------------------------------------------- punch validation (shared with On Duty: services/punch.py)
+_validate_selfie = punch.validate_selfie
+_skew_s = punch.skew_s
+_log_diagnostics = punch.log_diagnostics
+_require_fix = punch.require_fix
+_enforce_mock = punch.enforce_mock
+_enforce_accuracy = punch.enforce_accuracy
+_audit_reject = punch.audit_reject
+PUNCH_FAIL_CODES = punch.PUNCH_FAIL_CODES
+SELFIE_CLOCK_TOLERANCE_S = punch.SELFIE_CLOCK_TOLERANCE_S
 
 
 def _fence(cfg: dict[str, Any], body: Any) -> tuple[int, bool, int]:
@@ -256,57 +252,11 @@ def _fence(cfg: dict[str, Any], body: Any) -> tuple[int, bool, int]:
     return int(round(dist)), dist <= radius, radius
 
 
-def _require_fix(cfg: dict[str, Any], body: Any, now: dt.datetime) -> None:
-    """accuracy_m and a fresh fix_time are mandatory; server time is the reference (the client clock is never trusted)."""
-    missing = [f for f in ("accuracy_m", "fix_time") if getattr(body, f) is None]
-    if missing:
-        raise AppError(
-            "VALIDATION_ERROR",
-            "Location accuracy and fix time are required",
-            details=[{"field": f, "message": "required"} for f in missing],
-        )
-    age = (now - as_utc(body.fix_time)).total_seconds()  # type: ignore[operator]
-    if age > float(cfg["attendance.max_fix_age_s"]) or age < -float(cfg["attendance.max_fix_future_s"]):
-        raise AppError(
-            "LOCATION_FIX_STALE",
-            "Your location reading is out of date. Wait for a fresh GPS fix and try again.",
-            details=[{"field": "fix_time", "message": "stale" if age > 0 else "in the future"}],
-        )
-
-
-def _enforce_mock(cfg: dict[str, Any], body: Any) -> None:
-    if body.is_mock_location and cfg["attendance.reject_mock_location"]:
-        raise AppError("MOCK_LOCATION_DETECTED", "Mock or simulated locations are not allowed for attendance")
-
-
-def _enforce_accuracy(cfg: dict[str, Any], body: Any) -> None:
-    mx = float(cfg["attendance.max_accuracy_m"])
-    if body.accuracy_m is None or body.accuracy_m > mx:
-        raise AppError(
-            "LOCATION_ACCURACY_LOW",
-            "Location accuracy is too low. Move to an open area and try again.",
-            details=[{"field": "accuracy_m", "message": "too low"}],
-        )
-
-
 def _outside() -> AppError:
     # Deliberately no distance/radius: exact values let a client trilaterate the office and bisect the boundary.
     return AppError(
         "OUTSIDE_GEOFENCE", "You are outside the office area", details=[{"field": "within_fence", "message": "false"}]
     )
-
-
-async def _audit_reject(session: AsyncSession, actor: Principal, kind: str, reason: str) -> None:
-    """Refused punches are audited (reason only, never coordinates) and committed before the error is raised."""
-    audit(
-        session,
-        action="attendance.punch_rejected",
-        actor=actor,
-        entity_type="attendance",
-        after={"kind": kind, "reason": reason},
-        outcome="failure",
-    )
-    await session.commit()
 
 
 def is_overnight(shift: Shift | None) -> bool:
@@ -453,13 +403,24 @@ async def check_out(session: AsyncSession, actor: Principal, body: Any) -> dict[
     cfg = await load_settings(session)
     local = now.astimezone(office_tz(cfg))
     work_date = local.date()
+    open_visit = (
+        await session.execute(
+            select(OnDutyVisit.id).where(
+                OnDutyVisit.user_id == user.id, OnDutyVisit.check_out_at.is_(None), OnDutyVisit.auto_closed.is_(False)
+            )
+        )
+    ).scalar_one_or_none()
+    if open_visit is not None:  # "End day" is refused while a visit is open; checked first and not counted as a failure
+        raise AppError(
+            "VISIT_OPEN", "Check out of your on-duty visit first", details=[{"field": "visit_id", "message": str(open_visit)}]
+        )
     q = select(Attendance).where(Attendance.user_id == user.id, Attendance.work_date == work_date).with_for_update()
     rec = (await session.execute(q)).scalar_one_or_none()
     if rec is None:  # night shift: check-out after midnight belongs to yesterday's open record
         rec = await _open_overnight_record(session, user.id, local, lock=True)
     if rec is None:
         raise AppError("NOT_CHECKED_IN", "You have not checked in today")
-    if rec.check_out_at is not None:
+    if rec.check_out_source == "office":  # a check-out time set by a visit does not block the office check-out
         await _audit_reject(session, actor, "check_out", "ALREADY_CHECKED_OUT")
         raise AppError("ALREADY_CHECKED_OUT", "You have already checked out today")
     mock = bool(body.is_mock_location)
@@ -479,8 +440,11 @@ async def check_out(session: AsyncSession, actor: Principal, body: Any) -> dict[
     ci = as_utc(rec.check_in_at)
     if now <= ci:  # type: ignore[operator]
         raise AppError("BAD_REQUEST", "Check-out must be after check-in")
-    worked = int((now - ci).total_seconds() // 60)  # type: ignore[operator]
-    rec.check_out_at = now
+    existing = as_utc(rec.check_out_at)
+    rec.check_out_at = max(existing, now) if existing is not None else now  # type: ignore[type-var]
+    rec.check_out_source = "office"
+    if rec.work_mode == "on_duty":
+        rec.work_mode = "mixed"
     rec.check_out_loc = {"lat": body.lat, "lng": body.lng, "accuracy_m": body.accuracy_m}
     rec.check_out_selfie_file_id = selfie_id
     rec.check_out_mock_location = mock
@@ -488,16 +452,15 @@ async def check_out(session: AsyncSession, actor: Principal, body: Any) -> dict[
         rec.suspicious = True
         audit(session, action="attendance.suspicious_punch", actor=actor, entity_type="attendance", entity_id=rec.id,
               after={"kind": "check_out", "reason": "mock_flag"})  # fmt: skip
-    rec.worked_minutes = worked
-    if worked < int(cfg["attendance.half_day_minutes"]):
-        rec.status = "half_day"
+    apply_close(rec, cfg, rec.check_out_at)
     shift = await session.get(Shift, rec.shift_id) if rec.shift_id else None
     try:
         await session.commit()
     except IntegrityError:
         await session.rollback()
         raise AppError("SELFIE_REUSED", "This selfie was already used. Take a new one.") from None
-    return _record_out(rec, shift)
+    locs = await visit_locations(session, [rec.id])
+    return _record_out(rec, shift, on_duty_locations=locs.get(rec.id))
 
 
 async def today(session: AsyncSession, actor: Principal) -> dict[str, Any]:
@@ -611,6 +574,7 @@ async def _month_days(session: AsyncSession, user: User, month: str | None) -> t
                 "status": status,
                 "holiday_name": holiday_name,
                 "leave_type": leave_type if covered else None,
+                "on_duty": d in recs and recs[d].work_mode in ("on_duty", "mixed"),
             }
         )
         d += dt.timedelta(days=1)
@@ -629,7 +593,8 @@ async def summary(session: AsyncSession, actor: Principal, month: str | None) ->
     for d in days:
         if d["status"] in counts:
             counts[d["status"]] += 1
-    return {"month": m, **counts, "total_worked_minutes": sum(a.worked_minutes or 0 for a in recs)}
+    on_duty_days = sum(1 for a in recs if a.work_mode in ("on_duty", "mixed"))
+    return {"month": m, **counts, "total_worked_minutes": sum(a.worked_minutes or 0 for a in recs), "on_duty_days": on_duty_days}
 
 
 # ---------------------------------------------------------------- holidays
@@ -731,6 +696,25 @@ async def auto_close_open_records(session: AsyncSession, now: dt.datetime | None
             entity_type="attendance",
             after={"count": closed, "before_date": today_d.isoformat()},
         )
+    # On Duty (plan 13 s.5): a visit still open on a past day is flagged (check_out_at stays NULL) so HR can review it.
+    visits = list(
+        (
+            await session.execute(
+                select(OnDutyVisit)
+                .where(OnDutyVisit.check_out_at.is_(None), OnDutyVisit.auto_closed.is_(False), OnDutyVisit.work_date < today_d)
+                .with_for_update(skip_locked=True)
+            )
+        ).scalars()
+    )
+    for v in visits:
+        v.auto_closed = True
+    if visits:
+        audit(
+            session,
+            action="on_duty.auto_close",
+            entity_type="on_duty_visit",
+            after={"count": len(visits), "before_date": today_d.isoformat()},
+        )
     await session.commit()
     return closed
 
@@ -742,6 +726,7 @@ async def purge_pii(session: AsyncSession, now: dt.datetime | None = None, batch
     cfg = await load_settings(session)
     today_d = now.astimezone(office_tz(cfg)).date()
     out = {"locations": 0, "selfies": 0}
+    visit_locs = visit_selfies = 0
 
     loc_days = int(cfg["attendance.location_retention_days"])
     if loc_days > 0:
@@ -756,6 +741,17 @@ async def purge_pii(session: AsyncSession, now: dt.datetime | None = None, batch
             .execution_options(synchronize_session=False)
         )
         out["locations"] = res.rowcount or 0
+        res_v = await session.execute(
+            update(OnDutyVisit)
+            .where(
+                OnDutyVisit.work_date < cutoff,
+                or_(OnDutyVisit.check_in_loc.is_not(None), OnDutyVisit.check_out_loc.is_not(None)),
+            )
+            .values(check_in_loc=None, check_out_loc=None)
+            .execution_options(synchronize_session=False)
+        )
+        visit_locs = res_v.rowcount or 0
+        out["locations"] += visit_locs
 
     selfie_days = int(cfg["attendance.selfie_retention_days"])
     if selfie_days > 0:
@@ -780,6 +776,38 @@ async def purge_pii(session: AsyncSession, now: dt.datetime | None = None, batch
                 log.error("selfie %s has an invalid storage path; row dropped only", f.id)
             await session.delete(f)
             out["selfies"] += 1
+        # visit selfies: same retention, same day counts
+        vq = (
+            select(File)
+            .join(
+                OnDutyVisit,
+                or_(OnDutyVisit.check_in_selfie_file_id == File.id, OnDutyVisit.check_out_selfie_file_id == File.id),
+            )
+            .where(File.purpose == "selfie", OnDutyVisit.work_date < cutoff)
+            .distinct()
+            .limit(batch)
+        )
+        for f in (await session.execute(vq)).scalars().all():
+            await session.execute(
+                update(OnDutyVisit).where(OnDutyVisit.check_in_selfie_file_id == f.id).values(check_in_selfie_file_id=None)
+            )
+            await session.execute(
+                update(OnDutyVisit).where(OnDutyVisit.check_out_selfie_file_id == f.id).values(check_out_selfie_file_id=None)
+            )
+            try:
+                await asyncio.to_thread(files_svc._unlink, files_svc._resolve(f.storage_path))
+            except AppError:
+                log.error("selfie %s has an invalid storage path; row dropped only", f.id)
+            await session.delete(f)
+            out["selfies"] += 1
+            visit_selfies += 1
+    if visit_locs or visit_selfies:
+        audit(
+            session,
+            action="on_duty.retention_purge",
+            entity_type="on_duty_visit",
+            after={"loc_rows": visit_locs, "selfie_files": visit_selfies},
+        )
     if any(out.values()):
         audit(
             session,

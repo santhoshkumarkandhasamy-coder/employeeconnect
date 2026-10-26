@@ -223,7 +223,13 @@ async def test_home_payload_shape(client, H):
         "food_today",
         "celebrations",
     }
-    assert j["today_attendance"] == {"check_in_at": None, "check_out_at": None, "status": None}
+    assert j["today_attendance"] == {
+        "check_in_at": None,
+        "check_out_at": None,
+        "status": None,
+        "work_mode": None,
+        "open_visit": None,
+    }
     assert isinstance(j["leave_balances"], list) and set(j["permission_remaining"]) == {"count", "minutes"}
     assert j["unread_announcements"] == 0 and j["pending_requests"] == 0
     assert set(j["food_today"]) == {"date", "need_food", "can_change"} and j["celebrations"] == []

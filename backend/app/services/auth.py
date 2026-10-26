@@ -659,10 +659,13 @@ def _clamp_minutes(value: Any, default: int = 5, lo: int = 1, hi: int = 30) -> i
         return default
 
 
-async def client_config(session: AsyncSession) -> dict[str, Any]:
+async def client_config(session: AsyncSession, principal: Principal | None = None) -> dict[str, Any]:
     rows = {r.key: r.value for r in (await session.execute(select(Setting))).scalars()}
     v = {k: rows.get(k, d) for k, d in _CONFIG_DEFAULTS.items()}
+    from . import on_duty as od_svc  # lazy: on_duty imports services that import this module
+
     return {
+        "on_duty": await od_svc.config_block(session, principal),
         "food": {"cutoff_mode": v["food.cutoff_mode"], "cutoff_time": v["food.cutoff_time"]},
         "office": {
             "lat": v["office.lat"],

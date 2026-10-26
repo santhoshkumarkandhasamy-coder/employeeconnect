@@ -65,7 +65,11 @@ class RequestTile extends StatelessWidget {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(item.kind == RequestKind.leave ? Icons.beach_access_outlined : Icons.timer_outlined),
+                Icon(switch (item.kind) {
+                  RequestKind.leave => Icons.beach_access_outlined,
+                  RequestKind.permission => Icons.timer_outlined,
+                  RequestKind.onDuty => Icons.work_outline,
+                }),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
@@ -137,9 +141,16 @@ class RequestDetailBody extends StatelessWidget {
           if (showUser && item.user != null)
             row('Employee', '${item.user!.display} (${item.user!.employeeId})'
                 '${item.user!.department == null ? '' : ', ${item.user!.department}'}'),
-          row(item.kind == RequestKind.leave ? 'Dates' : 'When', item.whenText),
-          row(item.kind == RequestKind.leave ? 'Days' : 'Duration', item.amountText),
-          row('Reason', item.reason.isEmpty ? 'Not available (offline or removed after retention)' : item.reason),
+          row(item.kind == RequestKind.permission ? 'When' : 'Dates', item.whenText),
+          row(item.kind == RequestKind.permission ? 'Duration' : 'Days', item.amountText),
+          if (item.isOnDuty) row('Location', item.locationText),
+          if (item.kind == RequestKind.leave && item.onDutyConflict && showUser)
+            row('Note', 'An approved On Duty request overlaps these dates. Approving this leave '
+                'means the employee cannot check in on those days.'),
+          row(
+            item.isOnDuty ? 'Purpose' : 'Reason',
+            item.reason.isEmpty ? 'Not available (offline or removed after retention)' : item.reason,
+          ),
           if (item.hasAttachment) ...[
             row('Attachment', 'Attached'),
             AttachmentButton(item: item),

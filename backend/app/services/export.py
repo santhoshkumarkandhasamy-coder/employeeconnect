@@ -70,6 +70,7 @@ SHEETS: dict[str, SheetBuilder] = {
     "late": export_sheets.late_sheet,
     "permission": export_sheets.permission_sheet,
     "food": food_export.food_sheet,
+    "on_duty": export_sheets.on_duty_sheet,
 }
 
 # Holding ANY of the listed permissions allows the type (on top of export.all / export.team, which decide the scope).
@@ -79,10 +80,11 @@ TYPE_PERMISSIONS: dict[str, tuple[str, ...]] = {
     "late": ("late.view_all", "late.view_team"),
     "permission": ("request.view_all", "request.view_team"),
     "food": ("food.view_all",),
+    "on_duty": ("attendance.view_all", "attendance.view_team"),
 }
 SENSITIVE_PERMISSION = "export.sensitive"  # needed for include_reasons=true
-SENSITIVE_TYPES = ("leave", "permission")  # the sheets that have Reason / Decision Comment columns
-ALL_TYPES = ("attendance", "leave", "late", "permission")  # sheets of type=all (food excluded)
+SENSITIVE_TYPES = ("leave", "permission", "on_duty")  # the sheets that have Reason / Decision Comment columns
+ALL_TYPES = ("attendance", "leave", "late", "permission", "on_duty")  # sheets of type=all (food excluded)
 
 
 def types_for(requested: str) -> list[str]:

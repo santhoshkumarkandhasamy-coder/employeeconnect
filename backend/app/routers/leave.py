@@ -16,6 +16,7 @@ from ..core.rbac import Principal, require_permission
 from ..core.redis import get_redis
 from ..schemas.leave import ApproveBody, LeaveApply, PermissionApply, RejectBody
 from ..services import leave as svc
+from ..services import on_duty as od_svc
 
 router = APIRouter(tags=["leave"])
 Self = Depends(require_permission())
@@ -108,7 +109,7 @@ _make_mine("permission", "permission")
 @router.get("/admin/requests")
 async def admin_requests(
     params: PageParams = Depends(),
-    type: Literal["leave", "permission"] = "leave",
+    type: Literal["leave", "permission", "on_duty"] = "leave",
     status: str | None = Query(None, max_length=16),
     department_id: uuid.UUID | None = None,
     employee_id: str | None = Query(None, max_length=32),
@@ -117,6 +118,10 @@ async def admin_requests(
     session: AsyncSession = Depends(get_session),
     actor: Principal = Depends(require_permission("request.view_team", "request.view_all")),
 ):
+    if type == "on_duty":
+        return await od_svc.admin_list(
+            session, actor, params, status=status, department_id=department_id, employee_id=employee_id, d_from=from_, d_to=to
+        )
     return await svc.admin_list(
         session,
         actor,
@@ -135,7 +140,7 @@ _APPROVE = Depends(require_permission("request.approve_team", "request.approve_a
 
 @router.put("/admin/requests/{type}/{req_id}/approve")
 async def approve(
-    type: Literal["leave", "permission"],
+    type: Literal["leave", "permission", "on_duty"],
     req_id: uuid.UUID,
     body: ApproveBody | None = None,
     session: AsyncSession = Depends(get_session),
@@ -148,7 +153,7 @@ async def approve(
 
 @router.put("/admin/requests/{type}/{req_id}/reject")
 async def reject(
-    type: Literal["leave", "permission"],
+    type: Literal["leave", "permission", "on_duty"],
     req_id: uuid.UUID,
     body: RejectBody,
     session: AsyncSession = Depends(get_session),

@@ -19,6 +19,7 @@ from ..models import Setting
 from . import attendance as att
 from . import food as food_svc
 from . import leave as leave_svc
+from . import on_duty as od_svc
 from .auth import _CONFIG_DEFAULTS
 
 KNOWN: dict[str, Any] = {
@@ -26,6 +27,7 @@ KNOWN: dict[str, Any] = {
     **{k: v for k, v in _CONFIG_DEFAULTS.items() if v is not None},
     **food_svc.FOOD_DEFAULTS,
     **leave_svc._DEFAULTS,
+    **od_svc.DEFAULTS,
     "console.session_max_hours": 12,
     "console.inactivity_timeout_minutes": 15,
 }
@@ -71,6 +73,14 @@ SPECS: dict[str, Spec] = {
     "leave.allow_cancel_approved": Spec("bool"),
     "leave.max_advance_days": _i(0, 3650),  # 0 = no horizon
     "leave.reason_retention_days": _i(0, 3650),  # 0 = keep forever
+    "on_duty.enabled": Spec("bool"),
+    "on_duty.approval_required": Spec("bool"),
+    "on_duty.apply_late_rule": Spec("bool"),
+    "on_duty.checkout_geofence": Spec("bool"),
+    "on_duty.selfie_required": Spec("bool"),
+    "on_duty.max_visits_per_day": _i(1, 50),
+    "on_duty.request_backdate_days": _i(0, 30),
+    "on_duty.request_max_advance_days": _i(1, 365),
     "auth.offline_cache_max_hours": _i(0, 720),  # 0 = off, otherwise 12..720 (checked in validate)
     "console.session_max_hours": _i(1, 24),
     "console.inactivity_timeout_minutes": _i(5, 60),

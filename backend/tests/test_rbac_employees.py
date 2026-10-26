@@ -253,5 +253,6 @@ async def test_config_endpoint_returns_defaults(client):
     t = await login_tokens(client, "EMP001")
     c = (await client.get("/api/config", headers=bearer(t))).json()
     assert c["auth"]["inactivity_timeout_minutes"] == 5 and c["food"]["cutoff_time"] == "18:00"
-    assert set(c) == {"food", "office", "attendance", "auth", "permission", "company"}
+    assert set(c) == {"food", "office", "attendance", "auth", "permission", "company", "on_duty"}
+    assert c["on_duty"]["enabled"] is True and c["on_duty"]["has_locations"] is False
     assert c["auth"]["offline_cache_max_hours"] == 72 and c["company"]["configured"] is False

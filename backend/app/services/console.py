@@ -20,6 +20,8 @@ from ..models import (
     FoodEnrollment,
     LeaveRequest,
     LeaveType,
+    OnDutyRequest,
+    OnDutyVisit,
     PasswordResetRequest,
     PermissionRequest,
     RefreshToken,
@@ -28,7 +30,7 @@ from ..models import (
 from . import attendance as att
 from . import license as license_svc
 
-DAY_STATUSES = ("all", "checked_in", "late", "not_checked_in", "on_leave")
+DAY_STATUSES = ("all", "checked_in", "late", "not_checked_in", "on_leave", "on_duty")
 MAX_PAST_DAYS = 366
 
 
@@ -74,6 +76,7 @@ async def day_rows(session: AsyncSession, day: dt.date, conds: list) -> list[dic
             )
         )
         leaves.update({uid: code for uid, code in (await session.execute(q)).all()})
+    visit_names = await att.visit_locations(session, [a.id for a in recs.values() if a.work_mode != "office"])
     is_holiday = day in await att.holiday_map(session, day, day)
     out = []
     for u in users:
@@ -96,6 +99,8 @@ async def day_rows(session: AsyncSession, day: dt.date, conds: list) -> list[dic
                 "check_out_at": iso_z(a.check_out_at) if a and a.check_out_at else None,
                 "minutes_late": a.minutes_late if a else 0,
                 "leave_type": leaves.get(u.id) if status == "on_leave" else None,
+                "work_mode": a.work_mode if a else None,
+                "on_duty_locations": visit_names.get(a.id, []) if a else [],
             }
         )
     return out
@@ -108,6 +113,7 @@ def _matches(status_filter: str, status: str) -> bool:
         "late": status == "late",
         "not_checked_in": status == "not_checked_in",
         "on_leave": status == "on_leave",
+        "on_duty": False,  # decided on work_mode in attendance_day
     }[status_filter]
 
 
@@ -134,7 +140,10 @@ async def attendance_day(
         esc = q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         like = f"%{esc}%"
         conds.append(or_(User.employee_id.ilike(like, escape="\\"), User.full_name.ilike(like, escape="\\")))
-    rows = [r for r in await day_rows(session, day, conds) if _matches(status, r["status"])]
+    if status == "on_duty":
+        rows = [r for r in await day_rows(session, day, conds) if r["work_mode"] in ("on_duty", "mixed")]
+    else:
+        rows = [r for r in await day_rows(session, day, conds) if _matches(status, r["status"])]
     page = rows[params.offset : params.offset + params.page_size]
     items = [{"user": att.user_summary(r.pop("_user")), **r} for r in page]
     return make_page(items, params, len(rows))
@@ -168,6 +177,16 @@ async def dashboard(session: AsyncSession, actor: Principal) -> dict[str, Any]:
             "late": n("late"),
             "on_leave": n("on_leave"),
             "not_checked_in": n("not_checked_in"),
+            "on_duty": sum(1 for r in rows if r["work_mode"] in ("on_duty", "mixed")),
+            "on_duty_open": int(
+                (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(OnDutyVisit)
+                        .where(OnDutyVisit.check_out_at.is_(None), OnDutyVisit.auto_closed.is_(False))
+                    )
+                ).scalar_one()
+            ),
         }
     else:
         out["attendance"] = None
@@ -181,7 +200,10 @@ async def dashboard(session: AsyncSession, actor: Principal) -> dict[str, Any]:
                 select(func.count()).select_from(PermissionRequest).where(PermissionRequest.status == "pending")
             )
         ).scalar_one()
-        out["requests"] = {"leave_pending": lp, "permission_pending": pp}
+        odp = (
+            await session.execute(select(func.count()).select_from(OnDutyRequest).where(OnDutyRequest.status == "pending"))
+        ).scalar_one()
+        out["requests"] = {"leave_pending": lp, "permission_pending": pp, "on_duty_pending": odp}
     else:
         out["requests"] = None
 

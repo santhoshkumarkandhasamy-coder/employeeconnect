@@ -3,8 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/api/api_exception.dart';
 import '../../../core/widgets/state_views.dart';
-import '../../auth/presentation/auth_controller.dart';
-import '../../auth/presentation/auth_state.dart';
+import '../../admin/presentation/admin_widgets.dart' show adminPermissionsProvider, adminSelfIdProvider;
 import '../domain/leave_logic.dart';
 import '../domain/leave_models.dart';
 import 'leave_providers.dart';
@@ -28,8 +27,10 @@ class _ApprovalsScreenState extends ConsumerState<ApprovalsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final user = ref.watch(authControllerProvider.select((s) => s is AuthAuthenticated ? s.user : null));
-    final perms = user?.permissions ?? const <String>[];
+    // The admin providers read the mobile session by default and the console
+    // session when overridden, so this screen works in both.
+    final selfId = ref.watch(adminSelfIdProvider);
+    final perms = ref.watch(adminPermissionsProvider);
     final canDecide = canDecideRequests(perms);
     final async = ref.watch(approvalsProvider(_query));
 
@@ -51,7 +52,7 @@ class _ApprovalsScreenState extends ConsumerState<ApprovalsScreen> {
     }
 
     void open(RequestItem item) {
-      final own = user != null && item.user?.id == user.id;
+      final own = selfId != null && item.user?.id == selfId;
       showRequestSheet(
         context,
         RequestDetailBody(
@@ -93,6 +94,7 @@ class _ApprovalsScreenState extends ConsumerState<ApprovalsScreen> {
               segments: const [
                 ButtonSegment(value: RequestKind.leave, label: Text('Leave')),
                 ButtonSegment(value: RequestKind.permission, label: Text('Permission')),
+                ButtonSegment(value: RequestKind.onDuty, label: Text('On duty')),
               ],
               selected: {_kind},
               onSelectionChanged: (s) => setState(() => _kind = s.first),
@@ -230,6 +232,14 @@ class _DecisionDialogState extends State<DecisionDialog> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text('$who, ${widget.item.title}, ${widget.item.whenText}'),
+            if (approve && widget.item.kind == RequestKind.leave && widget.item.onDutyConflict) ...[
+              const SizedBox(height: 8),
+              Text(
+                'This employee has an approved On Duty request on these dates. If you approve '
+                'the leave, they will not be able to check in on those days.',
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ],
             const SizedBox(height: 12),
             TextFormField(
               controller: _comment,
