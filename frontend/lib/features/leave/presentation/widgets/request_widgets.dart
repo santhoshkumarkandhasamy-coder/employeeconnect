@@ -69,7 +69,7 @@ class RequestTile extends StatelessWidget {
                   RequestKind.leave => Icons.beach_access_outlined,
                   RequestKind.permission => Icons.timer_outlined,
                   RequestKind.onDuty => Icons.work_outline,
-                }),
+                },),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(

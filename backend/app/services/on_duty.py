@@ -57,6 +57,7 @@ DEFAULTS: dict[str, Any] = {
     "on_duty.max_visits_per_day": 10,
     "on_duty.request_backdate_days": 0,
     "on_duty.request_max_advance_days": 60,
+    loc_svc.ALL_MODE_MAX_RADIUS_KEY: loc_svc.ALL_MODE_MAX_RADIUS_DEFAULT,  # review 11 M2: radius cap for assign_mode 'all'
 }
 MAX_REQUEST_DAYS = 31
 MAX_VISIT_HISTORY_DAYS = 93
@@ -92,6 +93,64 @@ def _outside() -> AppError:
 def _unavailable() -> AppError:
     # unknown, inactive and unassigned answer identically (no enumeration of locations)
     return _err("DUTY_LOCATION_UNAVAILABLE", "This location is not available to you", "location_id", "unavailable")
+
+
+# ---------------------------------------------------------------- spoofing heuristics (review 11 M1): FLAG only, never reject
+SUSPECT_CENTRE_M = 1.0  # a real GPS fix is never this close to the published site centre
+SUSPECT_MAX_SPEED_MS = 150 / 3.6  # 150 km/h
+SUSPECT_MIN_JUMP_M = 500.0  # ignore GPS noise: only jumps of at least this length count as "travel"
+SUSPECT_HISTORY_VISITS = 10
+
+
+async def _recent_points(session: AsyncSession, user_id: uuid.UUID, now: dt.datetime, day: dt.date) -> list[dict[str, Any]]:
+    """The user's most recent punches (visit + office) with time, position and accuracy. Positions are decrypted in memory only."""
+    pts: list[dict[str, Any]] = []
+    vq = (
+        select(
+            OnDutyVisit.check_in_at,
+            OnDutyVisit.check_in_loc,
+            OnDutyVisit.check_in_accuracy_m,
+            OnDutyVisit.check_out_at,
+            OnDutyVisit.check_out_loc,
+            OnDutyVisit.check_out_accuracy_m,
+        )
+        .where(OnDutyVisit.user_id == user_id)
+        .order_by(OnDutyVisit.check_in_at.desc())
+        .limit(SUSPECT_HISTORY_VISITS)
+    )
+    for ci_at, ci_loc, ci_acc, co_at, co_loc, co_acc in (await session.execute(vq)).all():
+        pts.append({"at": as_utc(ci_at), "loc": ci_loc, "acc": ci_acc})
+        pts.append({"at": as_utc(co_at), "loc": co_loc, "acc": co_acc})
+    aq = select(Attendance.check_in_at, Attendance.check_in_loc, Attendance.check_out_at, Attendance.check_out_loc).where(
+        Attendance.user_id == user_id, Attendance.work_date >= day - dt.timedelta(days=1)
+    )
+    for ci_at, ci_loc, co_at, co_loc in (await session.execute(aq)).all():
+        pts.append({"at": as_utc(ci_at), "loc": ci_loc, "acc": None})
+        pts.append({"at": as_utc(co_at), "loc": co_loc, "acc": None})
+    return [p for p in pts if p["at"] is not None and p["loc"] and "lat" in p["loc"] and "lng" in p["loc"]]
+
+
+async def suspicion_reasons(
+    session: AsyncSession, user_id: uuid.UUID, body: Any, now: dt.datetime, work_date: dt.date, dist: float | None
+) -> list[str]:
+    """Reason codes (never coordinates) why a punch looks spoofed. The caller only FLAGS (visit.suspicious + audit)."""
+    reasons: list[str] = []
+    pts = await _recent_points(session, user_id, now, work_date)
+    here = (round(body.lat, 7), round(body.lng, 7))
+    if dist is not None and dist <= SUSPECT_CENTRE_M:
+        repeated_acc = any(p["acc"] is not None and p["acc"] == body.accuracy_m for p in pts)
+        if body.accuracy_m == 0 or repeated_acc:
+            reasons.append("centre_with_static_accuracy")
+    if any((round(p["loc"]["lat"], 7), round(p["loc"]["lng"], 7)) == here for p in pts):
+        reasons.append("repeated_coordinates")
+    earlier = [p for p in pts if p["at"] < now]
+    if earlier:
+        last = max(earlier, key=lambda p: p["at"])
+        jump = haversine_m(last["loc"]["lat"], last["loc"]["lng"], body.lat, body.lng)
+        secs = max((now - last["at"]).total_seconds(), 1.0)
+        if jump >= SUSPECT_MIN_JUMP_M and jump / secs > SUSPECT_MAX_SPEED_MS:
+            reasons.append("impossible_travel")
+    return reasons
 
 
 def _open_visit_cond(user_id: uuid.UUID) -> list:
@@ -294,6 +353,7 @@ async def check_in(session: AsyncSession, actor: Principal, body: Any) -> dict[s
         raise AppError("NO_SHIFT_ASSIGNED", "No shift is assigned to you. Contact HR.")
     loc = await loc_svc.assigned_active_location(session, user.id, body.location_id)
     if loc is None:
+        await punch.audit_reject(session, actor, "on_duty_check_in", "DUTY_LOCATION_UNAVAILABLE")  # not counted, no coordinates
         raise _unavailable()
     if await _full_day_leave_today(session, user.id, work_date):
         raise AppError("ON_LEAVE", "You are on approved leave today")
@@ -332,6 +392,7 @@ async def check_in(session: AsyncSession, actor: Principal, body: Any) -> dict[s
     punch.log_diagnostics(actor, body, now)
 
     mock = bool(body.is_mock_location)
+    reasons = await suspicion_reasons(session, user_id, body, now, work_date, dist)
     rec, created = await _lock_or_create_day(session, user, shift, work_date, now, local, cfg)
     if not created and rec.work_mode == "office":
         rec.work_mode = "mixed"
@@ -350,7 +411,7 @@ async def check_in(session: AsyncSession, actor: Principal, body: Any) -> dict[s
         check_in_mock_location=mock,
         check_in_selfie_file_id=selfie_id,
         note=body.note,
-        suspicious=mock,
+        suspicious=mock or bool(reasons),
     )
     session.add(visit)
     try:
@@ -370,6 +431,9 @@ async def check_in(session: AsyncSession, actor: Principal, body: Any) -> dict[s
         if mock:  # only reachable when attendance.reject_mock_location is off
             audit(session, action="on_duty.suspicious_punch", actor=actor, entity_type="on_duty_visit", entity_id=visit.id,
                   after={"kind": "check_in", "reason": "mock_flag"})  # fmt: skip
+        if reasons:
+            audit(session, action="on_duty.suspicious_punch", actor=actor, entity_type="on_duty_visit", entity_id=visit.id,
+                  after={"kind": "check_in", "reason": "heuristic", "signals": reasons})  # fmt: skip
         await session.commit()
     except IntegrityError:  # double tap (one-open-visit unique index) or a concurrent reuse of the same selfie
         await session.rollback()  # expires the ORM objects: only plain values below
@@ -388,6 +452,7 @@ async def check_out(session: AsyncSession, actor: Principal, body: Any) -> dict[
     if visit is None:
         raise AppError("NO_OPEN_VISIT", "You have no open on-duty visit")
     if body.visit_id is not None and body.visit_id != visit.id:
+        await punch.audit_reject(session, actor, "on_duty_check_out", "VISIT_ID_MISMATCH")  # not counted, no coordinates
         raise AppError("NOT_FOUND", "Visit not found")
     loc = await session.get(DutyLocation, visit.location_id)  # works even if the location is inactive or unassigned now
     mock = bool(body.is_mock_location)
@@ -410,6 +475,7 @@ async def check_out(session: AsyncSession, actor: Principal, body: Any) -> dict[
     if now <= as_utc(visit.check_in_at):  # type: ignore[operator]
         raise AppError("BAD_REQUEST", "Check-out must be after check-in")
 
+    reasons = await suspicion_reasons(session, actor.id, body, now, visit.work_date, dist)  # before the visit row is mutated
     visit.check_out_at = now
     visit.check_out_loc = {"lat": body.lat, "lng": body.lng, "accuracy_m": body.accuracy_m}
     visit.check_out_distance_m = None if dist is None else int(round(dist))
@@ -423,6 +489,10 @@ async def check_out(session: AsyncSession, actor: Principal, body: Any) -> dict[
         visit.suspicious = True
         audit(session, action="on_duty.suspicious_punch", actor=actor, entity_type="on_duty_visit", entity_id=visit.id,
               after={"kind": "check_out", "reason": "mock_flag"})  # fmt: skip
+    if reasons:
+        visit.suspicious = True
+        audit(session, action="on_duty.suspicious_punch", actor=actor, entity_type="on_duty_visit", entity_id=visit.id,
+              after={"kind": "check_out", "reason": "heuristic", "signals": reasons})  # fmt: skip
 
     rec = (
         await session.execute(

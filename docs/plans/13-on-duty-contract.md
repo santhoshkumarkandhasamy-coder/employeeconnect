@@ -282,3 +282,12 @@ Deactivate/delete employee: pending on-duty requests auto-cancelled (audit `on_d
   `attendance.punch_rejected` (`kind` `on_duty_check_in|on_duty_check_out`), `request.approve|reject`. Never visit coordinates or notes in audit rows.
 - **Flutter error mapping:** `OUTSIDE_DUTY_LOCATION` "You are outside <name>"; `VISIT_OPEN` reload `/on-duty/today`; `NO_OPEN_VISIT` reload; `MAX_VISITS_REACHED`;
   `ON_DUTY_NOT_APPROVED` show "Request On Duty"; `DUTY_LOCATION_UNAVAILABLE` refresh `/on-duty/locations`; `ON_DUTY_DISABLED` hide the On Duty UI.
+
+## 14.10 Backend implementation notes (backend-developer, tasks 1-8)
+- Error envelope is the repo's existing `{"error":{"code","message","details","request_id"}}` (section 0), not `{detail, code}`.
+- Selfie refusals (`SELFIE_REQUIRED|STALE|REUSED`) are audited like office but, exactly as for office punches, do NOT count towards the shared punch-failure cool-down. Counted codes: `OUTSIDE_GEOFENCE`, `OUTSIDE_DUTY_LOCATION`, `LOCATION_ACCURACY_LOW`, `LOCATION_FIX_STALE`, `MOCK_LOCATION_DETECTED`.
+- `POST /on-duty/check-out` with `visit_id` while the caller has no open visit answers 409 `NO_OPEN_VISIT` (404 only when an open visit exists and the id differs).
+- Approval of an on-duty request re-checks overlap with PENDING and APPROVED full-day leave (same set as apply).
+- The 00:30 job flags past-day open visits inside `attendance.auto_close_open_records` (its return value still counts attendance rows only). `attendance.retention` (`purge_pii`) also purges visit coordinates/selfies; its returned counts include them and a separate audit row `on_duty.retention_purge` carries the visit-only counts. On-duty request purpose/comment retention runs in the `leave.retention` job (`on_duty.purge_old_text`); `leave.purge_old_text` keeps its old return shape.
+- Shared validators live in `services/punch.py` (`services/attendance.py` keeps its old private names as aliases).
+- `GET /config` now needs the caller to compute `on_duty.has_locations` (it already required authentication).

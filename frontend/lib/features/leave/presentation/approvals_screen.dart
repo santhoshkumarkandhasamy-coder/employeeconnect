@@ -91,6 +91,7 @@ class _ApprovalsScreenState extends ConsumerState<ApprovalsScreen> {
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
             child: SegmentedButton<RequestKind>(
+              showSelectedIcon: false,
               segments: const [
                 ButtonSegment(value: RequestKind.leave, label: Text('Leave')),
                 ButtonSegment(value: RequestKind.permission, label: Text('Permission')),

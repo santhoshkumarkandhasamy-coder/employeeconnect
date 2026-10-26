@@ -43,7 +43,15 @@ async def validate_selfie(
         if required:
             raise AppError("SELFIE_REQUIRED", "A selfie is required to mark attendance")
         return None
-    f = await session.get(File, file_id)
+    # Row lock on the file (review 11 L1): held until this punch transaction commits or rolls back, so a concurrent office /
+    # visit punch with the same selfie waits here and then SEES the committed use below (READ COMMITTED re-reads per
+    # statement). `files` has no used_at column, and the "used" state lives in two other tables, hence a lock instead of
+    # `UPDATE ... WHERE used_at IS NULL`.
+    f = (
+        await session.execute(
+            select(File).where(File.id == file_id).with_for_update().execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
     if f is None or f.owner_id != actor.id or f.purpose != "selfie":
         raise AppError(
             "VALIDATION_ERROR", "Invalid selfie file", details=[{"field": "selfie_file_id", "message": "unknown or not yours"}]

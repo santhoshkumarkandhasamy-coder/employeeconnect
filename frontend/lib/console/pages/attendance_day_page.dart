@@ -12,6 +12,7 @@ const _statuses = <String, String>{
   'late': 'Late',
   'not_checked_in': 'Not checked in',
   'on_leave': 'On leave',
+  'on_duty': 'On Duty',
 };
 
 /// `GET /admin/attendance/day`: every active employee's status for a day.
@@ -91,6 +92,26 @@ class _DayState extends ConsumerState<AttendanceDayPage> {
             '${r.checkOutAt == null ? '' : '  Out ${formatTime(r.checkOutAt!)}'}'
             '${r.minutesLate > 0 ? '  ${r.minutesLate} min late' : ''}',
           ),
+          trailing: r.modeLabel.isEmpty
+              ? null
+              : ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 260),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Text('Mode: ${r.modeLabel}', style: Theme.of(context).textTheme.labelMedium),
+                      if (r.onDutyLocations.isNotEmpty)
+                        Text(
+                          r.onDutyLocations.join(', '),
+                          style: Theme.of(context).textTheme.bodySmall,
+                          overflow: TextOverflow.ellipsis,
+                          maxLines: 2,
+                          textAlign: TextAlign.end,
+                        ),
+                    ],
+                  ),
+                ),
         ),
       ),
     );

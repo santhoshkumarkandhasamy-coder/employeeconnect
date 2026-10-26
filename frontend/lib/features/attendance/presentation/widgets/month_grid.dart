@@ -101,7 +101,8 @@ class MonthGrid extends StatelessWidget {
     final isToday = now.year == first.year && now.month == first.month && now.day == day;
     final date = DateTime(first.year, first.month, day);
     final label = '${formatDayLong(date)}, ${status == DayStatus.unknown ? 'no data' : status.label}'
-        '${entry?.note != null ? ', ${entry!.note}' : ''}';
+        '${entry?.note != null ? ', ${entry!.note}' : ''}'
+        '${entry?.onDuty == true ? ', On Duty' : ''}';
     final fg = filled
         ? (ThemeData.estimateBrightnessForColor(color) == Brightness.dark ? Colors.white : Colors.black)
         : theme.colorScheme.onSurface;
@@ -123,7 +124,14 @@ class MonthGrid extends StatelessWidget {
               borderRadius: BorderRadius.circular(10),
               border: isToday ? Border.all(color: theme.colorScheme.primary, width: 2) : null,
             ),
-            child: Text('$day', style: TextStyle(color: fg, fontWeight: isToday ? FontWeight.bold : null)),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text('$day', style: TextStyle(color: fg, fontWeight: isToday ? FontWeight.bold : null)),
+                // Small mark (not colour alone) for days with On Duty visits.
+                if (entry?.onDuty == true) Icon(Icons.place, size: 10, color: fg),
+              ],
+            ),
           ),
         ),
       ),

@@ -8,6 +8,7 @@ import '../data/attendance_repository.dart';
 import '../data/location_service.dart';
 import '../data/selfie_service.dart';
 import '../domain/attendance_models.dart';
+import '../../on_duty/presentation/on_duty_data_providers.dart' show onDutyTodayProvider;
 
 /// `/config` attendance bits. Falls back to defaults if it cannot be fetched
 /// (the server still enforces `SELFIE_REQUIRED`).
@@ -340,10 +341,12 @@ class CheckController extends AutoDisposeNotifier<CheckState> {
       _refreshData();
       return true;
     } on ApiException catch (e) {
-      if (const {'ALREADY_CHECKED_IN', 'ALREADY_CHECKED_OUT', 'NOT_CHECKED_IN', 'ON_LEAVE'}
+      if (const {'ALREADY_CHECKED_IN', 'ALREADY_CHECKED_OUT', 'NOT_CHECKED_IN', 'ON_LEAVE', 'VISIT_OPEN'}
           .contains(e.code)) {
         ref.invalidate(todayAttendanceProvider);
       }
+      // A visit opened elsewhere blocks "End day": reload the On Duty state.
+      if (e.code == 'VISIT_OPEN') ref.invalidate(onDutyTodayProvider);
       if (e.code == 'LOCATION_FIX_STALE' || e.code == 'LOCATION_ACCURACY_LOW') {
         ref.invalidate(proximityProvider);
       }

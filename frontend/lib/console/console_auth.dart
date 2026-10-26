@@ -10,7 +10,9 @@ import '../core/server/company.dart';
 import '../features/admin/domain/admin_models.dart' show AdminPerm;
 import '../features/admin/presentation/admin_widgets.dart'
     show adminPermissionsProvider, adminSelfIdProvider;
+import '../core/cache/json_cache.dart' show MemoryJsonCache;
 import '../features/auth/domain/auth_user.dart';
+import '../features/leave/data/leave_repository.dart' show LeaveRepository, leaveRepositoryProvider;
 import 'console_api.dart';
 
 sealed class ConsoleAuthState {
@@ -62,6 +64,15 @@ List<Override> consoleAdminOverrides(Dio Function(Ref ref) dio) => [
       dioProvider.overrideWith(dio),
       adminPermissionsProvider.overrideWith((ref) => ref.watch(consolePermissionsProvider)),
       adminSelfIdProvider.overrideWith((ref) => ref.watch(consoleSelfIdProvider)),
+      // Requests page: memory-only cache, keyed by the console session (the
+      // default repository scopes by the phone app's sign-in).
+      leaveRepositoryProvider.overrideWith(
+        (ref) => LeaveRepository(
+          ref.watch(dioProvider),
+          MemoryJsonCache(),
+          scope: ref.watch(consoleSelfIdProvider) ?? 'console',
+        ),
+      ),
     ];
 
 class ConsoleAuthController extends Notifier<ConsoleAuthState> {

@@ -85,6 +85,12 @@ class _Footer extends ConsumerWidget {
   }
 }
 
+/// `On Duty: Acme, Branch`, `Office + On Duty: Acme`.
+String onDutyDayLabel(AttendanceRecord r) {
+  final head = r.workMode == 'mixed' ? 'Office + On Duty' : 'On Duty';
+  return r.onDutyLocations.isEmpty ? head : '$head: ${r.onDutyLocations.join(', ')}';
+}
+
 class HistoryTile extends StatelessWidget {
   const HistoryTile({required this.record, super.key});
   final AttendanceRecord record;
@@ -100,6 +106,7 @@ class HistoryTile extends StatelessWidget {
     final extra = [
       if (r.status == DayStatus.late) '${r.minutesLate} min late',
       if (r.autoClosed) 'No check-out recorded',
+      if (r.hasOnDuty) onDutyDayLabel(r),
     ].join(', ');
     final color = statusColor(r.status, Theme.of(context).brightness);
     return Card(
@@ -111,7 +118,20 @@ class HistoryTile extends StatelessWidget {
           title: Text(title),
           subtitle: Text('In $inT  Out $outT$worked${extra.isEmpty ? '' : '\n$extra'}'),
           isThreeLine: extra.isNotEmpty,
-          trailing: Text(r.status.label),
+          trailing: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text(r.status.label),
+              if (r.hasOnDuty)
+                Chip(
+                  label: const Text('On Duty'),
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  labelStyle: Theme.of(context).textTheme.labelSmall,
+                ),
+            ],
+          ),
         ),
       ),
     );

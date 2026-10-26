@@ -745,9 +745,27 @@ async def purge_pii(session: AsyncSession, now: dt.datetime | None = None, batch
             update(OnDutyVisit)
             .where(
                 OnDutyVisit.work_date < cutoff,
-                or_(OnDutyVisit.check_in_loc.is_not(None), OnDutyVisit.check_out_loc.is_not(None)),
+                or_(
+                    OnDutyVisit.check_in_loc.is_not(None),
+                    OnDutyVisit.check_out_loc.is_not(None),
+                    OnDutyVisit.note.is_not(None),
+                    OnDutyVisit.check_in_distance_m.is_not(None),
+                    OnDutyVisit.check_out_distance_m.is_not(None),
+                    OnDutyVisit.check_in_accuracy_m.is_not(None),
+                    OnDutyVisit.check_out_accuracy_m.is_not(None),
+                ),
             )
-            .values(check_in_loc=None, check_out_loc=None)
+            # review 11 L2: the note and the distance / accuracy values (which, with the public site centre, give a location
+            # ring per punch) go at the same cutoff as the coordinates. check_out_within_fence is kept.
+            .values(
+                check_in_loc=None,
+                check_out_loc=None,
+                note=None,
+                check_in_distance_m=None,
+                check_out_distance_m=None,
+                check_in_accuracy_m=None,
+                check_out_accuracy_m=None,
+            )
             .execution_options(synchronize_session=False)
         )
         visit_locs = res_v.rowcount or 0

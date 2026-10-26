@@ -460,7 +460,16 @@ async def test_attendance_day_statuses_and_scope(client, admin, hr, emp, seeded,
     by = {i["user"]["employee_id"]: i for i in r.json()["items"]}
     assert set(by) == {"ADM001", "HR001", "MGR001", "EMP001"}
     assert by["EMP001"]["status"] == "late" and by["EMP001"]["minutes_late"] == 12 and by["EMP001"]["check_in_at"]
-    assert set(by["EMP001"]) == {"user", "status", "check_in_at", "check_out_at", "minutes_late", "leave_type", "work_mode", "on_duty_locations"}
+    assert set(by["EMP001"]) == {
+        "user",
+        "status",
+        "check_in_at",
+        "check_out_at",
+        "minutes_late",
+        "leave_type",
+        "work_mode",
+        "on_duty_locations",
+    }
     others = {by[k]["status"] for k in by if k != "EMP001"}
     assert others <= {"not_checked_in", "weekly_off", "holiday"}
     only_late = (await client.get(f"/api/admin/attendance/day?date={day}&status=late", headers=hr)).json()

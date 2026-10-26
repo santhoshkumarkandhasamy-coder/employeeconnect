@@ -240,7 +240,9 @@ class Dashboard {
 
   int? get pendingRequests {
     final r = requests;
-    return r == null ? null : (r['leave_pending'] ?? 0) + (r['permission_pending'] ?? 0);
+    return r == null
+        ? null
+        : (r['leave_pending'] ?? 0) + (r['permission_pending'] ?? 0) + (r['on_duty_pending'] ?? 0);
   }
 
   factory Dashboard.fromJson(Map<String, dynamic> j) {
@@ -277,6 +279,8 @@ class AttendanceDayRow {
     this.checkOutAt,
     this.minutesLate = 0,
     this.leaveType,
+    this.workMode,
+    this.onDutyLocations = const [],
   });
   final EmployeeRef? user;
   final String status;
@@ -285,6 +289,18 @@ class AttendanceDayRow {
   final int minutesLate;
   final String? leaveType;
 
+  /// `office` | `on_duty` | `mixed`; null when the employee has no record.
+  final String? workMode;
+  final List<String> onDutyLocations;
+
+  /// Label of [workMode] for the Mode column (empty without a record).
+  String get modeLabel => switch (workMode) {
+        'on_duty' => 'On Duty',
+        'mixed' => 'Office + On Duty',
+        'office' => 'Office',
+        _ => '',
+      };
+
   factory AttendanceDayRow.fromJson(Map<String, dynamic> j) => AttendanceDayRow(
         user: EmployeeRef.parse(j['user']),
         status: '${j['status'] ?? ''}',
@@ -292,12 +308,24 @@ class AttendanceDayRow {
         checkOutAt: parseTimestamp(j['check_out_at']),
         minutesLate: _int(j['minutes_late']),
         leaveType: _opt(j['leave_type']),
+        workMode: switch (j['work_mode']) {
+          'office' => 'office',
+          'on_duty' => 'on_duty',
+          'mixed' => 'mixed',
+          _ => null,
+        },
+        onDutyLocations: [
+          if (j['on_duty_locations'] is List)
+            for (final n in j['on_duty_locations'] as List)
+              if (n is String && n.isNotEmpty) n,
+        ],
       );
 }
 
 String attendanceStatusLabel(String s) => switch (s) {
       'present' => 'Present',
       'late' => 'Late',
+      'on_duty' => 'On Duty',
       'half_day' => 'Half day',
       'not_checked_in' => 'Not checked in',
       'on_leave' => 'On leave',

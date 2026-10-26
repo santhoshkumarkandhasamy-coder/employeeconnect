@@ -34,6 +34,8 @@ abstract final class AdminPerm {
   static const licenseManage = 'license.manage';
   static const consoleAccess = 'console.access';
   static const attendanceViewAll = 'attendance.view_all';
+  static const attendanceViewTeam = 'attendance.view_team';
+  static const dutyLocationManage = 'duty_location.manage';
   static const payrollViewAll = 'payroll.view_all';
 }
 
@@ -52,16 +54,24 @@ enum AdminSection {
   sessions('Sessions and devices', AdminPerm.sessionManage),
   license('License', AdminPerm.licenseManage),
   company('Company', AdminPerm.companyManage),
-  payroll('Payroll', AdminPerm.payrollViewAll);
+  payroll('Payroll', AdminPerm.payrollViewAll),
+  dutyLocations('On-duty locations', AdminPerm.dutyLocationManage),
+  onDutyVisits('On-duty visits', AdminPerm.attendanceViewAll, [AdminPerm.attendanceViewTeam]);
 
-  const AdminSection(this.label, this.permission);
+  const AdminSection(this.label, this.permission, [this.alsoPermissions = const []]);
   final String label;
   final String permission;
+
+  /// Any of these also opens the section (managers see their team only).
+  final List<String> alsoPermissions;
+
+  bool allowedFor(List<String> permissions) =>
+      permissions.contains(permission) || alsoPermissions.any(permissions.contains);
 }
 
 List<AdminSection> adminSections(List<String> permissions) => [
       for (final s in AdminSection.values)
-        if (permissions.contains(s.permission)) s,
+        if (s.allowedFor(permissions)) s,
     ];
 
 bool canOpenAdmin(List<String> permissions) => adminSections(permissions).isNotEmpty;
@@ -745,6 +755,7 @@ class SettingSpec {
       'auth' => 'Security',
       'permission' => 'Permission requests',
       'leave' => 'Leave',
+      'on_duty' => 'On Duty',
       _ => 'Other',
     };
   }
@@ -776,6 +787,14 @@ const List<SettingSpec> settingSpecs = [
   SettingSpec('leave.max_advance_days', 'Leave advance days (0 = no limit)', SettingKind.integer, min: 0, max: 3650),
   SettingSpec('leave.reason_retention_days', 'Reason retention days (0 = keep)', SettingKind.integer, min: 0, max: 3650),
   SettingSpec('leave.allow_cancel_approved', 'Allow cancelling approved leave', SettingKind.boolean),
+  SettingSpec('on_duty.enabled', 'On Duty enabled', SettingKind.boolean),
+  SettingSpec('on_duty.approval_required', 'Approved request needed to check in at a site', SettingKind.boolean),
+  SettingSpec('on_duty.apply_late_rule', 'Apply the late rule to a day that starts at a site', SettingKind.boolean),
+  SettingSpec('on_duty.checkout_geofence', 'Refuse check-out away from the site', SettingKind.boolean),
+  SettingSpec('on_duty.selfie_required', 'Selfie required for site check-in', SettingKind.boolean),
+  SettingSpec('on_duty.max_visits_per_day', 'Max visits per day', SettingKind.integer, min: 1, max: 50),
+  SettingSpec('on_duty.request_backdate_days', 'On Duty request back-date days', SettingKind.integer, min: 0, max: 30),
+  SettingSpec('on_duty.request_max_advance_days', 'On Duty request advance days', SettingKind.integer, min: 1, max: 365),
 ];
 
 String? validateSetting(SettingSpec s, String? raw) {
@@ -1058,6 +1077,8 @@ String adminErrorMessage(ApiException e) {
       return 'This temporary password has expired. Ask HR or Admin for a new reset.';
     case 'IN_USE':
       return 'It is still in use. Deactivate it instead of deleting.';
+    case 'DUTY_LOCATION_UNAVAILABLE':
+      return 'That location is not available.';
     case 'LAST_ADMIN':
       return 'This is the last active admin, so it cannot be changed this way.';
     case 'EMPLOYEE_ID_EXISTS':

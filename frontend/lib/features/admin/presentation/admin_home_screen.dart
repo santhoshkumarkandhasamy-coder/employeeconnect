@@ -4,6 +4,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/security/screen_protect.dart';
 import '../../../core/widgets/state_views.dart';
 import '../../auth/presentation/auth_controller.dart';
+import '../../attendance/data/location_service.dart';
+import '../../on_duty/presentation/admin/duty_locations_screen.dart';
+import '../../on_duty/presentation/admin/duty_visits_screen.dart';
+import '../../on_duty/presentation/device_position_reader.dart';
 import '../../payroll/presentation/payroll_home_screen.dart';
 import '../domain/admin_models.dart';
 import 'admin_providers.dart';
@@ -32,9 +36,11 @@ IconData _icon(AdminSection s) => switch (s) {
       AdminSection.license => Icons.verified_outlined,
       AdminSection.company => Icons.business_outlined,
       AdminSection.payroll => Icons.payments_outlined,
+      AdminSection.dutyLocations => Icons.place_outlined,
+      AdminSection.onDutyVisits => Icons.pin_drop_outlined,
     };
 
-Widget _screenFor(AdminSection s) => switch (s) {
+Widget _screenFor(AdminSection s, LocationService location) => switch (s) {
       AdminSection.employees => const EmployeesScreen(),
       AdminSection.resetRequests => const ResetRequestsScreen(),
       AdminSection.roles => const RolesScreen(),
@@ -48,6 +54,9 @@ Widget _screenFor(AdminSection s) => switch (s) {
       AdminSection.license => const LicenseScreen(),
       AdminSection.company => const CompanyScreen(),
       AdminSection.payroll => const PayrollHomeScreen(),
+      // One-shot position for "Use my current location" (phone app only).
+      AdminSection.dutyLocations => DutyLocationsScreen(readPosition: devicePositionReader(location)),
+      AdminSection.onDutyVisits => const DutyVisitsScreen(),
     };
 
 /// Admin home: one tile per section the user is permitted to open. The
@@ -91,7 +100,9 @@ class _AdminHomeScreenState extends ConsumerState<AdminHomeScreen> {
                       title: Text(s.label),
                       trailing: const Icon(Icons.chevron_right),
                       onTap: () => Navigator.of(context).push(
-                        MaterialPageRoute<void>(builder: (_) => _screenFor(s)),
+                        MaterialPageRoute<void>(
+                          builder: (_) => _screenFor(s, ref.read(locationServiceProvider)),
+                        ),
                       ),
                     ),
                 ],

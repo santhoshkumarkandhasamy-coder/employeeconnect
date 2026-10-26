@@ -53,7 +53,13 @@ def d(offset: int) -> str:
 
 
 def req(f=0, t=None, **kw):
-    return {"from_date": d(f), "to_date": d(f if t is None else t), "location_id": None, "purpose": "Installation at client site", **kw}
+    return {
+        "from_date": d(f),
+        "to_date": d(f if t is None else t),
+        "location_id": None,
+        "purpose": "Installation at client site",
+        **kw,
+    }
 
 
 async def apply(client, h, **kw):
@@ -79,7 +85,13 @@ async def test_apply_shape_audit_and_push(client, H, loc, db):
     pushed = [m for m in OUTBOX if m["payload"]["type"] == "new_request"]
     assert len(pushed) == 1
     p = pushed[0]["payload"]
-    assert p == {"type": "new_request", "request_type": "on_duty", "id": b["id"], "title": "New on duty request", "body": "Test Employee (EMP001)"}
+    assert p == {
+        "type": "new_request",
+        "request_type": "on_duty",
+        "id": b["id"],
+        "title": "New on duty request",
+        "body": "Test Employee (EMP001)",
+    }
     assert pushed[0]["user_ids"] == [str(await user_id(db, "manager"))]  # routed to the manager like leave
     raw = (await db.execute(__import__("sqlalchemy").text("SELECT purpose_enc FROM on_duty_requests"))).scalar_one()
     assert isinstance(raw, bytes) and b"Installation" not in raw
@@ -117,7 +129,11 @@ async def test_backdate_and_advance_boundaries(client, H, db):
 
 async def test_location_must_be_assigned_and_active(client, H, loc, db):
     h = await H("employee")
-    for target in (str(uuid.uuid4()), str((await make_loc(db, "Off", active=False)).id), str((await make_loc(db, "Not Mine", assign=("manager",))).id)):
+    for target in (
+        str(uuid.uuid4()),
+        str((await make_loc(db, "Off", active=False)).id),
+        str((await make_loc(db, "Not Mine", assign=("manager",))).id),
+    ):
         r = await apply(client, h, location_id=target)
         assert r.status_code == 422 and code(r) == "DUTY_LOCATION_UNAVAILABLE"
     everyone = await make_loc(db, "All", mode="all", assign=())
@@ -258,7 +274,9 @@ async def test_approve_and_reject_flow_push_and_no_attendance(client, H, db):
     # reject
     c = (await apply(client, emp, f=10)).json()["id"]
     OUTBOX.clear()
-    assert (await client.put(f"/api/admin/requests/on_duty/{c}/reject", headers=mgr, json={})).status_code == 422  # comment required
+    assert (
+        await client.put(f"/api/admin/requests/on_duty/{c}/reject", headers=mgr, json={})
+    ).status_code == 422  # comment required
     assert (await client.put(f"/api/admin/requests/on_duty/{c}/reject", headers=mgr, json={"comment": "  "})).status_code == 422
     r = await client.put(f"/api/admin/requests/on_duty/{c}/reject", headers=mgr, json={"comment": "not needed"})
     assert r.status_code == 200 and r.json()["status"] == "rejected" and r.json()["decision_comment"] == "not needed"
@@ -283,7 +301,9 @@ async def test_decision_guards(client, H, db):
     assert code(await client.put(f"/api/admin/requests/on_duty/{rid}/reject", headers=hr, json={"comment": "x"})) == "NOT_PENDING"
     denied = [a.after for a in (await db.execute(select(AuditLog).where(AuditLog.action == "request.decide_denied"))).scalars()]
     assert {x["why"] for x in denied} == {"self", "scope"}
-    refused = [a.after["code"] for a in (await db.execute(select(AuditLog).where(AuditLog.action == "request.decide_refused"))).scalars()]
+    refused = [
+        a.after["code"] for a in (await db.execute(select(AuditLog).where(AuditLog.action == "request.decide_refused"))).scalars()
+    ]
     assert refused.count("NOT_PENDING") == 2
 
 
@@ -298,7 +318,9 @@ async def test_approve_inactive_requester_and_leave_overlap_rechecked(client, H,
     await db.refresh(row)
     assert row.status == "pending"
     # rejecting is still possible
-    assert (await client.put(f"/api/admin/requests/on_duty/{rid}/reject", headers=hr, json={"comment": "leave"})).status_code == 200
+    assert (
+        await client.put(f"/api/admin/requests/on_duty/{rid}/reject", headers=hr, json={"comment": "leave"})
+    ).status_code == 200
     rid2 = (await apply(client, emp, f=10)).json()["id"]
     u = await db.get(User, await user_id(db, "employee"))
     u.status = "inactive"
@@ -317,7 +339,9 @@ async def test_leave_items_flag_on_duty_conflict(client, H, db):
     flags = {i["from_date"]: i["on_duty_conflict"] for i in items}
     assert flags == {d(3): True, d(9): False}
     # permission items are untouched
-    assert all("on_duty_conflict" not in i for i in (await client.get("/api/admin/requests?type=permission", headers=hr)).json()["items"])
+    assert all(
+        "on_duty_conflict" not in i for i in (await client.get("/api/admin/requests?type=permission", headers=hr)).json()["items"]
+    )
 
 
 async def test_leave_wins_over_approved_on_duty_at_check_in(client, H, loc, db, clock):
@@ -356,7 +380,9 @@ async def test_delete_employee_auto_cancels_pending(client, H, db):
     assert (await client.delete(f"/api/admin/employees/{eid}", headers=adm)).status_code == 204
     db.expire_all()
     assert (await db.get(OnDutyRequest, uuid.UUID(pend))).status == "cancelled"
-    assert (await db.execute(select(AuditLog).where(AuditLog.action == "on_duty.auto_cancel"))).scalars().one().after["reason"] == "user_deleted"
+    assert (await db.execute(select(AuditLog).where(AuditLog.action == "on_duty.auto_cancel"))).scalars().one().after[
+        "reason"
+    ] == "user_deleted"
 
 
 async def test_retention_blanks_purpose_and_comment_only_for_old_decided_requests(client, H, db):
@@ -366,7 +392,11 @@ async def test_retention_blanks_purpose_and_comment_only_for_old_decided_request
         status="approved", decision_comment="old comment",
     )  # fmt: skip
     old_pending = OnDutyRequest(
-        user_id=await user_id(db, "employee"), from_date=dt.date(2026, 1, 8), to_date=dt.date(2026, 1, 8), purpose="keep", status="pending"
+        user_id=await user_id(db, "employee"),
+        from_date=dt.date(2026, 1, 8),
+        to_date=dt.date(2026, 1, 8),
+        purpose="keep",
+        status="pending",
     )
     db.add_all([old, old_pending])
     await db.commit()

@@ -5,6 +5,8 @@ import '../../../core/api/api_exception.dart';
 import '../../../core/utils/dates.dart';
 import '../../../core/widgets/month_selector.dart';
 import '../../../core/widgets/state_views.dart';
+import '../../on_duty/presentation/on_duty_data_providers.dart' show dayVisitsProvider;
+import '../../on_duty/presentation/on_duty_panel.dart' show VisitTimeline;
 import '../domain/attendance_models.dart';
 import 'attendance_providers.dart';
 import 'widgets/month_grid.dart';
@@ -72,8 +74,9 @@ class CalendarTab extends ConsumerWidget {
     showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
+      isScrollControlled: true,
       builder: (ctx) => SafeArea(
-        child: Padding(
+        child: SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -100,10 +103,46 @@ class CalendarTab extends ConsumerWidget {
                 const SizedBox(height: 4),
                 Text(d.note!),
               ],
+              if (d.onDuty) ...[
+                const SizedBox(height: 8),
+                const Chip(label: Text('On Duty'), avatar: Icon(Icons.place, size: 16)),
+                _DayVisits(date: ymd(d.date)),
+              ],
             ],
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Visits of one day, loaded when the day detail opens.
+class _DayVisits extends ConsumerWidget {
+  const _DayVisits({required this.date});
+  final String date;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final async = ref.watch(dayVisitsProvider(date));
+    return async.when(
+      loading: () => const Padding(padding: EdgeInsets.all(12), child: LinearProgressIndicator()),
+      error: (e, _) => Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(e is ApiException ? e.message : 'Could not load the visits.'),
+            ),
+            TextButton(
+              onPressed: () => ref.invalidate(dayVisitsProvider(date)),
+              child: const Text('Try again'),
+            ),
+          ],
+        ),
+      ),
+      data: (visits) => visits.isEmpty
+          ? const Padding(padding: EdgeInsets.only(top: 8), child: Text('No visits to show.'))
+          : VisitTimeline(visits: visits, title: 'Visits'),
     );
   }
 }
