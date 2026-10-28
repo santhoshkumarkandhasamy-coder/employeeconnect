@@ -418,7 +418,12 @@ async def put_assignments(session: AsyncSession, actor: Principal, location_id: 
     )
     await session.commit()
     if self_added or (body.assign_mode == "all" and mode_before != "all"):
-        await _alert_admins(session, actor, loc, "assigned themselves to a duty location" if self_added else "opened a duty location to all employees")
+        await _alert_admins(
+            session,
+            actor,
+            loc,
+            "assigned themselves to a duty location" if self_added else "opened a duty location to all employees",
+        )
     return await _assignment_payload(session, loc)
 
 

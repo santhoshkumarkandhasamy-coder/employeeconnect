@@ -222,7 +222,11 @@ async def test_assignments_get_put_full_replace_and_audit(client, H, db):
     r = (await client.get(f"/api/admin/duty-locations/{loc.id}/assignments", headers=hr)).json()
     assert r["location_id"] == str(loc.id) and r["assign_mode"] == "selected"
     assert [i["user"]["employee_id"] for i in r["items"]] == ["EMP001"] and r["items"][0]["assigned_at"].endswith("Z")
-    mgr_id, adm_id, emp_id = str(await user_id(db, "manager")), str(await user_id(db, "admin")), str(await user_id(db, "employee"))
+    mgr_id, adm_id, emp_id = (
+        str(await user_id(db, "manager")),
+        str(await user_id(db, "admin")),
+        str(await user_id(db, "employee")),
+    )
     r = await client.put(  # the admin may include itself (review 11 M2: HR may not, see test_qa_review11_on_duty_fixes)
         f"/api/admin/duty-locations/{loc.id}/assignments",
         headers=await H("admin"),
@@ -272,7 +276,7 @@ async def test_assignments_department_expansion_and_validation(client, H, db, se
     emp_id = str(await user_id(db, "employee"))
     r = await client.put(
         f"/api/admin/duty-locations/{loc.id}/assignments",
-        headers=hr,
+        headers=await H("admin"),  # the department includes HR itself: only an admin may add itself (review 11 M2),
         json={"assign_mode": "selected", "user_ids": [emp_id], "add_department_ids": [str(seeded["dept"])]},
     )
     assert r.status_code == 200
@@ -524,7 +528,7 @@ async def test_settings_keys_and_validation(client, H, db):
     assert {k: cur[k] for k in cur if k.startswith("on_duty.")} == {
         "on_duty.enabled": True, "on_duty.approval_required": False, "on_duty.apply_late_rule": False, "on_duty.checkout_geofence": False,
         "on_duty.selfie_required": False, "on_duty.max_visits_per_day": 10, "on_duty.request_backdate_days": 0,
-        "on_duty.request_max_advance_days": 60,
+        "on_duty.request_max_advance_days": 60, "on_duty.all_mode_max_radius_m": 300,
     }  # fmt: skip
     ok = {
         "on_duty.approval_required": True,

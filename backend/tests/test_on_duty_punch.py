@@ -152,8 +152,9 @@ async def test_unknown_inactive_unassigned_locations_look_identical(client, emp,
         answers.append((e["message"], e["details"]))
     assert len(set(map(repr, answers))) == 1  # no enumeration: same message and details for all three
     assert (await db.execute(select(OnDutyVisit))).first() is None
-    # not a punch failure: no audit row, counter untouched
-    assert not (await db.execute(select(AuditLog).where(AuditLog.action == "attendance.punch_rejected"))).first()
+    # review 11 L4: audited (reason only, no coordinates) but NOT a punch failure (not in PUNCH_FAIL_CODES, counter untouched)
+    rows = (await db.execute(select(AuditLog).where(AuditLog.action == "attendance.punch_rejected"))).scalars().all()
+    assert len(rows) == 3 and all(a.after == {"kind": "on_duty_check_in", "reason": "DUTY_LOCATION_UNAVAILABLE"} for a in rows)
 
 
 async def test_assign_mode_all_and_switching(client, emp, clock, db):
@@ -565,9 +566,9 @@ async def test_suspicious_checkout_flags_visit(client, emp, clock, loc, db):
     await visit_out(client, emp, is_mock_location=True)
     v = (await db.execute(select(OnDutyVisit))).scalar_one()
     assert v.suspicious is True and v.check_out_mock_location is True
-    assert (await db.execute(select(AuditLog).where(AuditLog.action == "on_duty.suspicious_punch"))).scalars().one().after[
-        "kind"
-    ] == "check_out"
+    rows = (await db.execute(select(AuditLog).where(AuditLog.action == "on_duty.suspicious_punch"))).scalars().all()
+    mock_rows = [a for a in rows if a.after["reason"] == "mock_flag"]
+    assert len(mock_rows) == 1 and mock_rows[0].after["kind"] == "check_out"
 
 
 # ------------------------------------------------------------------ day model: half day, span, multiple visits

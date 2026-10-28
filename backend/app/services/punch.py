@@ -48,9 +48,7 @@ async def validate_selfie(
     # statement). `files` has no used_at column, and the "used" state lives in two other tables, hence a lock instead of
     # `UPDATE ... WHERE used_at IS NULL`.
     f = (
-        await session.execute(
-            select(File).where(File.id == file_id).with_for_update().execution_options(populate_existing=True)
-        )
+        await session.execute(select(File).where(File.id == file_id).with_for_update().execution_options(populate_existing=True))
     ).scalar_one_or_none()
     if f is None or f.owner_id != actor.id or f.purpose != "selfie":
         raise AppError(
