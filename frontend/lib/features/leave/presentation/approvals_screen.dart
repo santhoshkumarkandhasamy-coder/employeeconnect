@@ -93,6 +93,7 @@ class _ApprovalsScreenState extends ConsumerState<ApprovalsScreen> {
               segments: const [
                 ButtonSegment(value: RequestKind.leave, label: Text('Leave')),
                 ButtonSegment(value: RequestKind.permission, label: Text('Permission')),
+                ButtonSegment(value: RequestKind.onDuty, label: Text('On duty')),
               ],
               selected: {_kind},
               onSelectionChanged: (s) => setState(() => _kind = s.first),

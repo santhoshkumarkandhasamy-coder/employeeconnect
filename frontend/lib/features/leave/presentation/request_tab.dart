@@ -10,8 +10,8 @@ import '../domain/leave_logic.dart';
 import '../domain/leave_models.dart';
 import 'leave_providers.dart';
 
-/// Request tab: segmented Leave | Permission. Both forms stay alive while
-/// switching so half-typed input is not lost.
+/// Request tab: segmented Leave | Permission | On duty. All forms stay alive
+/// while switching so half-typed input is not lost.
 class RequestTab extends StatefulWidget {
   const RequestTab({super.key});
 
@@ -40,6 +40,7 @@ class _RequestTabState extends State<RequestTab> with AutomaticKeepAliveClientMi
           segments: const [
             ButtonSegment(value: RequestKind.leave, label: Text('Leave'), icon: Icon(Icons.beach_access_outlined)),
             ButtonSegment(value: RequestKind.permission, label: Text('Permission'), icon: Icon(Icons.timer_outlined)),
+            ButtonSegment(value: RequestKind.onDuty, label: Text('On duty'), icon: Icon(Icons.business_center_outlined)),
           ],
           selected: {_kind},
           onSelectionChanged: (s) => setState(() => _kind = s.first),
@@ -54,6 +55,11 @@ class _RequestTabState extends State<RequestTab> with AutomaticKeepAliveClientMi
           visible: _kind == RequestKind.permission,
           maintainState: true,
           child: PermissionForm(onSubmitted: _done),
+        ),
+        Visibility(
+          visible: _kind == RequestKind.onDuty,
+          maintainState: true,
+          child: OnDutyForm(onSubmitted: _done),
         ),
       ],
     );
@@ -688,6 +694,217 @@ class _PermissionFormState extends ConsumerState<PermissionForm> {
             child: _busy
                 ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
                 : const Text('Submit permission request'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ---- on-duty form ---------------------------------------------------------------
+
+/// Whole working days at a client location. On an approved day attendance can
+/// only be marked at that location (the admin sets its geo coordinates).
+class OnDutyForm extends ConsumerStatefulWidget {
+  const OnDutyForm({required this.onSubmitted, super.key});
+  final VoidCallback onSubmitted;
+
+  @override
+  ConsumerState<OnDutyForm> createState() => _OnDutyFormState();
+}
+
+class _OnDutyFormState extends ConsumerState<OnDutyForm> {
+  final _formKey = GlobalKey<FormState>();
+  final _reason = TextEditingController();
+  ClientLocationOption? _location;
+  DateTime? _from;
+  DateTime? _to;
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _reason.dispose();
+    super.dispose();
+  }
+
+  DateTime get _today => dateOnly(DateTime.now());
+
+  Future<void> _pickDate({required bool from}) async {
+    final init = (from ? _from : _to) ?? _from ?? _today;
+    final d = await showDatePicker(
+      context: context,
+      initialDate: init.isBefore(_today) ? _today : init,
+      firstDate: _today,
+      lastDate: leaveLastDate(_today),
+      helpText: from ? 'From date' : 'To date',
+    );
+    if (d == null) return;
+    setState(() {
+      if (from) {
+        _from = d;
+        if (_to == null || _to!.isBefore(d)) _to = d;
+      } else {
+        _to = d;
+      }
+      _error = null;
+    });
+  }
+
+  Future<void> _submit() async {
+    if (_busy) return;
+    if (!(_formKey.currentState?.validate() ?? false)) return;
+    final err = validateOnDutyForm(
+      location: _location,
+      from: _from,
+      to: _to,
+      reason: _reason.text,
+      today: DateTime.now(),
+    );
+    if (err != null) {
+      setState(() => _error = err);
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await ref.read(leaveRepositoryProvider).applyOnDuty(
+            clientLocationId: _location!.id,
+            fromDate: ymd(_from!),
+            toDate: ymd(_to!),
+            reason: _reason.text.trim(),
+          );
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      if (e.code == 'VALIDATION_ERROR') ref.invalidate(onDutyLocationsProvider);
+      setState(() {
+        _busy = false;
+        _error = onDutyErrorMessage(e);
+      });
+      return;
+    }
+    refreshLeaveData(ref);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('On-duty request submitted.')));
+    _formKey.currentState?.reset();
+    _reason.clear();
+    setState(() {
+      _busy = false;
+      _location = null;
+      _from = _to = null;
+    });
+    widget.onSubmitted();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final locations = ref.watch(onDutyLocationsProvider);
+    return locations.when(
+      loading: () => const SizedBox(height: 200, child: LoadingView(label: 'Loading client locations')),
+      error: (e, _) => SizedBox(
+        height: 240,
+        child: ErrorView(
+          message: e is ApiException ? e.message : 'Could not load client locations.',
+          onRetry: () => ref.invalidate(onDutyLocationsProvider),
+        ),
+      ),
+      data: (c) {
+        if (c.value.isEmpty) {
+          return const SizedBox(
+            height: 200,
+            child: EmptyView(message: 'No client locations are set up yet. Ask HR or the admin to add one.'),
+          );
+        }
+        return _buildForm(context, c.value);
+      },
+    );
+  }
+
+  Widget _buildForm(BuildContext context, List<ClientLocationOption> list) {
+    final theme = Theme.of(context);
+    final loc = _location == null ? null : list.where((l) => l.id == _location!.id).firstOrNull;
+    final from = _from;
+    final to = _to;
+    final span = from != null && to != null && !to.isBefore(from) ? calendarSpan(from, to) : null;
+    return Form(
+      key: _formKey,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (_error != null) _ErrorBox(_error!),
+          DropdownButtonFormField<String>(
+            initialValue: loc?.id,
+            isExpanded: true,
+            decoration: const InputDecoration(labelText: 'Client location', border: OutlineInputBorder()),
+            items: [
+              for (final l in list)
+                DropdownMenuItem(value: l.id, child: Text(l.name, overflow: TextOverflow.ellipsis)),
+            ],
+            validator: (v) => v == null ? 'Choose the client location' : null,
+            onChanged: _busy
+                ? null
+                : (id) => setState(() {
+                      _location = list.firstWhere((l) => l.id == id);
+                      _error = null;
+                    }),
+          ),
+          if (loc?.address != null && loc!.address!.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 4, left: 4),
+              child: Text(loc.address!, style: theme.textTheme.bodySmall),
+            ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: PickerField(
+                  label: 'From',
+                  value: from == null ? null : formatDayLong(from),
+                  icon: Icons.calendar_today_outlined,
+                  onTap: _busy ? null : () => _pickDate(from: true),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: PickerField(
+                  label: 'To',
+                  value: to == null ? null : formatDayLong(to),
+                  icon: Icons.calendar_today_outlined,
+                  onTap: _busy ? null : () => _pickDate(from: false),
+                ),
+              ),
+            ],
+          ),
+          if (span != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                '$span calendar ${span == 1 ? 'day' : 'days'} selected. Weekly offs and holidays are not counted.',
+                style: theme.textTheme.bodySmall,
+              ),
+            ),
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(onDutyPunchHint, style: theme.textTheme.bodySmall),
+          ),
+          const SizedBox(height: 12),
+          TextFormField(
+            controller: _reason,
+            enabled: !_busy,
+            maxLines: 3,
+            maxLength: maxReasonLength,
+            decoration: const InputDecoration(labelText: 'Purpose of the visit', border: OutlineInputBorder()),
+            validator: validateReason,
+          ),
+          const SizedBox(height: 8),
+          FilledButton(
+            onPressed: _busy ? null : _submit,
+            style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
+            child: _busy
+                ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Text('Submit on-duty request'),
           ),
         ],
       ),

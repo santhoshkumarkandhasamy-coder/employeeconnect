@@ -60,6 +60,7 @@ class FakeAttendanceRepo extends AttendanceRepository {
     radiusM: 150,
   );
   AttendanceRecord? todayRecord;
+  OnDutySite? onDutySite;
   ApiException? checkInError;
   ApiException? uploadError;
   ApiException? historyError;
@@ -73,7 +74,7 @@ class FakeAttendanceRepo extends AttendanceRepository {
   @override
   Future<AttendanceConfig> config() async => cfg;
   @override
-  Future<AttendanceRecord?> today() async => todayRecord;
+  Future<TodayAttendance> today() async => TodayAttendance(record: todayRecord, onDuty: onDutySite);
 
   @override
   Future<AttendanceRecord> checkIn(LocationFix fix, {String? selfieFileId}) async {

@@ -160,6 +160,8 @@ def test_encrypted_columns_are_discovered_from_models():
         ("leave_requests", "decision_comment_enc"),
         ("permission_requests", "reason_enc"),
         ("permission_requests", "decision_comment_enc"),
+        ("on_duty_requests", "reason_enc"),
+        ("on_duty_requests", "decision_comment_enc"),
     } <= names
 
 

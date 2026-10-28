@@ -33,6 +33,14 @@ self-hosted)** — no third-party cloud database.
 - Late details: list of late arrivals with minutes late per day/month.
 - Push notification to manager/Admin on new request and to employee on decision.
 
+### 1.3a On Duty (client locations)
+- Admin adds **client locations** with their **geo coordinates** (latitude, longitude) and an allowed radius in metres
+  (the app can fill the coordinates from the admin's current position at the site).
+- Employee requests **On Duty** for one or more dates and chooses the client location; it is approved like leave.
+- On an approved on-duty day, check-in / check-out is accepted **only when the employee's location matches the client
+  location** (inside its radius). Punching at the office is refused that day.
+- On-duty requests are included in the Excel export (sheet "On Duty"), and the Attendance sheet shows the client location.
+
 ### 1.4 Food Enrollment
 - Simple daily choice: **"Need food today?" → Yes / No** (no meal type or veg/non-veg options).
 - Employee can mark Yes/No for upcoming dates (e.g. the whole week) and change it before the cut-off.
@@ -55,7 +63,7 @@ self-hosted)** — no third-party cloud database.
 - Approve / reject leave and permission requests.
 - Unlock accounts, reset passwords, deactivate employees.
 - View audit logs (who changed what, when).
-- **Export to Excel (.xlsx)**: one click to export all **Attendance, Leave, Late and Permission** details (each as a separate sheet), filtered by date range / department / employee. Food enrollment report also exportable.
+- **Export to Excel (.xlsx)**: one click to export all **Attendance, Leave, Late, Permission and On Duty** details (each as a separate sheet), filtered by date range / department / employee. Food enrollment report also exportable.
 
 ---
 

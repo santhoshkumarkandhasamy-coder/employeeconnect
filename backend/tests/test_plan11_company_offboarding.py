@@ -430,7 +430,7 @@ async def test_dashboard_blocks_follow_permissions(client, admin, hr, seeded, db
     d = (await client.get("/api/admin/dashboard", headers=admin)).json()
     assert d["employees"] == {"active": 4, "inactive": 0}
     assert set(d["attendance"]) == {"checked_in", "checked_out", "late", "on_leave", "not_checked_in"}
-    assert set(d["requests"]) == {"leave_pending", "permission_pending"}
+    assert set(d["requests"]) == {"leave_pending", "permission_pending", "on_duty_pending"}
     assert set(d["food"]) == {"date", "count_yes", "count_no", "count_unanswered", "tomorrow_yes"}
     assert d["announcements"] == {"active": 0} and d["password_reset_requests_open"] == 0
     assert d["sessions"]["mobile"] >= 1 and d["seats"] == {"used": 4, "total": 50, "status": "unlicensed"}

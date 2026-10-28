@@ -71,6 +71,8 @@ TABLES = [
     "leave_balances",
     "leave_requests",
     "permission_requests",
+    "client_locations",
+    "on_duty_requests",
     "announcements",
     "announcement_departments",
     "announcement_reads",

@@ -193,13 +193,13 @@ async def test_retention_off_by_default_then_purges_closed_requests(db, types, s
     ids = {k: v.id for k, v in {"old": old, "old2": old2, "recent": recent, "pending": pending, "perm": perm_old}.items()}
     fids = (f_old.id, f_shared.id)
 
-    assert await lv.purge_old_text(db) == {"leave": 0, "permission": 0, "files": 0}  # default: off
+    assert await lv.purge_old_text(db) == {"leave": 0, "permission": 0, "on_duty": 0, "files": 0}  # default: off
     assert (await db.get(LeaveRequest, ids["old"])).reason == "old reason"
 
     db.add(Setting(key="leave.reason_retention_days", value=30))
     await db.commit()
     out = await lv.purge_old_text(db)
-    assert out == {"leave": 2, "permission": 1, "files": 1}  # f_shared is still used by the recent request
+    assert out == {"leave": 2, "permission": 1, "on_duty": 0, "files": 1}  # f_shared is still used by the recent request
     db.expire_all()
     for rid in (ids["old"], ids["old2"]):
         r = await db.get(LeaveRequest, rid)
@@ -209,7 +209,7 @@ async def test_retention_off_by_default_then_purges_closed_requests(db, types, s
     assert (await db.get(LeaveRequest, ids["pending"])).reason == "old reason"  # never purge open requests
     assert (await db.get(PermissionRequest, ids["perm"])).reason is None
     assert await db.get(File, fids[0]) is None and await db.get(File, fids[1]) is not None
-    assert await lv.purge_old_text(db) == {"leave": 0, "permission": 0, "files": 0}  # idempotent
+    assert await lv.purge_old_text(db) == {"leave": 0, "permission": 0, "on_duty": 0, "files": 0}  # idempotent
 
 
 async def test_purged_reason_renders_as_empty_string(client, H, types, db, seeded):

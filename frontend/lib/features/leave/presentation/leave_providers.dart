@@ -13,6 +13,10 @@ final leaveBalanceProvider = FutureProvider.autoDispose<Cached<BalanceData>>(
   (ref) => ref.watch(leaveRepositoryProvider).balance(DateTime.now().year),
 );
 
+final onDutyLocationsProvider = FutureProvider.autoDispose<Cached<List<ClientLocationOption>>>(
+  (ref) => ref.watch(leaveRepositoryProvider).onDutyLocations(),
+);
+
 final myRequestsProvider = FutureProvider.autoDispose<Cached<List<RequestItem>>>(
   (ref) => ref.watch(leaveRepositoryProvider).myRequests(),
 );

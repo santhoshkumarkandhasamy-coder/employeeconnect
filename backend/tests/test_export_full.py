@@ -1,4 +1,4 @@
-"""Plan 10: attendance / leave / late / permission / all export - scope, permission gates, injection, limits, audit."""
+"""Plan 10 (+ plan 13 On Duty): attendance / leave / late / permission / on duty / all export - scope, permission gates, injection, limits, audit."""
 
 from __future__ import annotations
 
@@ -16,9 +16,11 @@ from app.core.crypto import encrypt_bytes
 from app.models import (
     Attendance,
     AuditLog,
+    ClientLocation,
     LateRecord,
     LeaveRequest,
     LeaveType,
+    OnDutyRequest,
     Permission,
     PermissionRequest,
     Role,
@@ -31,7 +33,7 @@ from tests.conftest import PASSWORD, USERS, bearer, do_login
 DAY = dt.date(2026, 10, 23)
 P = {"from": "2026-10-23", "to": "2026-10-23"}
 ROLES4 = ("employee", "manager", "admin", "hr")
-SHEET_NAMES = ["Attendance", "Leave", "Late", "Permission"]
+SHEET_NAMES = ["Attendance", "Leave", "Late", "Permission", "On Duty"]
 
 
 @pytest.fixture
@@ -55,8 +57,17 @@ async def _leave_type(db) -> uuid.UUID:
     return lt.id
 
 
+async def _client_location(db) -> uuid.UUID:
+    loc = (await db.execute(select(ClientLocation))).scalars().first()
+    if loc is None:
+        loc = ClientLocation(name="Acme Site", lat=13.0827, lng=80.2707, radius_m=200)
+        db.add(loc)
+        await db.flush()
+    return loc.id
+
+
 async def seed_for_user(db, user_id, shift_id, *, reason="family event", check_in=None):
-    """One attendance + late + leave + permission row for DAY."""
+    """One attendance + late + leave + permission + on-duty row for DAY."""
     check_in = check_in or dt.datetime(2026, 10, 23, 4, 30, tzinfo=dt.UTC)  # 10:00 IST
     att = Attendance(
         user_id=user_id,
@@ -103,6 +114,17 @@ async def seed_for_user(db, user_id, shift_id, *, reason="family event", check_i
             minutes=60,
             reason=reason,
             status="pending",
+        )
+    )
+    db.add(
+        OnDutyRequest(
+            user_id=user_id,
+            client_location_id=await _client_location(db),
+            from_date=DAY,  # rejected, so it may share DAY with the approved leave above
+            to_date=DAY,
+            days=1,
+            reason=reason,
+            status="rejected",
         )
     )
 
@@ -198,7 +220,7 @@ async def test_all_has_four_sheets_with_headers_and_rows_for_hr(client, H, db, s
         assert ws["A1"].font.bold
     assert [c.value for c in wb["Attendance"][1]] == [
         "Date", "Employee ID", "Name", "Department", "Shift", "Check-in", "Check-out", "Status",
-        "Minutes Late", "Worked Hours", "Within Geofence",
+        "Minutes Late", "Worked Hours", "Within Geofence", "Client Location",
     ]  # fmt: skip
     assert [c.value for c in wb["Late"][1]] == [
         "Date", "Employee ID", "Name", "Department", "Shift Start", "Check-in", "Minutes Late",
@@ -466,10 +488,10 @@ async def test_audit_records_filters_and_counts_never_data(client, H, db, seeded
     a = log.after
     assert a["type"] == "all" and a["from"] == "2026-10-23" and a["to"] == "2026-10-23" and a["scope"] == "all"
     assert a["employee_id"] == "EMP001" and a["department_id"] == str(seeded["dept"])
-    assert a["rows"] == {"Attendance": 1, "Leave": 1, "Late": 1, "Permission": 1} and a["total_rows"] == 4
+    assert a["rows"] == {"Attendance": 1, "Leave": 1, "Late": 1, "Permission": 1, "On Duty": 1} and a["total_rows"] == 5
     blob = repr(a) + repr(log.before)
     assert "Secret Person" not in blob and "family event" not in blob
-    assert a["include_reasons"] is False and a["daily_exports"] == 1 and a["daily_rows"] == 4
+    assert a["include_reasons"] is False and a["daily_exports"] == 1 and a["daily_rows"] == 5
     # manager export is audited as team scope; the employee never reaches the handler (dependency 403, not audited here)
     await get(client, await H("manager"), type="leave")
     await get(client, await H("employee"), type="leave")
@@ -480,6 +502,6 @@ async def test_audit_records_filters_and_counts_never_data(client, H, db, seeded
 
 
 def test_registry_covers_every_type_with_permissions():
-    assert {"attendance", "leave", "late", "permission", "food"} == set(export_svc.SHEETS)
-    assert set(export_svc.ALL_TYPES) == {"attendance", "leave", "late", "permission"}
+    assert {"attendance", "leave", "late", "permission", "on_duty", "food"} == set(export_svc.SHEETS)
+    assert set(export_svc.ALL_TYPES) == {"attendance", "leave", "late", "permission", "on_duty"}
     assert USERS  # fixture import sanity

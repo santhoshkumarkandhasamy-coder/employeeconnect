@@ -14,8 +14,9 @@ from ..core.db import get_session
 from ..core.pagination import PageParams
 from ..core.rbac import Principal, require_permission
 from ..core.redis import get_redis
-from ..schemas.leave import ApproveBody, LeaveApply, PermissionApply, RejectBody
+from ..schemas.leave import ApproveBody, LeaveApply, OnDutyApply, PermissionApply, RejectBody
 from ..services import leave as svc
+from ..services import onduty as onduty_svc
 
 router = APIRouter(tags=["leave"])
 Self = Depends(require_permission())
@@ -74,6 +75,23 @@ async def apply_permission(
     return await svc.apply_permission(session, actor, body, redis)
 
 
+@router.post("/on-duty/requests", status_code=201)
+async def apply_on_duty(
+    body: OnDutyApply,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Self,
+):
+    await _limit_write(redis, actor)
+    return await onduty_svc.apply_on_duty(session, actor, body, redis)
+
+
+@router.get("/on-duty/locations")
+async def on_duty_locations(session: AsyncSession = Depends(get_session), _: Principal = Self):
+    """Active client locations for the request form (name + address only)."""
+    return await onduty_svc.list_active_brief(session)
+
+
 def _make_mine(kind: str, path: str) -> None:
     @router.get(f"/{path}/requests")
     async def _list(
@@ -103,12 +121,13 @@ def _make_mine(kind: str, path: str) -> None:
 
 _make_mine("leave", "leave")
 _make_mine("permission", "permission")
+_make_mine("on_duty", "on-duty")
 
 
 @router.get("/admin/requests")
 async def admin_requests(
     params: PageParams = Depends(),
-    type: Literal["leave", "permission"] = "leave",
+    type: Literal["leave", "permission", "on_duty"] = "leave",
     status: str | None = Query(None, max_length=16),
     department_id: uuid.UUID | None = None,
     employee_id: str | None = Query(None, max_length=32),
@@ -135,7 +154,7 @@ _APPROVE = Depends(require_permission("request.approve_team", "request.approve_a
 
 @router.put("/admin/requests/{type}/{req_id}/approve")
 async def approve(
-    type: Literal["leave", "permission"],
+    type: Literal["leave", "permission", "on_duty"],
     req_id: uuid.UUID,
     body: ApproveBody | None = None,
     session: AsyncSession = Depends(get_session),
@@ -148,7 +167,7 @@ async def approve(
 
 @router.put("/admin/requests/{type}/{req_id}/reject")
 async def reject(
-    type: Literal["leave", "permission"],
+    type: Literal["leave", "permission", "on_duty"],
     req_id: uuid.UUID,
     body: RejectBody,
     session: AsyncSession = Depends(get_session),

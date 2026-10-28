@@ -293,7 +293,7 @@ Implementation notes (v1):
 | GET | /permission/requests?status=&from=&to=&page= | Self |
 | GET | /permission/requests/{id} | Self (owner) |
 | POST | /permission/requests/{id}/cancel | Self (owner, pending only) |
-| GET | /admin/requests?type=leave\|permission&status=&department_id=&employee_id=&from=&to=&page= | `request.view_team` / `request.view_all` |
+| GET | /admin/requests?type=leave\|permission\|on_duty&status=&department_id=&employee_id=&from=&to=&page= | `request.view_team` / `request.view_all` |
 | PUT | /admin/requests/{type}/{id}/approve | `request.approve_team` / `request.approve_all` |
 | PUT | /admin/requests/{type}/{id}/reject | same |
 
@@ -617,16 +617,17 @@ Audit log item: `{ id,ts,actor:UserSummary|null,action:"employee.create",entity_
 
 ## 10. Export (module 10)
 
-`GET /admin/export?type=all|attendance|leave|late|permission|food&from=2026-10-01&to=2026-10-31&department_id=&employee_id=&include_reasons=false`
+`GET /admin/export?type=all|attendance|leave|late|permission|on_duty|food&from=2026-10-01&to=2026-10-31&department_id=&employee_id=&include_reasons=false`
 - Perm: `export.all` (any scope) or `export.team` (forced to direct reports). `include_reasons=true` additionally needs `export.sensitive` (see below).
 - Response 200: binary `.xlsx`, `Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`,
   `Content-Disposition: attachment; filename="employee-connect-all-2026-10-01_2026-10-31.xlsx"`.
-- `type=all` -> sheets `Attendance`, `Leave`, `Late`, `Permission` (food excluded). Single type -> one sheet. `food` -> sheet `Food`
+- `type=all` -> sheets `Attendance`, `Leave`, `Late`, `Permission`, `On Duty` (food excluded). Single type -> one sheet. `food` -> sheet `Food`
   (columns Date, Employee ID, Name, Department, Need Food).
 - `from`/`to` required, `to>=from`, max range 366 days (422 `RANGE_TOO_LARGE`); food accepts a single date range too.
 - A text cell whose first non-whitespace character is `= + - @` or the full-width `＝ ＋ － ＠` is prefixed with `'` (formula injection; leading spaces do not hide a trigger, plain text starting with a tab or newline is left alone). Empty result -> workbook with header-only sheets.
 - Every export is audit logged (`export.run`).
-- Status: all types are implemented (`attendance`, `leave`, `late`, `permission`, `food`, and `all` = the first four).
+- Status: all types are implemented (`attendance`, `leave`, `late`, `permission`, `on_duty`, `food`, and `all` = all but food).
+  `on_duty` -> sheet `On Duty` (section 14); the `Attendance` sheet ends with a `Client Location` column (empty = office punch).
   `employee_id` filter is the business id (case-insensitive).
 - Response headers: `Content-Type` xlsx, `Content-Disposition: attachment; filename="employee-connect-<type>-<from>_<to>.xlsx"` (built only from the enum type and ISO dates),
   `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`.
@@ -753,7 +754,7 @@ revoke-sessions -> 200 `{ "revoked": 3 }` (all families, access tokens invalidat
 { "date":"2026-10-22",
   "employees": { "active":120, "inactive":8 },                                        // employee.view + employee.update|create (all scope)
   "attendance": { "checked_in":95, "checked_out":10, "late":7, "on_leave":6, "not_checked_in":19 }, // attendance.view_all
-  "requests": { "leave_pending":4, "permission_pending":2 },                           // request.view_all
+  "requests": { "leave_pending":4, "permission_pending":2, "on_duty_pending":1 },                           // request.view_all
   "food": { "date":"2026-10-22", "count_yes":80, "count_no":20, "count_unanswered":20, "tomorrow_yes":60 }, // food.view_all
   "announcements": { "active":3 },                                                     // announcement.manage
   "sessions": { "mobile":110, "web":2 },                                               // session.manage
@@ -999,3 +1000,40 @@ Audit actions: `payroll.payslip.process|reopen|publish|delete|revise`.
 - **PDF (review 10, L3/L4):** both PDF endpoints fail closed (503 `TEMPORARILY_UNAVAILABLE`) when the rate-limit store is down. A timed-out PDF build keeps its slot until its worker thread ends; logos over 1 MB or 4 million pixels are not drawn.
 - **Database locks (review 10, H1/L6):** migration 0018 allows `*_enc`-only updates of payslips and structures when the transaction has `SET LOCAL app.key_rotation = 'on'` (set only by `python -m scripts.rotate_keys`), so key rotation works on published/superseded rows. A published -> superseded change without a published successor in the same transaction fails at commit.
 - **Rate limit keys** (per user): `payroll:own_list` 60/min, `own_detail` 30/min + 200/day (detail and pdf share it), `admin_read` 120/min, `write` 60/min (fail closed), `action` 10/min (fail closed), `register` 5/min (fail closed), `reveal` 30/min + 200/day (fail closed).
+
+
+## 14. On Duty and client locations (plan 13) - IMPLEMENTED
+
+| Method | Path | Access / Perm |
+|---|---|---|
+| GET | /on-duty/locations | Self (active locations: `{items: [{id, name, address}]}`, no coordinates) |
+| POST | /on-duty/requests | Self |
+| GET | /on-duty/requests?status=&from=&to=&page= | Self |
+| GET | /on-duty/requests/{id} | Self (owner) |
+| POST | /on-duty/requests/{id}/cancel | Self (owner; pending, or approved before it starts when `leave.allow_cancel_approved`) |
+| GET | /admin/requests?type=on_duty&... | `request.view_team` / `request.view_all` |
+| PUT | /admin/requests/on_duty/{id}/approve \| reject | `request.approve_team` / `request.approve_all` |
+| GET | /admin/client-locations?q=&is_active=&page=&page_size= | `client_location.manage` |
+| POST | /admin/client-locations | `client_location.manage` |
+| GET / PUT / DELETE | /admin/client-locations/{id} | `client_location.manage` |
+
+**ClientLocation (admin)**: `{id, name, address|null, lat, lng, radius_m, is_active}`. Body of POST/PUT (full replace, extra keys
+422): `name` 1-120, `address` <= 300 or null, `lat` -90..90, `lng` -180..180 (0,0 refused), `radius_m` 20..5000 (default 200),
+`is_active` (default true). Duplicate name (case-insensitive) 409 `CONFLICT`. DELETE of a used location 409 `IN_USE`.
+
+**POST /on-duty/requests** `{client_location_id, from_date, to_date, reason (1-500)}` -> 201 OnDutyRequest
+`{id, client_location: {id, name, address}, from_date, to_date, days, reason, status, approver, decision_comment, decided_at, created_at}`
+(admin list items add `type: "on_duty"` and `user`).
+Errors: 422 `INVALID_DATE_RANGE` (past from_date, > 31 days, beyond `leave.max_advance_days`), 422 `ZERO_WORKING_DAYS`,
+422 `VALIDATION_ERROR` field `client_location_id` (unknown or inactive), 422 `NO_SHIFT_ASSIGNED`,
+409 `OVERLAPPING_REQUEST` (pending/approved on-duty or leave on any of the days). Leave apply / approve refuse an overlap with an
+on-duty request the same way.
+
+**Attendance on an approved on-duty day**
+- `POST /attendance/check-in` (and check-out when `attendance.checkout_geofence` is on) is checked against the client location:
+  outside -> 422 `OUTSIDE_CLIENT_LOCATION` ("You are on duty today. Check in at the client location: <name>"). The office does not count.
+- Attendance records gain `client_location: {id, name} | null`.
+- `GET /attendance/today` gains `on_duty: {id, name, address, lat, lng, radius_m} | null` (both the `{record: null, ...}` and the
+  record shape).
+- Calendar days gain `on_duty: "<client location name>" | null`.
+- Push: `new_request` to approvers ("New on duty request"), `on_duty_decision` to the employee.

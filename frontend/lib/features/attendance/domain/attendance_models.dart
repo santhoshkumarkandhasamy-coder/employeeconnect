@@ -43,6 +43,7 @@ class AttendanceRecord {
     this.autoClosed = false,
     this.shiftStart,
     this.shiftEnd,
+    this.clientLocationName,
   });
 
   final String id;
@@ -59,11 +60,15 @@ class AttendanceRecord {
   final String? shiftStart;
   final String? shiftEnd;
 
+  /// Set when the punch was an on-duty punch at a client location.
+  final String? clientLocationName;
+
   bool get checkedIn => checkInAt != null;
   bool get checkedOut => checkOutAt != null;
 
   factory AttendanceRecord.fromJson(Map<String, dynamic> j) {
     final shift = j['shift'];
+    final site = j['client_location'];
     return AttendanceRecord(
       id: '${j['id'] ?? ''}',
       workDate: '${j['work_date'] ?? ''}',
@@ -78,6 +83,7 @@ class AttendanceRecord {
       autoClosed: j['auto_closed'] as bool? ?? false,
       shiftStart: shift is Map ? shift['start'] as String? : null,
       shiftEnd: shift is Map ? shift['end'] as String? : null,
+      clientLocationName: site is Map ? site['name'] as String? : null,
     );
   }
 
@@ -89,6 +95,42 @@ class AttendanceRecord {
     }
     return j['id'] == null ? null : AttendanceRecord.fromJson(j);
   }
+}
+
+/// The client site of today's approved on-duty request. On such a day the
+/// server accepts punches only inside this site's radius (not the office).
+class OnDutySite {
+  const OnDutySite({required this.id, required this.name, this.address, this.lat, this.lng, this.radiusM});
+  final String id;
+  final String name;
+  final String? address;
+  final double? lat;
+  final double? lng;
+  final int? radiusM;
+
+  bool get hasCoordinates => lat != null && lng != null;
+
+  static OnDutySite? parse(Object? v) => v is Map
+      ? OnDutySite(
+          id: '${v['id'] ?? ''}',
+          name: '${v['name'] ?? ''}',
+          address: v['address'] as String?,
+          lat: (v['lat'] as num?)?.toDouble(),
+          lng: (v['lng'] as num?)?.toDouble(),
+          radiusM: (v['radius_m'] as num?)?.toInt(),
+        )
+      : null;
+}
+
+/// `GET /attendance/today`: today's record (null before check-in) and the
+/// on-duty site when today is an approved on-duty day.
+class TodayAttendance {
+  const TodayAttendance({this.record, this.onDuty});
+  final AttendanceRecord? record;
+  final OnDutySite? onDuty;
+
+  factory TodayAttendance.fromJson(Map<String, dynamic> j) =>
+      TodayAttendance(record: AttendanceRecord.fromToday(j), onDuty: OnDutySite.parse(j['on_duty']));
 }
 
 class Paged<T> {
@@ -117,14 +159,17 @@ class Paged<T> {
 }
 
 class CalendarDay {
-  const CalendarDay({required this.date, required this.status, this.holidayName, this.leaveType});
+  const CalendarDay({required this.date, required this.status, this.holidayName, this.leaveType, this.onDuty});
   final DateTime date;
   final DayStatus status;
   final String? holidayName;
   final String? leaveType;
 
-  /// Extra text for a day detail: holiday name or leave type.
-  String? get note => holidayName ?? leaveType;
+  /// Client location name on an approved on-duty day.
+  final String? onDuty;
+
+  /// Extra text for a day detail: holiday name, leave type or on-duty site.
+  String? get note => holidayName ?? leaveType ?? (onDuty == null ? null : 'On duty: $onDuty');
 }
 
 class CalendarMonth {
@@ -143,6 +188,7 @@ class CalendarMonth {
               status: DayStatus.parse(e['status']),
               holidayName: e['holiday_name'] as String?,
               leaveType: e['leave_type'] as String?,
+              onDuty: e['on_duty'] as String?,
             ),
     ];
     return CalendarMonth(month: '${j['month'] ?? ''}', days: days);
@@ -220,6 +266,11 @@ String attendanceErrorMessage(ApiException e) {
   switch (e.code) {
     case 'OUTSIDE_GEOFENCE':
       return 'You are outside the office area. Move closer and try again.';
+    case 'OUTSIDE_CLIENT_LOCATION':
+      // The server names the client location; office punches are not accepted on an on-duty day.
+      return e.message.isEmpty
+          ? 'You are on duty today. Check in at the client location.'
+          : '${e.message}. Move closer to the client location and try again.';
     case 'LOCATION_ACCURACY_LOW':
       return 'Your GPS signal is weak. Move to an open area and try again.';
     case 'LOCATION_FIX_STALE':
