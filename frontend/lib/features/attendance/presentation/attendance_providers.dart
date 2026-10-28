@@ -19,8 +19,9 @@ final attendanceConfigProvider = FutureProvider<AttendanceConfig>((ref) async {
   }
 });
 
-/// Today's record, or null when not checked in. Also feeds the home card.
-final todayAttendanceProvider = FutureProvider.autoDispose<AttendanceRecord?>(
+/// Today's record (null when not checked in) and today's on-duty site, if any.
+/// Also feeds the home card.
+final todayAttendanceProvider = FutureProvider.autoDispose<TodayAttendance>(
   (ref) => ref.watch(attendanceRepositoryProvider).today(),
 );
 
@@ -107,11 +108,14 @@ final historyProvider =
 // ---- live proximity to the office ------------------------------------------
 
 class Proximity {
-  const Proximity({required this.access, this.fix, this.distanceM, this.radiusM});
+  const Proximity({required this.access, this.fix, this.distanceM, this.radiusM, this.site});
   final LocationAccess access;
   final LocationFix? fix;
   final int? distanceM;
   final int? radiusM;
+
+  /// Today's on-duty client site; the distance is measured to it instead of the office.
+  final OnDutySite? site;
 
   bool? get inside => distanceM == null || radiusM == null ? null : distanceM! <= radiusM!;
 }
@@ -122,14 +126,24 @@ final proximityProvider = FutureProvider.autoDispose<Proximity>((ref) async {
   final access = await loc.access();
   if (access != LocationAccess.granted) return Proximity(access: access);
   final cfg = await ref.watch(attendanceConfigProvider.future);
+  OnDutySite? site;
+  try {
+    site = (await ref.watch(todayAttendanceProvider.future)).onDuty;
+  } on ApiException {
+    site = null; // the Today tab shows that error; fall back to the office here
+  }
   try {
     final fix = await loc.current();
+    if (site != null) {
+      final d = site.hasCoordinates ? haversineMeters(fix.lat, fix.lng, site.lat!, site.lng!).round() : null;
+      return Proximity(access: access, fix: fix, distanceM: d, radiusM: site.radiusM, site: site);
+    }
     final d = cfg.hasOffice
         ? haversineMeters(fix.lat, fix.lng, cfg.officeLat!, cfg.officeLng!).round()
         : null;
     return Proximity(access: access, fix: fix, distanceM: d, radiusM: cfg.radiusM);
   } on LocationException {
-    return Proximity(access: access);
+    return Proximity(access: access, site: site);
   }
 });
 

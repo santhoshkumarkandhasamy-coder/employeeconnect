@@ -108,3 +108,26 @@ class BalancesIn(_Strict):
 
 class ApplyDefaultsIn(_Strict):
     year: int = Field(ge=2000, le=2200)
+
+
+class ClientLocationIn(_Strict):
+    name: str = Field(min_length=1, max_length=120)
+    address: str | None = Field(None, max_length=300)
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
+    radius_m: int = Field(default=200, ge=20, le=5000)
+    is_active: StrictBool = True
+
+    _n = field_validator("name")(_name)
+
+    @field_validator("address")
+    @classmethod
+    def _addr(cls, v: str | None) -> str | None:
+        v = clean_text(v) if v is not None else None
+        return v or None
+
+    @model_validator(mode="after")
+    def _not_null_island(self) -> ClientLocationIn:
+        if self.lat == 0 and self.lng == 0:
+            raise ValueError("lat/lng 0,0 is not a real client location")
+        return self

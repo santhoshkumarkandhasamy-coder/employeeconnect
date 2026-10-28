@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,7 +14,7 @@ from ..core.errors import AppError
 from ..core.pagination import PageParams
 from ..core.rbac import Principal, require_permission
 from ..core.redis import get_redis
-from ..schemas.attendance import HolidayIn, HolidayPatch, PunchRequest
+from ..schemas.attendance import HolidayIn, HolidayPatch, ManualAttendanceIn, PunchRequest
 from ..services import attendance as svc
 from ..services import late as late_svc
 
@@ -98,6 +98,37 @@ async def team(
     return await svc.team(
         session, actor, params, on_date=date, d_from=from_, d_to=to, department_id=department_id, employee_id=employee_id
     )
+
+
+_MANUAL = Depends(require_permission("attendance.manual"))
+
+
+@router.get("/admin/attendance/{user_id}/{work_date}")
+async def manual_get(
+    user_id: uuid.UUID, work_date: dt.date, session: AsyncSession = Depends(get_session), actor: Principal = _MANUAL
+):
+    return await svc.manual_get(session, actor, user_id, work_date)
+
+
+@router.put("/admin/attendance/{user_id}/{work_date}")
+async def manual_upsert(
+    user_id: uuid.UUID,
+    work_date: dt.date,
+    body: ManualAttendanceIn,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = _MANUAL,
+):
+    await rate_limit.enforce(redis, [(f"rl:attendance:manual:{actor.id}", 60, 60)], fail_closed=True)
+    return await svc.manual_upsert(session, actor, user_id, work_date, body)
+
+
+@router.delete("/admin/attendance/{user_id}/{work_date}", status_code=204)
+async def manual_delete(
+    user_id: uuid.UUID, work_date: dt.date, session: AsyncSession = Depends(get_session), actor: Principal = _MANUAL
+):
+    await svc.manual_delete(session, actor, user_id, work_date)
+    return Response(status_code=204)
 
 
 @router.get("/attendance")

@@ -3,7 +3,9 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from ..core.text import clean_text
 
 
 class PunchRequest(BaseModel):
@@ -16,6 +18,23 @@ class PunchRequest(BaseModel):
     selfie_file_id: uuid.UUID | None = None
     client_time: dt.datetime | None = None  # diagnostics only; server time is authoritative
     is_mock_location: bool | None = None  # client-reported; stored, flagged, optionally rejected (never trusted as "clean")
+
+
+class ManualAttendanceIn(BaseModel):
+    """HR/Admin manual entry or correction for one employee and date (office-local wall-clock times)."""
+
+    model_config = ConfigDict(extra="forbid")
+    check_in: dt.time
+    check_out: dt.time | None = None
+    reason: str = Field(min_length=3, max_length=300)
+
+    @field_validator("reason")
+    @classmethod
+    def _reason(cls, v: str) -> str:
+        v = clean_text(v)
+        if len(v) < 3:
+            raise ValueError("give a reason (at least 3 characters)")
+        return v
 
 
 class HolidayIn(BaseModel):

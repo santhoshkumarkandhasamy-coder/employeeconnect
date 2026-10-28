@@ -26,7 +26,7 @@ final _now = DateTime(2026, 10, 21, 10);
 
 class _OfflineAttendance extends FakeAttendanceRepo {
   @override
-  Future<AttendanceRecord?> today() async =>
+  Future<TodayAttendance> today() async =>
       throw const ApiException(code: ApiException.networkCode, message: 'No connection.');
 }
 

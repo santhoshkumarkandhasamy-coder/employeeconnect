@@ -9,7 +9,9 @@ void main() {
   group('permission gating', () {
     test('sections follow permissions only', () {
       expect(adminSections(const []), isEmpty);
-      expect(canOpenAdmin(const ['food.view_all', 'announcement.manage']), isFalse);
+      expect(canOpenAdmin(const ['food.view_all']), isFalse);
+      // HR/Admin who post announcements also find them on the Admin screen (not only under More)
+      expect(canOpenAdmin(const ['announcement.manage']), isTrue);
       expect(
         adminSections(const ['audit.view', 'employee.view', 'shift.manage']),
         [AdminSection.employees, AdminSection.shifts, AdminSection.audit],

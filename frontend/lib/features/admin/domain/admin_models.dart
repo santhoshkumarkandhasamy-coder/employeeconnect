@@ -1,7 +1,9 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import '../../../core/api/api_exception.dart';
 import '../../../core/utils/dates.dart';
+import '../../attendance/domain/attendance_models.dart' show AttendanceRecord;
 import '../../profile/domain/profile_models.dart'
     show EmergencyContact, normalizePhone;
 
@@ -23,6 +25,9 @@ abstract final class AdminPerm {
   static const shiftManage = 'shift.manage';
   static const holidayManage = 'holiday.manage';
   static const leaveTypeManage = 'leave_type.manage';
+  static const clientLocationManage = 'client_location.manage';
+  static const attendanceManual = 'attendance.manual';
+  static const announcementManage = 'announcement.manage';
   static const roleView = 'role.view';
   static const roleManage = 'role.manage';
   static const roleAssign = 'role.assign';
@@ -47,6 +52,9 @@ enum AdminSection {
   shifts('Shifts', AdminPerm.shiftManage),
   holidays('Holidays', AdminPerm.holidayManage),
   leaveTypes('Leave types and quotas', AdminPerm.leaveTypeManage),
+  clientLocations('Client locations (on duty)', AdminPerm.clientLocationManage),
+  manualAttendance('Manual attendance', AdminPerm.attendanceManual),
+  announcements('Announcements', AdminPerm.announcementManage),
   settings('Settings', AdminPerm.settingsManage),
   audit('Audit log', AdminPerm.auditView),
   sessions('Sessions and devices', AdminPerm.sessionManage),
@@ -482,7 +490,11 @@ class FieldSpec {
     this.createOnly = false,
     this.defaultValue,
     this.code = false,
+    this.decimals = 1,
   });
+
+  /// Allowed decimal places for [FieldKind.decimal] (coordinates need 7).
+  final int decimals;
 
   /// Short code: letters, digits, dash, underscore (the server upper-cases it).
   final bool code;
@@ -513,7 +525,11 @@ class MasterSpec {
     this.hasYearFilter = false,
     this.updateMethod = 'PUT',
     this.hasApplyDefaults = false,
+    this.hasGeoPicker = false,
   });
+
+  /// Offer "Use my current location" to fill the `lat` / `lng` fields.
+  final bool hasGeoPicker;
 
   /// HTTP method for edits (holidays use PATCH, the masters PUT).
   final String updateMethod;
@@ -637,6 +653,27 @@ final leaveTypeSpec = MasterSpec(
       '${d['is_active'] == false ? '  (inactive)' : ''}',
 );
 
+/// Client sites for on duty. On an approved on-duty day an employee can mark
+/// attendance only within [radius_m] metres of these coordinates.
+final clientLocationSpec = MasterSpec(
+  title: 'Client locations',
+  singular: 'client location',
+  path: '/admin/client-locations',
+  permission: AdminPerm.clientLocationManage,
+  titleKey: 'name',
+  hasGeoPicker: true,
+  fields: const [
+    FieldSpec('name', 'Name', FieldKind.text, maxLength: 120),
+    FieldSpec('address', 'Address', FieldKind.text, required: false, nullable: true, maxLength: 300),
+    FieldSpec('lat', 'Latitude', FieldKind.decimal, min: -90, max: 90, decimals: 7),
+    FieldSpec('lng', 'Longitude', FieldKind.decimal, min: -180, max: 180, decimals: 7),
+    FieldSpec('radius_m', 'Allowed radius (metres)', FieldKind.integer, min: 20, max: 5000, defaultValue: 200),
+    FieldSpec('is_active', 'Active', FieldKind.boolean, defaultValue: true),
+  ],
+  subtitle: (d) => '${_opt(d['address']) ?? '${_s(d['lat'])}, ${_s(d['lng'])}'}, '
+      'radius ${_s(d['radius_m'])} m${d['is_active'] == false ? '  (inactive)' : ''}',
+);
+
 /// Validates the raw text of one master field; null when valid.
 String? validateField(FieldSpec f, String? raw) {
   final s = raw?.trim() ?? '';
@@ -664,7 +701,10 @@ String? validateField(FieldSpec f, String? raw) {
       if (n == null || n.isNaN || n.isInfinite) return 'Enter a number';
       if (f.min != null && n < f.min!) return 'Must be at least ${f.min}';
       if (f.max != null && n > f.max!) return 'Must be at most ${f.max}';
-      if ((n * 10 - (n * 10).roundToDouble()).abs() > 1e-9) return 'At most one decimal place';
+      final scale = math.pow(10, f.decimals);
+      if ((n * scale - (n * scale).roundToDouble()).abs() > 1e-6) {
+        return f.decimals == 1 ? 'At most one decimal place' : 'At most ${f.decimals} decimal places';
+      }
       return null;
     case FieldKind.time:
       return isValidTime(s) ? null : 'Use HH:MM (24 hour)';
@@ -685,6 +725,9 @@ String? validateMasterCross(MasterSpec spec, Map<String, Object?> values) {
   if (spec.fields.any((f) => f.kind == FieldKind.weekdays)) {
     final days = values['working_days'];
     if (days is! List || days.isEmpty) return 'Choose at least one working day';
+  }
+  if (values.containsKey('lat') && values['lat'] == 0 && values['lng'] == 0) {
+    return 'Latitude and longitude 0, 0 is not a real location';
   }
   if (values.containsKey('start_time') &&
       values['start_time'] != null &&
@@ -1093,4 +1136,43 @@ String adminErrorMessage(ApiException e) {
     default:
       return e.message;
   }
+}
+
+
+// ---- manual attendance ---------------------------------------------------------
+
+/// `GET/PUT /admin/attendance/{user_id}/{work_date}`: the employee and that
+/// day's record (null when there is none yet).
+class ManualAttendanceDay {
+  const ManualAttendanceDay({required this.workDate, this.user, this.record});
+  final String workDate;
+  final EmployeeRef? user;
+  final AttendanceRecord? record;
+
+  factory ManualAttendanceDay.fromJson(Map<String, dynamic> j) {
+    final r = j['record'];
+    return ManualAttendanceDay(
+      workDate: _s(j['work_date']),
+      user: EmployeeRef.parse(j['user']),
+      record: r is Map<String, dynamic> ? AttendanceRecord.fromJson(r) : null,
+    );
+  }
+}
+
+/// First problem with the manual attendance form, or null.
+String? validateManualAttendance({
+  required DateTime? date,
+  required String? checkIn,
+  required String? checkOut,
+  required String reason,
+  required DateTime now,
+}) {
+  if (date == null) return 'Choose the date';
+  final today = DateTime(now.year, now.month, now.day);
+  if (DateTime(date.year, date.month, date.day).isAfter(today)) return 'Attendance cannot be entered for a future date';
+  if (checkIn == null || !isValidTime(checkIn)) return 'Choose the check-in time';
+  if (checkOut != null && !isValidTime(checkOut)) return 'Choose a valid check-out time';
+  if (reason.trim().length < 3) return 'Give a reason (at least 3 characters)';
+  if (reason.trim().length > 300) return 'Keep the reason under 300 characters';
+  return null;
 }

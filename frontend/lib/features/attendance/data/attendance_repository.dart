@@ -23,9 +23,9 @@ class AttendanceRepository {
         return AttendanceConfig.fromJson(res.data ?? const {});
       });
 
-  Future<AttendanceRecord?> today() => guardApi(() async {
+  Future<TodayAttendance> today() => guardApi(() async {
         final res = await _dio.get<Map<String, dynamic>>('/attendance/today');
-        return AttendanceRecord.fromToday(res.data ?? const {});
+        return TodayAttendance.fromJson(res.data ?? const {});
       });
 
   Map<String, Object?> _body(LocationFix fix, String? selfieId) => {

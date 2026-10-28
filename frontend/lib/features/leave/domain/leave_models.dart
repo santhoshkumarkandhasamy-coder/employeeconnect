@@ -3,12 +3,51 @@ import '../../../core/utils/dates.dart';
 /// api-contract.md section 4 models.
 
 enum RequestKind {
-  leave('leave', 'Leave'),
-  permission('permission', 'Permission');
+  leave('leave', 'Leave', 'leave'),
+  permission('permission', 'Permission', 'permission'),
+  onDuty('on_duty', 'On duty', 'on-duty');
 
-  const RequestKind(this.wire, this.label);
+  const RequestKind(this.wire, this.label, this.path);
+
+  /// `type` in the admin endpoints and list items.
   final String wire;
   final String label;
+
+  /// URL segment of the employee endpoints (`/<path>/requests`).
+  final String path;
+
+  /// Leave and on duty cover whole dates; permission is a time window.
+  bool get isDateRange => this != permission;
+
+  static RequestKind parse(Object? v) => switch (v) {
+        'permission' => permission,
+        'on_duty' => onDuty,
+        _ => leave,
+      };
+}
+
+/// An active client site for the on-duty form (`GET /on-duty/locations`).
+/// Employees never get the coordinates here.
+class ClientLocationOption {
+  const ClientLocationOption({required this.id, required this.name, this.address});
+  final String id;
+  final String name;
+  final String? address;
+
+  factory ClientLocationOption.fromJson(Map<String, dynamic> j) => ClientLocationOption(
+        id: '${j['id'] ?? ''}',
+        name: '${j['name'] ?? ''}',
+        address: j['address'] as String?,
+      );
+
+  static List<ClientLocationOption> parseList(Object json) {
+    final raw = (json as Map<String, dynamic>)['items'];
+    return [
+      if (raw is List)
+        for (final e in raw)
+          if (e is Map<String, dynamic>) ClientLocationOption.fromJson(e),
+    ];
+  }
 }
 
 enum RequestStatus {
@@ -206,7 +245,7 @@ class PersonSummary {
       : null;
 }
 
-/// A leave or permission request (own request or admin list item).
+/// A leave, permission or on-duty request (own request or admin list item).
 class RequestItem {
   const RequestItem({
     required this.kind,
@@ -230,6 +269,8 @@ class RequestItem {
     this.fromTime,
     this.toTime,
     this.minutes,
+    this.clientLocationName,
+    this.clientLocationAddress,
   });
 
   final RequestKind kind;
@@ -261,13 +302,19 @@ class RequestItem {
   final String? toTime;
   final int? minutes;
 
+  // on duty
+  final String? clientLocationName;
+  final String? clientLocationAddress;
+
   bool get isPending => status == RequestStatus.pending;
 
   bool get hasAttachment => attachmentUrl != null && attachmentUrl!.isNotEmpty;
 
-  String get title => kind == RequestKind.leave
-      ? (leaveTypeName ?? 'Leave')
-      : 'Permission';
+  String get title => switch (kind) {
+        RequestKind.leave => leaveTypeName ?? 'Leave',
+        RequestKind.permission => 'Permission',
+        RequestKind.onDuty => clientLocationName == null ? 'On duty' : 'On duty: $clientLocationName',
+      };
 
   /// Short date text, e.g. `Tue, 3 Nov 2026 to Thu, 5 Nov 2026` or `... 16:00-17:30`.
   String get whenText {
@@ -283,13 +330,12 @@ class RequestItem {
   }
 
   /// `3 days` / `90 min`.
-  String get amountText => kind == RequestKind.leave
-      ? daysLabel(days ?? 0)
-      : formatDuration(minutes ?? 0);
+  String get amountText => kind.isDateRange ? daysLabel(days ?? 0) : formatDuration(minutes ?? 0);
 
   factory RequestItem.fromJson(Map<String, dynamic> j, {RequestKind? kind}) {
-    final k = kind ?? (j['type'] == 'permission' ? RequestKind.permission : RequestKind.leave);
+    final k = kind ?? RequestKind.parse(j['type']);
     final lt = j['leave_type'];
+    final loc = j['client_location'];
     return RequestItem(
       kind: k,
       id: '${j['id'] ?? ''}',
@@ -312,6 +358,8 @@ class RequestItem {
       fromTime: j['from_time'] as String?,
       toTime: j['to_time'] as String?,
       minutes: (j['minutes'] as num?)?.toInt(),
+      clientLocationName: loc is Map ? loc['name'] as String? : null,
+      clientLocationAddress: loc is Map ? loc['address'] as String? : null,
     );
   }
 }

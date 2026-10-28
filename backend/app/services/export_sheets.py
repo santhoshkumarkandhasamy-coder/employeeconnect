@@ -1,4 +1,4 @@
-"""Attendance / Leave / Late / Permission sheets for the Excel export (plan 10).
+"""Attendance / Leave / Late / Permission / On Duty sheets for the Excel export (plan 10).
 
 Every builder takes `scope` as a mandatory positional argument and applies `scope.restrict(...)` to BOTH its count query and
 its row query (one shared `_filtered` per sheet, so they cannot drift apart). Data minimisation: no coordinates, selfies,
@@ -23,7 +23,18 @@ from sqlalchemy.orm import aliased
 
 from ..core.config import get_settings
 from ..core.crypto import DataDecryptionError, decrypt_bytes
-from ..models import Attendance, Department, LateRecord, LeaveRequest, LeaveType, PermissionRequest, Shift, User
+from ..models import (
+    Attendance,
+    ClientLocation,
+    Department,
+    LateRecord,
+    LeaveRequest,
+    LeaveType,
+    OnDutyRequest,
+    PermissionRequest,
+    Shift,
+    User,
+)
 from . import attendance as att
 from .xlsx import SheetSpec
 
@@ -45,6 +56,8 @@ ATTENDANCE_HEADERS = [
     "Minutes Late",
     "Worked Hours",
     "Within Geofence",
+    "Client Location",  # on-duty punch: the client site (empty = office)
+    "Manual Entry",  # entered or corrected by HR/Admin
 ]
 LEAVE_HEADERS = [  # full list (include_reasons=true)
     "Request ID",
@@ -65,6 +78,22 @@ LEAVE_HEADERS = [  # full list (include_reasons=true)
 ]
 SENSITIVE_HEADERS = frozenset({"Reason", "Decision Comment", "Comment"})  # dropped unless include_reasons=true
 LATE_HEADERS = ["Date", "Employee ID", "Name", "Department", "Shift Start", "Check-in", "Minutes Late"]
+ON_DUTY_HEADERS = [  # full list (include_reasons=true)
+    "Request ID",
+    "Employee ID",
+    "Name",
+    "Department",
+    "Client Location",
+    "From",
+    "To",
+    "Days",
+    "Status",
+    "Reason",
+    "Approver",
+    "Decision Comment",
+    "Applied On",
+    "Decided On",
+]
 PERMISSION_HEADERS = [  # full list (include_reasons=true)
     "Request ID",
     "Employee ID",
@@ -148,15 +177,18 @@ def attendance_sheet(
                 Attendance.minutes_late,
                 Attendance.worked_minutes,
                 Attendance.check_in_within_fence,
+                ClientLocation.name,
+                Attendance.manual,
             ).select_from(Attendance)
         )
         q = (
             q.outerjoin(Department, Department.id == User.department_id)
             .outerjoin(Shift, Shift.id == Attendance.shift_id)
+            .outerjoin(ClientLocation, ClientLocation.id == Attendance.client_location_id)
             .order_by(Attendance.work_date, User.employee_id)
         )
         result = await session.stream(q.execution_options(yield_per=BATCH))
-        async for day, eid, name, dept, shift, cin, cout, status, late, worked, fence in result:
+        async for day, eid, name, dept, shift, cin, cout, status, late, worked, fence, site, manual in result:
             yield (
                 day,
                 eid,
@@ -169,6 +201,8 @@ def attendance_sheet(
                 late,
                 None if worked is None else round(worked / 60, 2),
                 "" if fence is None else ("Yes" if fence else "No"),
+                site or "",
+                "Yes" if manual else "No",
             )
 
     return SheetSpec("Attendance", ATTENDANCE_HEADERS, count, rows, get_settings().export_max_rows)
@@ -318,3 +352,61 @@ def permission_sheet(
             yield tuple(out)
 
     return SheetSpec("Permission", headers_for(PERMISSION_HEADERS, inc), count, rows, get_settings().export_max_rows)
+
+
+# ---------------------------------------------------------------- On Duty
+def on_duty_sheet(session: AsyncSession, scope: ExportScope, filters: ExportFilters, d_from: dt.date, d_to: dt.date) -> SheetSpec:
+    def filtered(q):
+        # requests overlapping the range
+        q = q.join(User, User.id == OnDutyRequest.user_id).where(OnDutyRequest.from_date <= d_to, OnDutyRequest.to_date >= d_from)
+        return _user_filters(q, scope, filters, OnDutyRequest.user_id)
+
+    async def count() -> int:
+        return int((await session.execute(filtered(select(func.count()).select_from(OnDutyRequest)))).scalar_one())
+
+    inc = filters.include_reasons
+
+    async def rows() -> AsyncIterator[tuple]:
+        tz = await _office_tz(session)
+        approver = aliased(User)
+        cols = [
+            OnDutyRequest.id,
+            User.employee_id,
+            User.full_name,
+            Department.name,
+            ClientLocation.name,
+            OnDutyRequest.from_date,
+            OnDutyRequest.to_date,
+            OnDutyRequest.days,
+            OnDutyRequest.status,
+        ]
+        if inc:
+            cols.append(type_coerce(OnDutyRequest.reason, LargeBinary))
+        cols.append(approver.full_name)
+        if inc:
+            cols.append(type_coerce(OnDutyRequest.decision_comment, LargeBinary))
+        cols += [OnDutyRequest.created_at, OnDutyRequest.decided_at]
+        q = filtered(select(*cols).select_from(OnDutyRequest))
+        q = (
+            q.outerjoin(Department, Department.id == User.department_id)
+            .outerjoin(ClientLocation, ClientLocation.id == OnDutyRequest.client_location_id)
+            .outerjoin(approver, approver.id == OnDutyRequest.approver_id)
+            .order_by(OnDutyRequest.from_date, User.employee_id, OnDutyRequest.id)
+        )
+        result = await session.stream(q.execution_options(yield_per=BATCH))
+        async for r in result:
+            rid, eid, name, dept, site, f, t, days, status, *rest = r
+            if inc:
+                reason, appr, comment, applied, decided = rest
+            else:
+                appr, applied, decided = rest
+            out = [str(rid), eid, name, dept or "", site or "", f, t, days, status]
+            if inc:
+                out.append(_plain(reason))
+            out.append(appr or "")
+            if inc:
+                out.append(_plain(comment))
+            out += [_local(applied, tz), _local(decided, tz)]
+            yield tuple(out)
+
+    return SheetSpec("On Duty", headers_for(ON_DUTY_HEADERS, inc), count, rows, get_settings().export_max_rows)

@@ -148,6 +148,39 @@ String? validatePermissionForm({
   return validateReason(reason);
 }
 
+/// Most on-duty date rules (past date, 31-day limit, no working days) and
+/// overlaps are explained precisely by the server message.
+const int maxOnDutySpanDays = 31;
+
+const String onDutyPunchHint =
+    'Once approved, check in and check out at the client location on these days. '
+    'Attendance is accepted only inside the area the admin set for that location.';
+
+/// First problem with an on-duty form, or null.
+String? validateOnDutyForm({
+  required ClientLocationOption? location,
+  required DateTime? from,
+  required DateTime? to,
+  required String reason,
+  required DateTime today,
+}) {
+  if (location == null) return 'Choose the client location';
+  if (from == null || to == null) return 'Choose the from and to dates';
+  if (dateOnly(from).isBefore(dateOnly(today))) return 'On duty cannot be requested for a past date';
+  if (dateOnly(to).isBefore(dateOnly(from))) return 'The to date must be on or after the from date';
+  if (calendarSpan(from, to) > maxOnDutySpanDays) {
+    return 'One on-duty request can cover at most $maxOnDutySpanDays days';
+  }
+  return validateReason(reason);
+}
+
+String onDutyErrorMessage(ApiException e) => switch (e.code) {
+      'OVERLAPPING_REQUEST' || 'INVALID_DATE_RANGE' => e.message.isEmpty ? leaveErrorMessage(e) : e.message,
+      'VALIDATION_ERROR' when e.detail('client_location_id') != null =>
+        'This client location is no longer available. Pull to refresh and choose again.',
+      _ => leaveErrorMessage(e),
+    };
+
 /// Apply: a missing leave type is a 404 meaning the type list is stale.
 String applyErrorMessage(ApiException e) => e.code == 'NOT_FOUND'
     ? 'This leave type no longer exists. Pull to refresh the leave types and choose again.'
@@ -229,6 +262,7 @@ RequestPushTarget? parseRequestPush(Map<String, dynamic> data) {
     'leave_decision' => RequestPushTarget(RequestPushScreen.myRequests, kind: RequestKind.leave, id: id),
     'permission_decision' =>
       RequestPushTarget(RequestPushScreen.myRequests, kind: RequestKind.permission, id: id),
+    'on_duty_decision' => RequestPushTarget(RequestPushScreen.myRequests, kind: RequestKind.onDuty, id: id),
     _ => null,
   };
 }

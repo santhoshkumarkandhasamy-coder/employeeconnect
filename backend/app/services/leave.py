@@ -1,4 +1,4 @@
-"""Leave + permission requests and the approval flow (plan 03).
+"""Leave + permission + on-duty requests and the approval flow (plans 03 and 13).
 
 Decisions on the plan's open questions (also in docs/api-contract.md section 4):
   O1 pro-rata   a balance row created for the join year of a mid-year joiner gets
@@ -15,6 +15,9 @@ Decisions on the plan's open questions (also in docs/api-contract.md section 4):
 Locking order: user row (apply only) -> request row -> balance row. Balance math is
 `pending += days` on submit, `pending -= days; used += days` on approve, `pending -= days` on reject/cancel(pending),
 `used -= days` on cancel(approved); DB CHECKs (used,pending >= 0, used+pending <= quota) are the safety net.
+
+On-duty requests (submitted in services/onduty.py) share list / get / cancel / approve / reject with leave and permission.
+They have no balance. A leave and an on-duty request may never cover the same day (checked on submit and on approval).
 """
 
 from __future__ import annotations
@@ -37,10 +40,12 @@ from ..core.errors import AppError
 from ..core.pagination import PageParams, make_page
 from ..core.rbac import Principal
 from ..models import (
+    ClientLocation,
     File,
     LeaveBalance,
     LeaveRequest,
     LeaveType,
+    OnDutyRequest,
     Permission,
     PermissionRequest,
     Role,
@@ -71,7 +76,9 @@ _DEFAULTS: dict[str, Any] = {
     "permission.max_minutes_per_request": 120,
 }
 
-KINDS = {"leave": LeaveRequest, "permission": PermissionRequest}
+KINDS = {"leave": LeaveRequest, "permission": PermissionRequest, "on_duty": OnDutyRequest}
+LABELS = {"leave": "leave", "permission": "permission", "on_duty": "on duty"}  # for push titles / bodies
+DATE_RANGE_MODELS = (LeaveRequest, OnDutyRequest)  # models with from_date / to_date (permission has request_date)
 MIN_YEAR, MAX_YEAR = 2000, 2200
 MERGE_GAP_SEARCH_DAYS = 31  # adjacency search window around a new request (a gap of only weekly-offs/holidays)
 NEWREQ_PUSH_COALESCE_S = 600  # no-manager fan-out: one push per (requester, approver) per 10 minutes
@@ -221,6 +228,19 @@ async def _move(
         raise _err("INSUFFICIENT_BALANCE", "Not enough leave balance", "days") from exc
 
 
+async def on_duty_overlaps(
+    session: AsyncSession, user_id: uuid.UUID, d_from: dt.date, d_to: dt.date, statuses: tuple[str, ...]
+) -> bool:
+    """A pending/approved (per `statuses`) on-duty request of this user touching d_from..d_to."""
+    q = select(OnDutyRequest.id).where(
+        OnDutyRequest.user_id == user_id,
+        OnDutyRequest.status.in_(statuses),
+        OnDutyRequest.from_date <= d_to,
+        OnDutyRequest.to_date >= d_from,
+    )
+    return (await session.execute(q.limit(1))).first() is not None
+
+
 # ================================================================ output
 async def _users(session: AsyncSession, ids: set[uuid.UUID]) -> dict[uuid.UUID, User]:
     if not ids:
@@ -244,6 +264,10 @@ async def _render(session: AsyncSession, rows: list, *, admin: bool) -> list[dic
     if type_ids:
         types = {t.id: t for t in (await session.execute(select(LeaveType).where(LeaveType.id.in_(type_ids)))).scalars()}
     file_ids = {r.attachment_file_id for r in rows if isinstance(r, LeaveRequest) and r.attachment_file_id}
+    loc_ids = {r.client_location_id for r in rows if isinstance(r, OnDutyRequest)}
+    locs: dict[uuid.UUID, ClientLocation] = {}
+    if loc_ids:
+        locs = {c.id: c for c in (await session.execute(select(ClientLocation).where(ClientLocation.id.in_(loc_ids)))).scalars()}
     ctypes: dict[uuid.UUID, str] = {}
     if file_ids:
         ctypes = {
@@ -273,6 +297,16 @@ async def _render(session: AsyncSession, rows: list, *, admin: bool) -> list[dic
                 "attachment_content_type": ctypes.get(r.attachment_file_id) if r.attachment_file_id else None,
                 **tail,
             }
+        elif isinstance(r, OnDutyRequest):
+            loc = locs[r.client_location_id]
+            item = {
+                "id": str(r.id),
+                "client_location": {"id": str(loc.id), "name": loc.name, "address": loc.address},
+                "from_date": r.from_date.isoformat(),
+                "to_date": r.to_date.isoformat(),
+                "days": r.days,
+                **tail,
+            }
         else:
             item = {
                 "id": str(r.id),
@@ -284,7 +318,7 @@ async def _render(session: AsyncSession, rows: list, *, admin: bool) -> list[dic
             }
         if admin:
             u = users[r.user_id]
-            item["type"] = "leave" if isinstance(r, LeaveRequest) else "permission"
+            item["type"] = next(k for k, m in KINDS.items() if isinstance(r, m))
             item["user"] = att.user_summary(u, photos.get(u.id))
         out.append(item)
     return out
@@ -564,6 +598,8 @@ async def apply_leave(session: AsyncSession, actor: Principal, body: Any, redis:
     )
     if clash.first():
         raise _err("OVERLAPPING_REQUEST", "You already have a pending or approved leave on these dates", "from_date")
+    if await on_duty_overlaps(session, user.id, body.from_date, body.to_date, ("pending", "approved")):
+        raise _err("OVERLAPPING_REQUEST", "You have a pending or approved on-duty request on these dates", "from_date")
     # Both rules are evaluated on the merged block, so splitting one absence into adjacent requests gains nothing.
     b_from, b_to, b_days, b_att = await _merged_block(
         session, user, lt, body.from_date, body.to_date, days, bool(body.attachment_file_id)
@@ -779,7 +815,7 @@ def _range_conditions(model, d_from: dt.date | None, d_to: dt.date | None) -> li
     if d_from and d_to and d_to < d_from:
         raise _err("VALIDATION_ERROR", "to must be >= from", "to")
     cond: list = []
-    lo, hi = (model.to_date, model.from_date) if model is LeaveRequest else (model.request_date, model.request_date)
+    lo, hi = (model.to_date, model.from_date) if model in DATE_RANGE_MODELS else (model.request_date, model.request_date)
     if d_from:
         cond.append(lo >= d_from)
     if d_to:
@@ -796,7 +832,7 @@ def _status_cond(model, status: str | None) -> list:
 
 
 def _order(model):
-    first = model.from_date if model is LeaveRequest else model.request_date
+    first = model.from_date if model in DATE_RANGE_MODELS else model.request_date
     return (first.desc(), model.created_at.desc())
 
 
@@ -838,7 +874,7 @@ async def cancel(session: AsyncSession, actor: Principal, kind: str, req_id: uui
     if r.status == "pending":
         restore_used = False
     elif r.status == "approved":
-        start = r.from_date if kind == "leave" else r.request_date
+        start = r.request_date if kind == "permission" else r.from_date
         if not (cfg["leave.allow_cancel_approved"] and start > today):
             raise AppError("NOT_PENDING", "Only pending requests can be cancelled")
         restore_used = True
@@ -867,8 +903,8 @@ async def cancel(session: AsyncSession, actor: Principal, kind: str, req_id: uui
 
 
 async def cancel_pending_for_user(session: AsyncSession, user: User, actor: Principal, *, why: str) -> int:
-    """Deactivate / delete: cancel the user's PENDING leave + permission requests, restoring `pending` balance.
-    Caller commits (same transaction as the status change). Audited as leave.auto_cancel / permission.auto_cancel."""
+    """Deactivate / delete: cancel the user's PENDING leave + permission + on-duty requests, restoring `pending` balance.
+    Caller commits (same transaction as the status change). Audited as leave / permission / on_duty .auto_cancel."""
     n = 0
     leaves = (
         (
@@ -912,18 +948,31 @@ async def cancel_pending_for_user(session: AsyncSession, user: User, actor: Prin
         .scalars()
         .all()
     )
-    for p in perms:
-        p.status, p.cancelled_at = "cancelled", utcnow()
-        audit(
-            session,
-            action="permission.auto_cancel",
-            actor=actor,
-            entity_type="permission_request",
-            entity_id=p.id,
-            before={"status": "pending"},
-            after={"status": "cancelled", "reason": why, "owner": user.employee_id},
+    ods = (
+        (
+            await session.execute(
+                select(OnDutyRequest)
+                .where(OnDutyRequest.user_id == user.id, OnDutyRequest.status == "pending")
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
         )
-        n += 1
+        .scalars()
+        .all()
+    )
+    for kind, rows in (("permission", perms), ("on_duty", ods)):
+        for p in rows:
+            p.status, p.cancelled_at = "cancelled", utcnow()
+            audit(
+                session,
+                action=f"{kind}.auto_cancel",
+                actor=actor,
+                entity_type=f"{kind}_request",
+                entity_id=p.id,
+                before={"status": "pending"},
+                after={"status": "cancelled", "reason": why, "owner": user.employee_id},
+            )
+            n += 1
     await session.flush()
     return n
 
@@ -1020,9 +1069,25 @@ async def _decide_locked(
                 raise _err("OVERLAPPING_REQUEST", "Overlaps another approved leave", "from_date")
             if await _permission_blocks_leave(session, requester, r):
                 raise _err("OVERLAPPING_REQUEST", "The employee has an approved permission in this period", "from_date")
+            if await on_duty_overlaps(session, r.user_id, r.from_date, r.to_date, ("approved",)):
+                raise _err("OVERLAPPING_REQUEST", "The employee is on approved on duty in this period", "from_date")
             await _move(session, bal, used=days, pending=-days)
         else:
             await _move(session, bal, pending=-days)
+    elif kind == "on_duty":
+        if approve:
+            clash = await session.execute(
+                select(LeaveRequest.id)
+                .where(
+                    LeaveRequest.user_id == r.user_id,
+                    LeaveRequest.status == "approved",
+                    LeaveRequest.from_date <= r.to_date,
+                    LeaveRequest.to_date >= r.from_date,
+                )
+                .limit(1)
+            )
+            if clash.first():
+                raise _err("OVERLAPPING_REQUEST", "The employee is on approved leave in this period", "from_date")
     elif approve:
         shift = requester.shift
         f_abs, t_abs = _abs_window(shift, r.from_time, r.to_time) if shift is not None else (0, 0)
@@ -1047,8 +1112,8 @@ async def _decide_locked(
         [r.user_id],
         type=f"{kind}_decision",
         entity_id=r.id,
-        title=f"{kind.title()} request {r.status}",
-        body=f"Your {kind} request was {r.status}",
+        title=f"{LABELS[kind].capitalize()} request {r.status}",
+        body=f"Your {LABELS[kind]} request was {r.status}",
     )
     return await _one(session, r, admin=True)
 
@@ -1105,7 +1170,7 @@ async def purge_old_text(session: AsyncSession, batch: int = 500) -> dict[str, i
     references them. 0 (default) keeps everything."""
     cfg = await _cfg(session)
     days = int(cfg["leave.reason_retention_days"])
-    out = {"leave": 0, "permission": 0, "files": 0}
+    out = {"leave": 0, "permission": 0, "on_duty": 0, "files": 0}
     if days <= 0:
         return out
     cutoff = _today(cfg) - dt.timedelta(days=days)
@@ -1113,6 +1178,7 @@ async def purge_old_text(session: AsyncSession, batch: int = 500) -> dict[str, i
     for kind, m, last_col in (
         ("leave", LeaveRequest, LeaveRequest.to_date),
         ("permission", PermissionRequest, PermissionRequest.request_date),
+        ("on_duty", OnDutyRequest, OnDutyRequest.to_date),
     ):
         extra = [m.attachment_file_id.is_not(None)] if kind == "leave" else []
         while True:
@@ -1159,7 +1225,7 @@ async def purge_old_text(session: AsyncSession, batch: int = 500) -> dict[str, i
                     out["files"] += 1
             out[kind] += len(ids)
             await session.commit()
-    if out["leave"] or out["permission"]:
+    if out["leave"] or out["permission"] or out["on_duty"]:
         audit(session, action="leave.retention_purge", entity_type="leave_request", after={**out, "retention_days": days})
         await session.commit()
     return out

@@ -1271,6 +1271,7 @@ INSERT INTO settings (key, value) VALUES ('payroll.pt_slabs', '[{"min_gross":"0.
 INSERT INTO settings (key, value) VALUES ('payroll.rounding', '"rupee"'::jsonb) ON CONFLICT (key) DO NOTHING;
 
 INSERT INTO settings (key, value) VALUES ('payroll.show_employer_contributions', 'false'::jsonb) ON CONFLICT (key) DO NOTHING;
+
 INSERT INTO settings (key, value) VALUES ('payroll.employer_share_from_employee', 'true'::jsonb) ON CONFLICT (key) DO NOTHING;
 
 INSERT INTO settings (key, value) VALUES ('payroll.mask_pan', 'true'::jsonb) ON CONFLICT (key) DO NOTHING;
@@ -1282,6 +1283,115 @@ INSERT INTO settings (key, value) VALUES ('payroll.company_address', '""'::jsonb
 INSERT INTO settings (key, value) VALUES ('payroll.payslip_footer', '"This is a computer-generated payslip and does not require a signature."'::jsonb) ON CONFLICT (key) DO NOTHING;
 
 UPDATE alembic_version SET version_num='0018' WHERE alembic_version.version_num = '0017';
+
+-- Running upgrade 0018 -> 0019
+
+CREATE TABLE client_locations (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name citext NOT NULL,
+  address text,
+  lat double precision NOT NULL,
+  lng double precision NOT NULL,
+  radius_m integer NOT NULL DEFAULT 200,
+  is_active boolean NOT NULL DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT uq_client_locations_name UNIQUE (name),
+  CONSTRAINT ck_client_locations_lat CHECK (lat BETWEEN -90 AND 90),
+  CONSTRAINT ck_client_locations_lng CHECK (lng BETWEEN -180 AND 180),
+  CONSTRAINT ck_client_locations_radius CHECK (radius_m BETWEEN 20 AND 5000)
+);
+
+CREATE TRIGGER trg_client_locations_updated_at BEFORE UPDATE ON client_locations FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE on_duty_requests (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  client_location_id uuid NOT NULL REFERENCES client_locations(id) ON DELETE RESTRICT,
+  from_date date NOT NULL,
+  to_date date NOT NULL,
+  days integer NOT NULL,
+  reason_enc bytea,
+  status text NOT NULL DEFAULT 'pending',
+  approver_id uuid REFERENCES users(id) ON DELETE RESTRICT,
+  decision_comment_enc bytea,
+  decided_at timestamptz,
+  cancelled_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT ck_on_duty_requests_dates CHECK (to_date >= from_date),
+  CONSTRAINT ck_on_duty_requests_days CHECK (days > 0),
+  CONSTRAINT ck_on_duty_requests_status CHECK (status IN ('pending','approved','rejected','cancelled')),
+  CONSTRAINT ex_on_duty_requests_no_overlap EXCLUDE USING gist (
+    user_id WITH =, daterange(from_date, to_date, '[]') WITH &&
+  ) WHERE (status IN ('pending','approved'))
+);
+
+CREATE INDEX ix_on_duty_requests_status ON on_duty_requests (status);
+
+CREATE INDEX ix_on_duty_requests_user_from_date ON on_duty_requests (user_id, from_date);
+
+CREATE INDEX ix_on_duty_requests_client_location_id ON on_duty_requests (client_location_id);
+
+CREATE INDEX ix_on_duty_requests_approver_id ON on_duty_requests (approver_id);
+
+CREATE TRIGGER trg_on_duty_requests_updated_at BEFORE UPDATE ON on_duty_requests FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+ALTER TABLE attendance ADD COLUMN client_location_id uuid REFERENCES client_locations(id) ON DELETE RESTRICT;
+
+CREATE INDEX ix_attendance_client_location_id ON attendance (client_location_id);
+
+INSERT INTO permissions (code, module, description) VALUES ('client_location.manage', 'client_location', 'Manage client locations for on duty (geo coordinates)') ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO role_permissions (role_id, permission_id) SELECT r.id, p.id FROM roles r, permissions p WHERE r.name IN ('admin', 'hr') AND p.code = 'client_location.manage' ON CONFLICT DO NOTHING;
+
+UPDATE alembic_version SET version_num='0019' WHERE alembic_version.version_num = '0018';
+
+-- Running upgrade 0019 -> 0020
+
+CREATE TABLE tasks (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  created_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  title text NOT NULL,
+  notes_enc bytea,
+  due_at timestamptz NOT NULL,
+  remind_at timestamptz,
+  reminded_at timestamptz,
+  done_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT ck_tasks_remind_before_due CHECK (remind_at IS NULL OR remind_at <= due_at),
+  CONSTRAINT ck_tasks_title CHECK (char_length(title) BETWEEN 1 AND 150)
+);
+
+CREATE INDEX ix_tasks_user_due ON tasks (user_id, due_at);
+
+CREATE INDEX ix_tasks_created_by ON tasks (created_by);
+
+CREATE INDEX ix_tasks_reminder_due ON tasks (remind_at) WHERE reminded_at IS NULL AND done_at IS NULL AND remind_at IS NOT NULL;
+
+CREATE TRIGGER trg_tasks_updated_at BEFORE UPDATE ON tasks FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+ALTER TABLE attendance ADD COLUMN manual boolean NOT NULL DEFAULT false;
+
+ALTER TABLE attendance ADD COLUMN manual_by uuid REFERENCES users(id) ON DELETE RESTRICT;
+
+ALTER TABLE attendance ADD COLUMN manual_reason_enc bytea;
+
+CREATE INDEX ix_attendance_manual ON attendance (work_date) WHERE manual;
+
+INSERT INTO permissions (code, module, description) VALUES ('task.assign_team', 'task', 'Assign tasks to direct reports') ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO permissions (code, module, description) VALUES ('task.assign_all', 'task', 'Assign tasks to any employee') ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO permissions (code, module, description) VALUES ('attendance.manual', 'attendance', 'Enter or correct attendance manually') ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO role_permissions (role_id, permission_id) SELECT r.id, p.id FROM roles r, permissions p WHERE r.name IN ('admin', 'hr', 'manager') AND p.code = 'task.assign_team' ON CONFLICT DO NOTHING;
+
+INSERT INTO role_permissions (role_id, permission_id) SELECT r.id, p.id FROM roles r, permissions p WHERE r.name IN ('admin', 'hr') AND p.code IN ('task.assign_all', 'attendance.manual') ON CONFLICT DO NOTHING;
+
+UPDATE alembic_version SET version_num='0020' WHERE alembic_version.version_num = '0019';
 
 COMMIT;
 

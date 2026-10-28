@@ -35,6 +35,30 @@ class AdminRepository {
         await _dio.delete<void>(path);
       });
 
+  // ---- manual attendance (HR / Admin) -------------------------------------------
+
+  Future<ManualAttendanceDay> manualAttendance(String userId, String workDate) async =>
+      ManualAttendanceDay.fromJson(await _get('/admin/attendance/$userId/$workDate'));
+
+  Future<ManualAttendanceDay> saveManualAttendance(
+    String userId,
+    String workDate, {
+    required String checkIn,
+    String? checkOut,
+    required String reason,
+  }) =>
+      guardApi(() async {
+        final res = await _dio.put<Map<String, dynamic>>(
+          '/admin/attendance/$userId/$workDate',
+          data: {'check_in': checkIn, 'check_out': checkOut, 'reason': reason.trim()},
+        );
+        return ManualAttendanceDay.fromJson(res.data!);
+      });
+
+  Future<void> deleteManualAttendance(String userId, String workDate) => guardApi(() async {
+        await _dio.delete<void>('/admin/attendance/$userId/$workDate');
+      });
+
   // ---- employees ---------------------------------------------------------------
 
   Future<Paged<Employee>> employees(EmployeeQuery q, {int page = 1}) async => Paged.parse(

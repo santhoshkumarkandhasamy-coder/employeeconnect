@@ -23,6 +23,8 @@ dependencies:
   file_picker: ^8.1.2 # admin announcement PDF upload only (image_picker cannot pick documents)
   path_provider: ^2.1.4 # app-private cache dir for exports (getTemporaryDirectory)
   share_plus: ^10.0.0 # share sheet for downloaded Excel exports (Share.shareXFiles)
+  flutter_local_notifications: ^22.3.3
+  timezone: ^0.11.2
 
 dev_dependencies:
   flutter_test:
