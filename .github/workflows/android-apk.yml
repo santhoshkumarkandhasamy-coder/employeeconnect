@@ -1,0 +1,77 @@
+# Builds the Android APK on GitHub (Actions -> "Android APK" -> Run workflow, or every push to main that changes the app).
+# Download it from the run page under "Artifacts".
+#
+# Repository secrets (Settings -> Secrets and variables -> Actions):
+#   API_BASE_URL               https://hr.yourcompany.com/api
+#   CERT_PINS                  <live-pin>,<backup-pin>   (deploy/scripts/spki-pin.sh, see docs/BUILD_APK.md)
+#   ANDROID_KEYSTORE_BASE64    base64 of the company .jks   (optional but needed so updates install over old versions)
+#   ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
+# With API_BASE_URL + CERT_PINS: a RELEASE apk for employees.
+# Without them: a TEST (debug) apk; on first start it asks for the server address (http allowed, no certificate pinning).
+name: Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["frontend/**", ".github/workflows/android-apk.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.47.8
+          cache: true
+
+      - run: flutter pub get
+
+      - name: Company signing key (optional)
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then echo "No signing key secret: the APK is signed with the debug key."; exit 0; fi
+          echo "$KEYSTORE_B64" | base64 -d > android/employee-connect.jks
+          printf 'storeFile=../employee-connect.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > android/key.properties
+
+      - name: Build APK
+        env:
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          CERT_PINS: ${{ secrets.CERT_PINS }}
+        run: |
+          if [ -n "$API_BASE_URL" ] && [ -n "$CERT_PINS" ]; then
+            flutter build apk --release --obfuscate --split-debug-info=build/debug-info \
+              --dart-define=API_BASE_URL="$API_BASE_URL" --dart-define=CERT_PINS="$CERT_PINS"
+            cp build/app/outputs/flutter-apk/app-release.apk ../employee-connect.apk
+          else
+            echo "API_BASE_URL / CERT_PINS not set: building a TEST apk (asks for the server address on first start)."
+            flutter build apk --debug
+            cp build/app/outputs/flutter-apk/app-debug.apk ../employee-connect-test.apk
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: employee-connect-apk
+          path: "*.apk"
+          if-no-files-found: error
+          retention-days: 30

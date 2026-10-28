@@ -1,5 +1,12 @@
 # Build the Android app (APK)
 
+**Easiest: GitHub builds it.** Repository -> Actions -> "Android APK" -> Run workflow, then download
+`employee-connect-apk` from the run's Artifacts. Add the secrets listed at the top of
+`.github/workflows/android-apk.yml` (server URL, certificate pins, signing key) to get the release APK for employees;
+without them you get a test APK that asks for the server address on first start.
+
+To build it on your own computer instead, follow the steps below.
+
 The app is built on a computer with Flutter and the Android SDK, then the `.apk` is installed on the
 employees' Android phones. The server must be running first (see `SETUP.md` / `DEPLOY.md`).
 
