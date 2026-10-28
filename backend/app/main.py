@@ -36,6 +36,7 @@ from .routers import (
     leave,
     payroll,
     profile,
+    tasks,
 )
 
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9-]{8,64}$")
@@ -110,4 +111,5 @@ def create_app() -> FastAPI:
     app.include_router(admin_roles.router, prefix="/api")
     app.include_router(payroll.employee_router, prefix="/api")
     app.include_router(payroll.admin_router, prefix="/api")
+    app.include_router(tasks.router, prefix="/api")
     return app

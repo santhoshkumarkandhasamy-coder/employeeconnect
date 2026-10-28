@@ -57,6 +57,7 @@ ATTENDANCE_HEADERS = [
     "Worked Hours",
     "Within Geofence",
     "Client Location",  # on-duty punch: the client site (empty = office)
+    "Manual Entry",  # entered or corrected by HR/Admin
 ]
 LEAVE_HEADERS = [  # full list (include_reasons=true)
     "Request ID",
@@ -177,6 +178,7 @@ def attendance_sheet(
                 Attendance.worked_minutes,
                 Attendance.check_in_within_fence,
                 ClientLocation.name,
+                Attendance.manual,
             ).select_from(Attendance)
         )
         q = (
@@ -186,7 +188,7 @@ def attendance_sheet(
             .order_by(Attendance.work_date, User.employee_id)
         )
         result = await session.stream(q.execution_options(yield_per=BATCH))
-        async for day, eid, name, dept, shift, cin, cout, status, late, worked, fence, site in result:
+        async for day, eid, name, dept, shift, cin, cout, status, late, worked, fence, site, manual in result:
             yield (
                 day,
                 eid,
@@ -200,6 +202,7 @@ def attendance_sheet(
                 None if worked is None else round(worked / 60, 2),
                 "" if fence is None else ("Yes" if fence else "No"),
                 site or "",
+                "Yes" if manual else "No",
             )
 
     return SheetSpec("Attendance", ATTENDANCE_HEADERS, count, rows, get_settings().export_max_rows)

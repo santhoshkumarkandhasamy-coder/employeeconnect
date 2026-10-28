@@ -1347,5 +1347,51 @@ INSERT INTO role_permissions (role_id, permission_id) SELECT r.id, p.id FROM rol
 
 UPDATE alembic_version SET version_num='0019' WHERE alembic_version.version_num = '0018';
 
+-- Running upgrade 0019 -> 0020
+
+CREATE TABLE tasks (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  created_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  title text NOT NULL,
+  notes_enc bytea,
+  due_at timestamptz NOT NULL,
+  remind_at timestamptz,
+  reminded_at timestamptz,
+  done_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT ck_tasks_remind_before_due CHECK (remind_at IS NULL OR remind_at <= due_at),
+  CONSTRAINT ck_tasks_title CHECK (char_length(title) BETWEEN 1 AND 150)
+);
+
+CREATE INDEX ix_tasks_user_due ON tasks (user_id, due_at);
+
+CREATE INDEX ix_tasks_created_by ON tasks (created_by);
+
+CREATE INDEX ix_tasks_reminder_due ON tasks (remind_at) WHERE reminded_at IS NULL AND done_at IS NULL AND remind_at IS NOT NULL;
+
+CREATE TRIGGER trg_tasks_updated_at BEFORE UPDATE ON tasks FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+ALTER TABLE attendance ADD COLUMN manual boolean NOT NULL DEFAULT false;
+
+ALTER TABLE attendance ADD COLUMN manual_by uuid REFERENCES users(id) ON DELETE RESTRICT;
+
+ALTER TABLE attendance ADD COLUMN manual_reason_enc bytea;
+
+CREATE INDEX ix_attendance_manual ON attendance (work_date) WHERE manual;
+
+INSERT INTO permissions (code, module, description) VALUES ('task.assign_team', 'task', 'Assign tasks to direct reports') ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO permissions (code, module, description) VALUES ('task.assign_all', 'task', 'Assign tasks to any employee') ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO permissions (code, module, description) VALUES ('attendance.manual', 'attendance', 'Enter or correct attendance manually') ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO role_permissions (role_id, permission_id) SELECT r.id, p.id FROM roles r, permissions p WHERE r.name IN ('admin', 'hr', 'manager') AND p.code = 'task.assign_team' ON CONFLICT DO NOTHING;
+
+INSERT INTO role_permissions (role_id, permission_id) SELECT r.id, p.id FROM roles r, permissions p WHERE r.name IN ('admin', 'hr') AND p.code IN ('task.assign_all', 'attendance.manual') ON CONFLICT DO NOTHING;
+
+UPDATE alembic_version SET version_num='0020' WHERE alembic_version.version_num = '0019';
+
 COMMIT;
 

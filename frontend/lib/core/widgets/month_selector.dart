@@ -3,11 +3,14 @@ import 'package:flutter/material.dart';
 import '../utils/dates.dart';
 
 /// Previous / next month control. [month] is `YYYY-MM`. Next is disabled
-/// past the current month.
+/// past the current month unless [allowFuture].
 class MonthSelector extends StatelessWidget {
-  const MonthSelector({required this.month, required this.onChanged, super.key, this.now});
+  const MonthSelector({required this.month, required this.onChanged, super.key, this.now, this.allowFuture = false});
   final String month;
   final ValueChanged<String> onChanged;
+
+  /// Planning screens (tasks) may move past the current month.
+  final bool allowFuture;
 
   /// Overridable for tests.
   final DateTime? now;
@@ -15,7 +18,7 @@ class MonthSelector extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final current = monthKey(now ?? DateTime.now());
-    final canNext = month.compareTo(current) < 0;
+    final canNext = allowFuture || month.compareTo(current) < 0;
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [

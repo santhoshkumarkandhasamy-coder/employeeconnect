@@ -380,6 +380,7 @@ def test_scheduler_builds_jobs():
         "announcements.retention",
         "license.expiry_alert",
         "worker.heartbeat",
+        "tasks.reminders",
     }
     trig = str(s.get_job("attendance.auto_close_open_records").trigger)
     assert "hour='0'" in trig and "minute='30'" in trig

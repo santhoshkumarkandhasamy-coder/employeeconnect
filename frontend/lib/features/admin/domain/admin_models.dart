@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import '../../../core/api/api_exception.dart';
 import '../../../core/utils/dates.dart';
+import '../../attendance/domain/attendance_models.dart' show AttendanceRecord;
 import '../../profile/domain/profile_models.dart'
     show EmergencyContact, normalizePhone;
 
@@ -25,6 +26,8 @@ abstract final class AdminPerm {
   static const holidayManage = 'holiday.manage';
   static const leaveTypeManage = 'leave_type.manage';
   static const clientLocationManage = 'client_location.manage';
+  static const attendanceManual = 'attendance.manual';
+  static const announcementManage = 'announcement.manage';
   static const roleView = 'role.view';
   static const roleManage = 'role.manage';
   static const roleAssign = 'role.assign';
@@ -50,6 +53,8 @@ enum AdminSection {
   holidays('Holidays', AdminPerm.holidayManage),
   leaveTypes('Leave types and quotas', AdminPerm.leaveTypeManage),
   clientLocations('Client locations (on duty)', AdminPerm.clientLocationManage),
+  manualAttendance('Manual attendance', AdminPerm.attendanceManual),
+  announcements('Announcements', AdminPerm.announcementManage),
   settings('Settings', AdminPerm.settingsManage),
   audit('Audit log', AdminPerm.auditView),
   sessions('Sessions and devices', AdminPerm.sessionManage),
@@ -1131,4 +1136,43 @@ String adminErrorMessage(ApiException e) {
     default:
       return e.message;
   }
+}
+
+
+// ---- manual attendance ---------------------------------------------------------
+
+/// `GET/PUT /admin/attendance/{user_id}/{work_date}`: the employee and that
+/// day's record (null when there is none yet).
+class ManualAttendanceDay {
+  const ManualAttendanceDay({required this.workDate, this.user, this.record});
+  final String workDate;
+  final EmployeeRef? user;
+  final AttendanceRecord? record;
+
+  factory ManualAttendanceDay.fromJson(Map<String, dynamic> j) {
+    final r = j['record'];
+    return ManualAttendanceDay(
+      workDate: _s(j['work_date']),
+      user: EmployeeRef.parse(j['user']),
+      record: r is Map<String, dynamic> ? AttendanceRecord.fromJson(r) : null,
+    );
+  }
+}
+
+/// First problem with the manual attendance form, or null.
+String? validateManualAttendance({
+  required DateTime? date,
+  required String? checkIn,
+  required String? checkOut,
+  required String reason,
+  required DateTime now,
+}) {
+  if (date == null) return 'Choose the date';
+  final today = DateTime(now.year, now.month, now.day);
+  if (DateTime(date.year, date.month, date.day).isAfter(today)) return 'Attendance cannot be entered for a future date';
+  if (checkIn == null || !isValidTime(checkIn)) return 'Choose the check-in time';
+  if (checkOut != null && !isValidTime(checkOut)) return 'Choose a valid check-out time';
+  if (reason.trim().length < 3) return 'Give a reason (at least 3 characters)';
+  if (reason.trim().length > 300) return 'Keep the reason under 300 characters';
+  return null;
 }

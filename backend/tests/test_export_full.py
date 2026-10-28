@@ -220,7 +220,7 @@ async def test_all_has_four_sheets_with_headers_and_rows_for_hr(client, H, db, s
         assert ws["A1"].font.bold
     assert [c.value for c in wb["Attendance"][1]] == [
         "Date", "Employee ID", "Name", "Department", "Shift", "Check-in", "Check-out", "Status",
-        "Minutes Late", "Worked Hours", "Within Geofence", "Client Location",
+        "Minutes Late", "Worked Hours", "Within Geofence", "Client Location", "Manual Entry",
     ]  # fmt: skip
     assert [c.value for c in wb["Late"][1]] == [
         "Date", "Employee ID", "Name", "Department", "Shift Start", "Check-in", "Minutes Late",

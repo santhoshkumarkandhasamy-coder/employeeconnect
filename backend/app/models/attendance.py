@@ -6,7 +6,7 @@ import uuid
 from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, Float, Index, Integer, Text, Time, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..core.crypto import EncryptedJSON
+from ..core.crypto import EncryptedJSON, EncryptedString
 from .base import Base, CreatedMixin, TimestampMixin, fk_uuid, uuid_pk
 
 
@@ -74,6 +74,10 @@ class Attendance(TimestampMixin, Base):
     check_in_mock_location: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     check_out_mock_location: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     suspicious: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    # manual entry / correction by HR or Admin (plan 14): who, why (encrypted). Punch evidence is kept when correcting.
+    manual: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    manual_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+    manual_reason: Mapped[str | None] = mapped_column("manual_reason_enc", EncryptedString)
 
 
 class LateRecord(CreatedMixin, Base):

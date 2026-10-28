@@ -1037,3 +1037,35 @@ on-duty request the same way.
   record shape).
 - Calendar days gain `on_duty: "<client location name>" | null`.
 - Push: `new_request` to approvers ("New on duty request"), `on_duty_decision` to the employee.
+
+
+## 15. Tasks with reminders, manual attendance (plan 14) - IMPLEMENTED
+
+| Method | Path | Access / Perm |
+|---|---|---|
+| GET | /tasks?from=&to=&assigned_by_me=false | Self (default range: this month; max 92 days; office dates of `due_at`) |
+| POST | /tasks | Self; `user_id` of someone else needs `task.assign_team` (direct reports) or `task.assign_all` |
+| GET | /tasks/{id} | assignee or creator (else 404) |
+| PUT | /tasks/{id} | creator only (403 for the assignee) |
+| POST | /tasks/{id}/done `{done: bool}` | assignee or creator |
+| DELETE | /tasks/{id} | creator only |
+| GET | /admin/attendance/{user_id}/{work_date} | `attendance.manual` |
+| PUT | /admin/attendance/{user_id}/{work_date} | `attendance.manual` (not for yourself) |
+| DELETE | /admin/attendance/{user_id}/{work_date} | `attendance.manual` (manual entries without a real punch only) |
+
+**TaskIn** (POST/PUT, extra keys 422): `title` 1-150, `notes` <= 2000 or null, `due_at` (ISO-8601 WITH offset),
+`remind_minutes_before` 0..10080 or null (no reminder), `user_id` (POST only, optional). `due_at` within 366 days back /
+3 years ahead (422 `INVALID_DATE_RANGE`). Assigning outside your scope -> 422 `VALIDATION_ERROR` field `user_id`; without any
+assign permission -> 403.
+
+**Task** -> `{id, title, notes, due_at, remind_at, remind_minutes_before, done, done_at, assigned, user, created_by, can_edit,
+created_at}` (`user` / `created_by` are person summaries). GET /tasks -> `{from, to, items}` sorted by `due_at`.
+
+Push types: `task_assigned` (to the assignee), `task_done` (to the creator, when the assignee completes it),
+`task_reminder` (worker job `tasks.reminders`, every minute, once per arming), `attendance_manual` (to the employee).
+
+**PUT /admin/attendance/{user_id}/{work_date}** `{check_in: "HH:MM", check_out: "HH:MM"|null, reason: 3-300}` -> 200
+`{user, work_date, record}` (record = attendance record + `manual_reason`). Errors: 422 `INVALID_DATE_RANGE` (future or > 366 days
+back), 422 `VALIDATION_ERROR` (times in the future, check-out before check-in on a day shift, reason), 409 `ON_LEAVE`,
+422 `NO_SHIFT_ASSIGNED`, 403 (own attendance), 404 (unknown employee). DELETE -> 204, 404 when no record, 409 for a punched day.
+All attendance records gain `manual: bool`. Export: the `Attendance` sheet ends with `Manual Entry` (Yes/No).

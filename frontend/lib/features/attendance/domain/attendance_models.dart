@@ -44,6 +44,8 @@ class AttendanceRecord {
     this.shiftStart,
     this.shiftEnd,
     this.clientLocationName,
+    this.manual = false,
+    this.manualReason,
   });
 
   final String id;
@@ -62,6 +64,12 @@ class AttendanceRecord {
 
   /// Set when the punch was an on-duty punch at a client location.
   final String? clientLocationName;
+
+  /// Entered or corrected by HR/Admin.
+  final bool manual;
+
+  /// Only in the HR/Admin manual-attendance view.
+  final String? manualReason;
 
   bool get checkedIn => checkInAt != null;
   bool get checkedOut => checkOutAt != null;
@@ -84,6 +92,8 @@ class AttendanceRecord {
       shiftStart: shift is Map ? shift['start'] as String? : null,
       shiftEnd: shift is Map ? shift['end'] as String? : null,
       clientLocationName: site is Map ? site['name'] as String? : null,
+      manual: j['manual'] as bool? ?? false,
+      manualReason: j['manual_reason'] as String?,
     );
   }
 

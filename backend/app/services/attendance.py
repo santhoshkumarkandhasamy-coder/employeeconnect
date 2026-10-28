@@ -11,7 +11,7 @@ import uuid
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,6 +36,7 @@ from ..models import (
     User,
 )
 from . import files as files_svc
+from .notifications import notify
 
 log = logging.getLogger("app.attendance")
 
@@ -226,6 +227,7 @@ def _record_out(
         "distance_m": a.check_in_distance_m if expose_distance else None,
         "selfie_url": f"/api/files/{a.check_in_selfie_file_id}" if a.check_in_selfie_file_id else None,
         "auto_closed": a.auto_closed,
+        "manual": a.manual,  # entered or corrected by HR/Admin
         # on-duty punch: the client site it was checked against (null = office)
         "client_location": {"id": str(site.id), "name": site.name} if site is not None else None,
         "shift": (
@@ -580,6 +582,144 @@ async def today(session: AsyncSession, actor: Principal) -> dict[str, Any]:
     if rec is None:
         return {"record": None, "on_duty": on_duty}
     return {**(await _records_out(session, [rec]))[0], "on_duty": on_duty}
+
+
+# ---------------------------------------------------------------- manual entry (HR / Admin, plan 14)
+MANUAL_MAX_PAST_DAYS = 366
+
+
+async def _manual_target(session: AsyncSession, actor: Principal, user_id: uuid.UUID) -> User:
+    u = await session.get(User, user_id)
+    if u is None or u.deleted_at is not None:
+        raise AppError("NOT_FOUND", "Employee not found")
+    if u.id == actor.id:
+        raise AppError("FORBIDDEN", "You cannot enter or change your own attendance")
+    return u
+
+
+def _manual_date(cfg: dict[str, Any], work_date: dt.date) -> dt.date:
+    today_d = utcnow().astimezone(office_tz(cfg)).date()
+    if work_date > today_d:
+        raise AppError("INVALID_DATE_RANGE", "Attendance cannot be entered for a future date",
+                       details=[{"field": "work_date", "message": "future"}])  # fmt: skip
+    if work_date < today_d - dt.timedelta(days=MANUAL_MAX_PAST_DAYS):
+        raise AppError("INVALID_DATE_RANGE", f"Attendance can be entered at most {MANUAL_MAX_PAST_DAYS} days back",
+                       details=[{"field": "work_date", "message": "too old"}])  # fmt: skip
+    return today_d
+
+
+def _manual_snapshot(a: Attendance | None) -> dict[str, Any] | None:
+    if a is None:
+        return None
+    return {
+        "check_in_at": iso_z(a.check_in_at),
+        "check_out_at": iso_z(a.check_out_at) if a.check_out_at else None,
+        "status": a.status,
+        "minutes_late": a.minutes_late,
+        "manual": a.manual,
+    }
+
+
+async def manual_get(session: AsyncSession, actor: Principal, user_id: uuid.UUID, work_date: dt.date) -> dict[str, Any]:
+    u = await session.get(User, user_id)
+    if u is None or u.deleted_at is not None:
+        raise AppError("NOT_FOUND", "Employee not found")
+    q = select(Attendance).where(Attendance.user_id == u.id, Attendance.work_date == work_date)
+    rec = (await session.execute(q)).scalar_one_or_none()
+    photos = await files_svc.photo_file_ids(session, [u.id])
+    out = (await _records_out(session, [rec], expose_distance=True))[0] if rec else None
+    if rec is not None and rec.manual:
+        out["manual_reason"] = rec.manual_reason  # type: ignore[index]
+    return {"user": user_summary(u, photos.get(u.id)), "work_date": work_date.isoformat(), "record": out}
+
+
+async def manual_upsert(
+    session: AsyncSession, actor: Principal, user_id: uuid.UUID, work_date: dt.date, body: Any
+) -> dict[str, Any]:
+    """Create or correct one attendance day. Status, lateness and worked time are derived exactly like punches;
+    the late record is rebuilt. Location / selfie evidence of an existing punch is kept. Audited and pushed."""
+    user = await _manual_target(session, actor, user_id)
+    cfg = await load_settings(session)
+    tz = office_tz(cfg)
+    _manual_date(cfg, work_date)
+    q = select(Attendance).where(Attendance.user_id == user.id, Attendance.work_date == work_date).with_for_update()
+    rec = (await session.execute(q)).scalar_one_or_none()
+    shift = (await session.get(Shift, rec.shift_id)) if rec is not None and rec.shift_id else user.shift
+    if shift is None:
+        raise AppError("NO_SHIFT_ASSIGNED", "This employee has no shift. Assign one first.")
+    for lv in await _approved_leaves(session, user.id, work_date, work_date):
+        if not lv.half_day:
+            raise AppError("ON_LEAVE", "The employee is on approved full-day leave that day. Cancel the leave first.")
+    local_in = dt.datetime.combine(work_date, body.check_in.replace(second=0, microsecond=0), tzinfo=tz)
+    local_out = None
+    if body.check_out is not None:
+        local_out = dt.datetime.combine(work_date, body.check_out.replace(second=0, microsecond=0), tzinfo=tz)
+        if local_out <= local_in:
+            if not is_overnight(shift):
+                raise AppError("VALIDATION_ERROR", "Check-out must be after check-in",
+                               details=[{"field": "check_out", "message": "before check-in"}])  # fmt: skip
+            local_out += dt.timedelta(days=1)  # night shift: check-out the next morning
+    now = utcnow()
+    in_utc = local_in.astimezone(dt.UTC)
+    out_utc = local_out.astimezone(dt.UTC) if local_out else None
+    if in_utc > now or (out_utc is not None and out_utc > now):
+        raise AppError("VALIDATION_ERROR", "Times cannot be in the future",
+                       details=[{"field": "check_out" if in_utc <= now else "check_in", "message": "future"}])  # fmt: skip
+    minutes_late = 0
+    if await working_day(session, user, work_date):
+        minutes_late = await minutes_late_for(session, user, shift, work_date, local_in)
+    worked = int((out_utc - in_utc).total_seconds() // 60) if out_utc else None
+    status = "late" if minutes_late else "present"
+    if worked is not None and worked < int(cfg["attendance.half_day_minutes"]):
+        status = "half_day"
+    before = _manual_snapshot(rec)
+    if rec is None:
+        rec = Attendance(user_id=user.id, work_date=work_date, shift_id=shift.id, check_in_at=in_utc)
+        session.add(rec)
+    else:
+        await session.execute(delete(LateRecord).where(LateRecord.attendance_id == rec.id))
+    rec.check_in_at, rec.check_out_at, rec.worked_minutes = in_utc, out_utc, worked
+    rec.status, rec.minutes_late, rec.auto_closed = status, minutes_late, False
+    rec.manual, rec.manual_by, rec.manual_reason = True, actor.id, body.reason
+    await session.flush()
+    if minutes_late:
+        session.add(
+            LateRecord(
+                user_id=user.id, attendance_id=rec.id, work_date=work_date, shift_start=shift.start_time,
+                grace_minutes=shift.grace_minutes, check_in_at=in_utc, minutes_late=minutes_late,
+            )
+        )  # fmt: skip
+    audit(
+        session, action="attendance.manual", actor=actor, entity_type="attendance", entity_id=rec.id,
+        before=before, after={**_manual_snapshot(rec), "owner": user.employee_id, "work_date": work_date.isoformat()},  # type: ignore[dict-item]
+    )  # fmt: skip
+    await session.commit()
+    await notify(
+        session, [user.id], type="attendance_manual", entity_id=rec.id,
+        title="Attendance updated", body=f"HR updated your attendance for {work_date.strftime('%d %b %Y')}",
+    )  # fmt: skip
+    return await manual_get(session, actor, user.id, work_date)
+
+
+async def manual_delete(session: AsyncSession, actor: Principal, user_id: uuid.UUID, work_date: dt.date) -> None:
+    """Remove a MANUAL entry (a real punch cannot be deleted, only corrected)."""
+    user = await _manual_target(session, actor, user_id)
+    q = select(Attendance).where(Attendance.user_id == user.id, Attendance.work_date == work_date).with_for_update()
+    rec = (await session.execute(q)).scalar_one_or_none()
+    if rec is None:
+        raise AppError("NOT_FOUND", "No attendance for this date")
+    if not rec.manual:
+        raise AppError("CONFLICT", "Only manual entries can be removed. Correct the times instead.", status=409)
+    if rec.check_in_within_fence is not None or rec.check_in_selfie_file_id is not None:  # set only by a real punch
+        raise AppError("CONFLICT", "This day has a real punch; correct the times instead of removing it.", status=409)
+    before = _manual_snapshot(rec)
+    await session.execute(delete(LateRecord).where(LateRecord.attendance_id == rec.id))
+    await session.delete(rec)
+    audit(
+        session, action="attendance.manual_delete", actor=actor, entity_type="attendance", entity_id=rec.id,
+        before={**before, "owner": user.employee_id, "work_date": work_date.isoformat()},  # type: ignore[dict-item]
+    )  # fmt: skip
+    await session.commit()
 
 
 # ---------------------------------------------------------------- history / team

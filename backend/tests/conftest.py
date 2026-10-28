@@ -73,6 +73,7 @@ TABLES = [
     "permission_requests",
     "client_locations",
     "on_duty_requests",
+    "tasks",
     "announcements",
     "announcement_departments",
     "announcement_reads",
