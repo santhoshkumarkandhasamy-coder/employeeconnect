@@ -1,0 +1,24 @@
+# Generated code do not commit.
+file(TO_CMAKE_PATH "D:\\tools\\flutter" FLUTTER_ROOT)
+file(TO_CMAKE_PATH "D:\\employeeconnect\\frontend" PROJECT_DIR)
+
+set(FLUTTER_VERSION "0.1.0+1" PARENT_SCOPE)
+set(FLUTTER_VERSION_MAJOR 0 PARENT_SCOPE)
+set(FLUTTER_VERSION_MINOR 1 PARENT_SCOPE)
+set(FLUTTER_VERSION_PATCH 0 PARENT_SCOPE)
+set(FLUTTER_VERSION_BUILD 1 PARENT_SCOPE)
+
+# Environment variables to pass to tool_backend.sh
+list(APPEND FLUTTER_TOOL_ENVIRONMENT
+  "FLUTTER_ROOT=D:\\tools\\flutter"
+  "PROJECT_DIR=D:\\employeeconnect\\frontend"
+  "FLUTTER_ROOT=D:\\tools\\flutter"
+  "FLUTTER_EPHEMERAL_DIR=D:\\employeeconnect\\frontend\\windows\\flutter\\ephemeral"
+  "PROJECT_DIR=D:\\employeeconnect\\frontend"
+  "FLUTTER_TARGET=lib\\main.dart"
+  "DART_DEFINES=QVBJX0JBU0VfVVJMPWh0dHA6Ly9sb2NhbGhvc3Q6ODAwMC9hcGk=,RkxVVFRFUl9CVUlMRF9OQU1FPTAuMS4w,RkxVVFRFUl9CVUlMRF9OVU1CRVI9MQ==,RkxVVFRFUl9WRVJTSU9OPTMuNDcuNw==,RkxVVFRFUl9DSEFOTkVMPXN0YWJsZQ==,RkxVVFRFUl9HSVRfVVJMPWh0dHBzOi8vZ2l0aHViLmNvbS9mbHV0dGVyL2ZsdXR0ZXIuZ2l0,RkxVVFRFUl9GUkFNRVdPUktfUkVWSVNJT049YWJhZjljNTIzNw==,RkxVVFRFUl9FTkdJTkVfUkVWSVNJT049ZGViMjg3NDgxZQ==,RkxVVFRFUl9EQVJUX1ZFUlNJT049My4xMy41"
+  "DART_OBFUSCATION=false"
+  "TRACK_WIDGET_CREATION=true"
+  "TREE_SHAKE_ICONS=false"
+  "PACKAGE_CONFIG=D:\\employeeconnect\\frontend\\.dart_tool\\package_config.json"
+)
