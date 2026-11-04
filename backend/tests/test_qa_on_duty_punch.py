@@ -168,7 +168,8 @@ async def test_fence_inside_edge_outside(client, H, uid, clock):
     assert r.status_code == 422 and code(r) == "OUTSIDE_DUTY_LOCATION"
     det = r.json()["error"]["details"]
     assert det == [{"field": "within_fence", "message": "false"}]
-    blob = r.text
+    err = r.json()["error"]
+    blob = str(err.get("message", "")) + str(err.get("details"))  # ids/timestamps may contain digits
     assert "radius" not in blob.lower() and "333" not in blob and "150" not in blob
     # ~100 m inside a 150 m fence
     assert (await check_in(client, e, loc["id"], clock, p=NEAR)).status_code == 201
