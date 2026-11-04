@@ -118,6 +118,18 @@ class FakeDelivery implements PayrollFileDelivery {
 class FakeRepo extends PayrollRepository {
   FakeRepo() : super(Dio());
 
+  @override
+  Future<Map<String, dynamic>> dashboard(String period) async => dashboardJson;
+
+  @override
+  Future<Map<String, dynamic>> variance(String period) async => varianceJson;
+
+  @override
+  Future<PayrollFile> report(String kind, String period, {String? currentPassword}) async {
+    reportCalls.add(kind);
+    return PayrollFile(Uint8List(0), 'payroll-$kind-$period.xlsx');
+  }
+
   // data
   List<PayslipListItem> mine = [];
   Payslip? myDetail;
@@ -146,6 +158,31 @@ class FakeRepo extends PayrollRepository {
     pan: 'ABCDE1234F',
   );
   Map<String, Object?> settingsMap = {};
+  Map<String, dynamic> dashboardJson = {
+    'period': '2026-11',
+    'run': null,
+    'headcount': 2,
+    'held': 0,
+    'errors': 0,
+    'warnings': 0,
+    'totals': {'gross': '100000.00', 'deductions': '20000.00', 'net': '80000.00', 'employer_cost': '104000.00'},
+    'departments': [
+      {'department': 'Sales', 'employees': 2, 'gross': '100000.00', 'net': '80000.00', 'employer_cost': '104000.00'},
+    ],
+    'trend': [
+      {'period': '2026-11', 'employees': 2, 'gross': '100000.00', 'net': '80000.00', 'employer_cost': '104000.00'},
+    ],
+    'joiners': [],
+    'leavers': [],
+    'calendar': {
+      'cutoff_day': 25,
+      'process_by': '2026-11-28',
+      'pay_date': '2026-12-01',
+      'alerts': ['RUN_NOT_CREATED'],
+    },
+  };
+  Map<String, dynamic> varianceJson = {'period': '2026-11', 'previous': '2026-10', 'items': []};
+  final List<String> reportCalls = [];
   List<PayrollEmployee> employeeList = [];
 
   // behaviour switches

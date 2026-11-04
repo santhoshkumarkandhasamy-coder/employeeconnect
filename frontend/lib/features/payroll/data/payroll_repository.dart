@@ -220,6 +220,24 @@ class PayrollRepository {
         },
       );
 
+  // ---- dashboard and reports (plan 14 phase 1) ---------------------------------------
+
+  Future<Map<String, dynamic>> dashboard(String period) =>
+      _json('GET', '$_a/dashboard', query: {'period': period});
+
+  Future<Map<String, dynamic>> variance(String period) =>
+      _json('GET', '$_a/variance', query: {'period': period});
+
+  /// [kind]: department | headcount | ctc | lop | bank_advice. `bank_advice`
+  /// needs `payroll.manage` and [currentPassword].
+  Future<PayrollFile> report(String kind, String period, {String? currentPassword}) => _file(
+        'POST',
+        '$_a/reports/$kind?period=$period',
+        fallbackName: 'payroll-$kind-$period.xlsx',
+        ext: '.xlsx',
+        body: {if (currentPassword != null) 'current_password': currentPassword},
+      );
+
   // ---- admin payslips -------------------------------------------------------------
 
   Future<Payslip> payslip(String id) async =>

@@ -31,7 +31,7 @@ from ..schemas.payroll import (
     RunCreate,
     StructureIn,
 )
-from ..services import admin_security, payroll_register, payroll_settings, payroll_structures, payslip_pdf, xlsx
+from ..services import admin_security, payroll_register, payroll_reports, payroll_settings, payroll_structures, payslip_pdf, xlsx
 from ..services import payroll_common as pc
 from ..services import payroll_runs as runs
 
@@ -445,3 +445,63 @@ async def admin_payslip_pdf(
           after={"admin": True})  # fmt: skip
     await pc.commit(session)
     return _pdf_response(data, payslip_pdf.filename_for(view))
+
+
+# ============================================================================================ phase 2: dashboard and reports
+@admin_router.get("/dashboard")
+async def dashboard(
+    period: str | None = Query(None, pattern=r"^\d{4}-\d{2}$"),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "dashboard", (30, 60))
+    out = await payroll_reports.dashboard(session, period)
+    audit(session, action="payroll.dashboard.view", actor=actor, entity_type="payroll_dashboard", after={"period": out["period"]})
+    await pc.commit(session)
+    return out
+
+
+@admin_router.get("/variance")
+async def variance(
+    period: str | None = Query(None, pattern=r"^\d{4}-\d{2}$"),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "variance", (20, 60))
+    out = await payroll_reports.variance(session, period)
+    audit(session, action="payroll.variance.view", actor=actor, entity_type="payroll_dashboard", after={"period": out["period"]})
+    await pc.commit(session)
+    return out
+
+
+@admin_router.post("/reports/{kind}")
+async def extra_report(
+    kind: Literal["department", "headcount", "ctc", "lop", "bank_advice"],
+    body: RegisterIn,
+    period: str | None = Query(None, pattern=r"^\d{4}-\d{2}$"),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    """Body reuses RegisterIn: `current_password` is required (and `payroll.manage`) only for `bank_advice`."""
+    await pc.limit(redis, actor, "report", (10, 60), closed=True)
+    if kind == "bank_advice":
+        if not actor.has("payroll.manage"):
+            raise AppError("FORBIDDEN", "You do not have permission to export bank details")
+        await admin_security.require_reauth(session, redis, actor, body.current_password, action="payroll.report.bank")
+    built, name, rows = await payroll_reports.report(session, kind, period)
+    try:
+        audit(session, action="payroll.report.export", actor=actor, entity_type="payroll_dashboard",
+              after={"kind": kind, "period": period, "rows": rows})  # fmt: skip
+        await pc.commit(session)
+    except BaseException:
+        built.close()
+        raise
+    return StreamingResponse(
+        xlsx.iter_file(built),
+        media_type=xlsx.XLSX_MIME,
+        headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        background=BackgroundTask(built.close),
+    )

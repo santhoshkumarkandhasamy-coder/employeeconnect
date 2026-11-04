@@ -300,6 +300,12 @@ class PayrollSettingSpec {
 }
 
 const List<PayrollSettingSpec> payrollSettingSpecs = [
+  PayrollSettingSpec('payroll.cutoff_day', 'Attendance cutoff day', PayrollSettingKind.number,
+      'Payroll calendar', min: 1, max: 31,),
+  PayrollSettingSpec('payroll.process_day', 'Process the run by day', PayrollSettingKind.number,
+      'Payroll calendar', min: 1, max: 31,),
+  PayrollSettingSpec('payroll.pay_day', 'Pay day (next month)', PayrollSettingKind.number,
+      'Payroll calendar', min: 1, max: 31,),
   PayrollSettingSpec(
     'payroll.pay_days_basis',
     'Pay days basis',

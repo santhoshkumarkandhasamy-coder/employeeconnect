@@ -52,6 +52,9 @@ DEFAULTS: dict[str, Any] = {
         {"min_gross": "75001.00", "max_gross": None, "amount": "1250.00", "months": [3, 9]},
     ],
     "payroll.rounding": "rupee",
+    "payroll.cutoff_day": 25,
+    "payroll.process_day": 28,
+    "payroll.pay_day": 1,
     "payroll.show_employer_contributions": False,
     "payroll.employer_share_from_employee": True,
     "payroll.mask_pan": True,
@@ -81,6 +84,7 @@ _NUMBERS = {  # key -> (min, max), at most 2 decimals
     "payroll.esi_employee_rate_pct": (0, 10),
     "payroll.esi_employer_rate_pct": (0, 10),
 }
+_DAYS = {"payroll.cutoff_day", "payroll.process_day", "payroll.pay_day"}  # day of month, 1..31
 _TEXTS = {"payroll.company_address": (0, 300), "payroll.payslip_footer": (0, 200)}
 
 
@@ -147,6 +151,10 @@ def validate(key: str, value: Any) -> Any:
     if key in _BOOLS:
         if not isinstance(value, bool):
             raise _bad(key, "must be true or false")
+        return value
+    if key in _DAYS:
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 31:
+            raise _bad(key, "must be a whole day of month between 1 and 31")
         return value
     if key in _NUMBERS:
         lo, hi = _NUMBERS[key]

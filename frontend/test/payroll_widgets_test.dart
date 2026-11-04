@@ -3,6 +3,7 @@ import 'package:employee_connect/core/security/screen_protect.dart';
 import 'package:employee_connect/features/admin/domain/admin_models.dart' show EmployeeRef;
 import 'package:employee_connect/features/payroll/data/payroll_delivery.dart' show DeliveryOutcome;
 import 'package:employee_connect/features/payroll/domain/payroll_models.dart';
+import 'package:employee_connect/features/payroll/presentation/dashboard_tab.dart';
 import 'package:employee_connect/features/payroll/presentation/employee_payroll_screen.dart';
 import 'package:employee_connect/features/payroll/presentation/payroll_home_screen.dart';
 import 'package:employee_connect/features/payroll/presentation/payroll_settings_tab.dart';
@@ -177,11 +178,32 @@ void main() {
     testWidgets('tabs appear with view_all; New run only with manage', (tester) async {
       final repo = FakeRepo();
       await pumpPayroll(tester, const PayrollHomeScreen(), repo: repo, perms: _view);
+      expect(find.text('Dashboard'), findsOneWidget);
       expect(find.text('Runs'), findsOneWidget);
       expect(find.text('Employees'), findsOneWidget);
       expect(find.text('Settings'), findsOneWidget);
+      await tester.tap(find.text('Runs'));
+      await tester.pumpAndSettle();
       expect(find.text('New run'), findsNothing);
       expect(find.text('No payroll runs for this year.'), findsOneWidget);
+    });
+
+    testWidgets('dashboard shows totals, alert and reports; bank advice needs manage', (tester) async {
+      final repo = FakeRepo();
+      await pumpPayroll(tester, const PayrollDashboardTab(), repo: repo, perms: _view);
+      expect(find.text('Employees paid'), findsOneWidget);
+      expect(find.textContaining('₹1,00,000.00'), findsWidgets);
+      expect(find.textContaining('has not been created'), findsOneWidget);
+      expect(find.text('Sales  (2)'), findsOneWidget);
+      expect(find.byKey(const ValueKey('report-lop')), findsOneWidget);
+      expect(find.byKey(const ValueKey('report-bank_advice')), findsNothing);
+    });
+
+    testWidgets('dashboard next-month button is disabled on the current month', (tester) async {
+      await pumpPayroll(tester, const PayrollDashboardTab(), repo: FakeRepo(), perms: _manage);
+      final next = tester.widget<IconButton>(find.byKey(const ValueKey('dash-next')));
+      expect(next.onPressed, isNull);
+      expect(find.byKey(const ValueKey('report-bank_advice')), findsOneWidget);
     });
 
     testWidgets('without view_all the area is closed', (tester) async {

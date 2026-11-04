@@ -999,3 +999,15 @@ Audit actions: `payroll.payslip.process|reopen|publish|delete|revise`.
 - **PDF (review 10, L3/L4):** both PDF endpoints fail closed (503 `TEMPORARILY_UNAVAILABLE`) when the rate-limit store is down. A timed-out PDF build keeps its slot until its worker thread ends; logos over 1 MB or 4 million pixels are not drawn.
 - **Database locks (review 10, H1/L6):** migration 0018 allows `*_enc`-only updates of payslips and structures when the transaction has `SET LOCAL app.key_rotation = 'on'` (set only by `python -m scripts.rotate_keys`), so key rotation works on published/superseded rows. A published -> superseded change without a published successor in the same transaction fails at commit.
 - **Rate limit keys** (per user): `payroll:own_list` 60/min, `own_detail` 30/min + 200/day (detail and pdf share it), `admin_read` 120/min, `write` 60/min (fail closed), `action` 10/min (fail closed), `register` 5/min (fail closed), `reveal` 30/min + 200/day (fail closed).
+
+## 15. Payroll phase 2 (plan 14) - IMPLEMENTED: phase 1
+
+### 15.1 Dashboard, variance, reports (permission `payroll.view_all`; read-only)
+| Method | Path | Notes |
+|---|---|---|
+| GET | /admin/payroll/dashboard?period=YYYY-MM | default current month. `{period, run:{id,status}\|null, headcount, held, errors, warnings, totals:{gross,deductions,net,employer_cost}, departments[], trend[12], joiners[], leavers[], calendar:{cutoff_day, process_by, pay_date, alerts[]}}`. Money = 2-decimal strings. Alerts: `RUN_NOT_CREATED`, `RUN_NOT_PROCESSED`, `RUN_NOT_PUBLISHED`. Audit `payroll.dashboard.view`. |
+| GET | /admin/payroll/variance?period= | `{period, previous, items:[{employee_id,name,department,gross_prev,gross,net_prev,net,net_delta,lop_prev,lop,reasons[]}]}`; reasons `NEW`, `LEFT_OR_NOT_PAID`, `STRUCTURE_CHANGE`, `LOP_CHANGE`, `ADJUSTMENTS`, `PT_CHANGE`. Sorted by absolute net change. |
+| POST | /admin/payroll/reports/{kind}?period= | kind `department\|headcount\|ctc\|lop\|bank_advice`; body `{current_password?}`; returns .xlsx (no-store). `bank_advice` needs `payroll.manage` + `current_password` (step-up). 404 when no run for the month. Audit `payroll.report.export`. |
+
+### 15.2 New settings (`/admin/payroll/settings`, integers 1..31)
+`payroll.cutoff_day` (25), `payroll.process_day` (28, in the period month), `payroll.pay_day` (1, in the following month).

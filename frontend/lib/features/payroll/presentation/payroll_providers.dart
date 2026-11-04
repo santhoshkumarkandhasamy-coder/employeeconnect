@@ -79,3 +79,11 @@ final payrollSettingsProvider = FutureProvider.autoDispose<Map<String, Object?>>
 
 /// Device clock; overridable in tests.
 final payrollClockProvider = Provider<DateTime Function()>((ref) => DateTime.now);
+
+final payrollDashboardProvider = FutureProvider.autoDispose.family<Map<String, dynamic>, String>(
+  (ref, period) => ref.watch(payrollRepositoryProvider).dashboard(period),
+);
+
+final payrollVarianceProvider = FutureProvider.autoDispose.family<Map<String, dynamic>, String>(
+  (ref, period) => ref.watch(payrollRepositoryProvider).variance(period),
+);
