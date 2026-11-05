@@ -5,7 +5,8 @@ Defence in depth, in this order, all BEFORE any value is trusted:
   2. the zip directory only (no decompression): <= 50 entries, <= 10 MB declared uncompressed, per-entry and total ratio
      <= 100, no path tricks, no `xl/vbaProject.bin` / macro sheets / ActiveX / embeddings / external links
   3. openpyxl (`read_only=True`) in a worker thread with a 10 s timeout; the thread keeps its build slot until it really ends
-  4. sheet 1 only, the header must match the template, <= 500 data rows, blank rows ignored
+  4. only the sheets the caller names (the one-time item upload: sheet 1; the structure import: `Structures` and `Components`),
+     each header must match its template, per-sheet data row cap, blank rows ignored; every other sheet is never read
   5. a cell that is a formula, or text starting with `= + - @` (also full-width forms), is flagged and the row is refused
 
 The parser returns raw cells; business validation (employees, codes, amounts) lives in `payroll_items`. The file is never
@@ -22,6 +23,7 @@ import io
 import logging
 import re
 import zipfile
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -47,6 +49,23 @@ _FORBIDDEN_PARTS = (
     "xl/externallinks/", "customui/",
 )  # fmt: skip
 _REQUIRED = ("[Content_Types].xml", "xl/workbook.xml")
+
+
+@dataclass(frozen=True)
+class SheetDef:
+    """One sheet to read. `name` None = the first sheet; otherwise a case-insensitive title that MUST exist. Cells beyond the
+    header width must be empty. `max_rows` caps the data rows; `max_scan` caps the physical rows read (blank rows included)."""
+
+    key: str
+    name: str | None
+    header: tuple[str, ...]
+    fields: tuple[str, ...]
+    max_rows: int
+    max_scan: int = 0
+
+    @property
+    def scan_limit(self) -> int:
+        return self.max_scan or self.max_rows * 4
 
 
 @dataclass
@@ -123,7 +142,59 @@ def _cell(c: Any) -> tuple[Any, bool]:
     return v, False
 
 
-def _parse_sync(data: bytes) -> list[ParsedRow]:
+def _header_error(sheet: SheetDef) -> AppError:
+    where = "" if sheet.name is None else f"{sheet.name}: "
+    return AppError(
+        "IMPORT_INVALID", f"The header row of {sheet.name or 'the sheet'} does not match the template",
+        details=[{"field": "file", "message": where + "header must be: " + ", ".join(sheet.header)}],
+    )  # fmt: skip
+
+
+def _too_many_rows(sheet: SheetDef) -> AppError:
+    where = sheet.name or "the sheet"
+    return AppError(
+        "IMPORT_INVALID", f"{where} has more than {sheet.max_rows} data rows",
+        details=[{"field": "file", "message": f"{where}: at most {sheet.max_rows} rows"}],
+    )  # fmt: skip
+
+
+def _read_sheet(ws: Any, sheet: SheetDef) -> list[ParsedRow]:
+    width = len(sheet.header)
+    out: list[ParsedRow] = []
+    header_seen = False
+    scanned = 0
+    for n, cells in enumerate(ws.iter_rows(max_col=width + 2), start=1):
+        scanned += 1
+        if scanned > sheet.scan_limit:
+            raise _too_many_rows(sheet)
+        vals = [_cell(c) for c in cells]
+        vals += [(None, False)] * (width + 2 - len(vals))
+        if not header_seen:
+            header_seen = True
+            got = tuple(str(v).strip().lower() if v is not None else "" for v, _ in vals[:width])
+            if got != tuple(h.lower() for h in sheet.header) or any(v is not None for v, _ in vals[width:]):
+                raise _header_error(sheet)
+            continue
+        main = vals[:width]
+        if all(v is None for v, _ in main):
+            continue  # blank row
+        if len(out) >= sheet.max_rows:
+            raise _too_many_rows(sheet)
+        pr = ParsedRow(row=n)
+        for name, (v, is_formula) in zip(sheet.fields, main, strict=True):
+            pr.values[name] = v
+            if is_formula:
+                pr.formula.add(name)
+        out.append(pr)
+    if not header_seen:
+        raise AppError(
+            "IMPORT_INVALID", f"{sheet.name or 'The sheet'} is empty",
+            details=[{"field": "file", "message": "header row missing"}],
+        )  # fmt: skip
+    return out
+
+
+def _parse_book(data: bytes, sheets: Sequence[SheetDef]) -> dict[str, list[ParsedRow]]:
     from openpyxl import load_workbook
 
     try:
@@ -133,56 +204,35 @@ def _parse_sync(data: bytes) -> list[ParsedRow]:
     try:
         if not wb.worksheets:
             raise _not_xlsx()
-        ws = wb.worksheets[0]  # sheet 1 only
-        out: list[ParsedRow] = []
-        header_seen = False
-        scanned = 0
-        for n, cells in enumerate(ws.iter_rows(max_col=6), start=1):
-            scanned += 1
-            if scanned > MAX_SCAN_ROWS:
-                raise _too_many_rows()
-            vals = [_cell(c) for c in cells]
-            vals += [(None, False)] * (6 - len(vals))
-            if not header_seen:
-                header_seen = True
-                got = tuple(str(v).strip().lower() if v is not None else "" for v, _ in vals[:4])
-                if got != tuple(h.lower() for h in HEADER) or any(v is not None for v, _ in vals[4:]):
+        by_title = {str(ws.title).strip().lower(): ws for ws in wb.worksheets}
+        out: dict[str, list[ParsedRow]] = {}
+        for sheet in sheets:
+            if sheet.name is None:
+                ws = wb.worksheets[0]
+            else:
+                ws = by_title.get(sheet.name.lower())
+                if ws is None:
                     raise AppError(
-                        "IMPORT_INVALID", "The header row does not match the template",
-                        details=[{"field": "file", "message": "header must be: " + ", ".join(HEADER)}],
+                        "IMPORT_INVALID", f"The sheet {sheet.name} is missing",
+                        details=[{"field": "file", "message": f"sheet {sheet.name} is missing"}],
                     )  # fmt: skip
-                continue
-            main = vals[:4]
-            if all(v is None for v, _ in main):
-                continue  # blank row
-            if len(out) >= MAX_ROWS:
-                raise _too_many_rows()
-            pr = ParsedRow(row=n)
-            for name, (v, is_formula) in zip(FIELDS, main, strict=True):
-                pr.values[name] = v
-                if is_formula:
-                    pr.formula.add(name)
-            out.append(pr)
-        if not header_seen:
-            raise AppError(
-                "IMPORT_INVALID", "The sheet is empty", details=[{"field": "file", "message": "header row missing"}]
-            )  # fmt: skip
+            out[sheet.key] = _read_sheet(ws, sheet)
         return out
     finally:
         wb.close()
 
 
-def _too_many_rows() -> AppError:
-    return AppError(
-        "IMPORT_INVALID", f"The sheet has more than {MAX_ROWS} data rows",
-        details=[{"field": "file", "message": f"at most {MAX_ROWS} rows"}],
-    )  # fmt: skip
+ITEMS = SheetDef("items", None, HEADER, FIELDS, MAX_ROWS, MAX_SCAN_ROWS)
 
 
-async def parse(data: bytes) -> list[ParsedRow]:
-    """Container checks, then the openpyxl read in a worker thread (10 s) under the shared workbook semaphore. A thread that
-    outlives the timeout keeps its semaphore slot until it ends, so stuck parses cannot pile up."""
-    check_container(data)
+def _parse_sync(data: bytes) -> list[ParsedRow]:
+    """The one-time item upload: sheet 1 only."""
+    return _parse_book(data, [ITEMS])["items"]
+
+
+async def _run(fn: Any, *args: Any) -> Any:
+    """Container checks, then `fn(*args)` in a worker thread (10 s) under the shared workbook semaphore. A thread that outlives
+    the timeout keeps its semaphore slot until it ends, so stuck parses cannot pile up."""
     sem = xlsx._semaphore(get_settings().export_max_concurrency)
     try:
         await asyncio.wait_for(sem.acquire(), xlsx.SLOT_WAIT_S)
@@ -190,7 +240,7 @@ async def parse(data: bytes) -> list[ParsedRow]:
         raise AppError(
             "TEMPORARILY_UNAVAILABLE", "The importer is busy; try again shortly.", headers={"Retry-After": "10"}
         ) from None
-    task = asyncio.ensure_future(asyncio.to_thread(_parse_sync, data))
+    task = asyncio.ensure_future(asyncio.to_thread(fn, *args))
     task.add_done_callback(lambda _t: sem.release())
     try:
         return await asyncio.wait_for(asyncio.shield(task), PARSE_TIMEOUT_S)
@@ -200,6 +250,18 @@ async def parse(data: bytes) -> list[ParsedRow]:
         raise AppError(
             "TEMPORARILY_UNAVAILABLE", "The file took too long to read; try a smaller file.", headers={"Retry-After": "30"}
         ) from None
+
+
+async def parse(data: bytes) -> list[ParsedRow]:
+    """One-time item upload (sheet 1)."""
+    check_container(data)
+    return await _run(_parse_sync, data)
+
+
+async def parse_sheets(data: bytes, sheets: Sequence[SheetDef]) -> dict[str, list[ParsedRow]]:
+    """Named sheets (structure import): every sheet in `sheets` must exist, with its own header and caps."""
+    check_container(data)
+    return await _run(_parse_book, data, tuple(sheets))
 
 
 _MONEY_TEXT = re.compile(r"^\d{1,8}(\.\d{1,2})?$")

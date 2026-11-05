@@ -673,3 +673,42 @@ class ArrearsBulkAccept(_Strict):
         if len(set(ids)) != len(ids):
             raise ValueError("items must be unique")
         return self
+
+
+# ---------------------------------------------------------------------------------------------- CTC calculator (4a step 2)
+_AMOUNT_RE = re.compile(r"^\d{1,9}(\.\d{1,2})?$")
+_CALC_MAX_ANNUAL = Decimal("120000000.00")
+
+
+def _calc_amount(v: Any) -> Decimal:
+    """A JSON string with at most 2 decimals, 1.00 .. 120000000.00 (the monthly / annual limit is checked with the frequency)."""
+    if not isinstance(v, str) or not _AMOUNT_RE.match(v.strip()):
+        raise ValueError('must be an amount as a string such as "40000.00"')
+    d = Decimal(v.strip())
+    if d < 1 or d > _CALC_MAX_ANNUAL:
+        raise ValueError("must be between 1.00 and 120000000.00")
+    return calc.q2(d)
+
+
+class CtcSplitIn(_Strict):
+    basic_pct: int = Field(ge=1, le=100, strict=True)
+    hra_pct_of_basic: int = Field(ge=0, le=100, strict=True)
+
+
+class CtcCalculateIn(_Strict):
+    mode: Literal["from_gross", "from_ctc"]
+    amount: Annotated[Decimal, BeforeValidator(_calc_amount)]
+    frequency: Literal["monthly", "annual"]
+    pf_applicable: bool = True
+    pf_on_full_basic: bool = False
+    esi_applicable: bool = True
+    pt_applicable: bool = True
+    split: CtcSplitIn | None = None
+    include_gratuity: bool | None = None
+    employer_share_from_employee: bool | None = None
+
+    @model_validator(mode="after")
+    def _limits(self) -> CtcCalculateIn:
+        if self.frequency == "monthly" and self.amount > Decimal("10000000.00"):
+            raise ValueError("a monthly amount must be at most 10000000.00")
+        return self

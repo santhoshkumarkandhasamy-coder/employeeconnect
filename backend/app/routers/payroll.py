@@ -30,6 +30,7 @@ from ..schemas.payroll import (
     BatchReject,
     BulkIncrementCreate,
     ChallanIn,
+    CtcCalculateIn,
     DetailsIn,
     EmptyIn,
     EncashmentCreate,
@@ -61,6 +62,7 @@ from ..schemas.payroll import (
 from ..services import (
     admin_security,
     payroll_arrears,
+    payroll_ctc_gratuity,
     payroll_encashment,
     payroll_increments,
     payroll_items,
@@ -70,6 +72,7 @@ from ..services import (
     payroll_reports,
     payroll_settings,
     payroll_statutory,
+    payroll_structure_import,
     payroll_structures,
     payslip_pdf,
     xlsx,
@@ -519,6 +522,36 @@ async def variance(
     audit(session, action="payroll.variance.view", actor=actor, entity_type="payroll_dashboard", after={"period": out["period"]})
     await pc.commit(session)
     return out
+
+
+@admin_router.post("/reports/gratuity")
+async def gratuity_report_xlsx(
+    body: RegisterIn | None = None,
+    period: str | None = Query(None, pattern=r"^\d{4}-\d{2}$"),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    """Gratuity accrual of the month as .xlsx (contract 18.3). Static path: it must come before `/reports/{kind}`."""
+    await pc.limit(redis, actor, "report", (10, 60), closed=True)
+    built, name, rows, _as_of = await payroll_ctc_gratuity.gratuity_xlsx(session, period)
+    try:
+        audit(session, action="payroll.report.export", actor=actor, entity_type="payroll_dashboard",
+              after={"kind": "gratuity", "period": period, "rows": rows})  # fmt: skip
+        await pc.commit(session)
+    except BaseException:
+        built.close()
+        raise
+    return StreamingResponse(
+        xlsx.iter_file(built),
+        media_type=xlsx.XLSX_MIME,
+        headers={
+            "Content-Disposition": f'attachment; filename="{name}"',
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+        background=BackgroundTask(built.close),
+    )
 
 
 @admin_router.post("/reports/{kind}")
@@ -1271,3 +1304,72 @@ async def salary_history(
 ):
     await pc.limit(redis, actor, "admin_read", (120, 60))
     return await payroll_increments.salary_history(session, actor, user_id)
+
+
+# ============================================================================================ plan 16 4a step 2: structure import, CTC, gratuity
+@admin_router.get("/structures/template")
+async def structures_template(redis: Redis = Depends(get_redis), actor: Principal = Depends(MANAGE)):
+    await pc.limit(redis, actor, "import", (10, 60), (50, 86400), closed=True)
+    built = await payroll_structure_import.template()
+    return StreamingResponse(
+        xlsx.iter_file(built),
+        media_type=xlsx.XLSX_MIME,
+        headers={**_NOSTORE, "Content-Disposition": 'attachment; filename="salary-structures-template.xlsx"'},
+        background=BackgroundTask(built.close),
+    )
+
+
+@admin_router.post("/structures/import")
+async def import_structures(
+    response: Response,
+    file: UploadFile = File(...),
+    file_sha256: str | None = Form(None, max_length=64),
+    reason: str | None = Form(None, max_length=400),
+    current_password: SecretStr | None = Form(None, max_length=128),
+    dry_run: bool = Query(True),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    """Salary-structure xlsx import (contract 18.6). `dry_run=true` (default) validates and reports; `dry_run=false` re-sends
+    the same file with its `file_sha256`, a reason and the caller's own password and imports everything or nothing."""
+    if dry_run:
+        await pc.limit(redis, actor, "import", (10, 60), (50, 86400), closed=True)
+    else:
+        await pc.limit(redis, actor, "action", (10, 60), closed=True)
+    data = await xlsx_import.read_upload(file)
+    out = await payroll_structure_import.import_structures(
+        session, redis, actor, data=data, dry_run=dry_run, file_sha256=file_sha256, reason=reason, password=current_password
+    )
+    response.headers["Cache-Control"] = "no-store"
+    if not dry_run:
+        response.status_code = 201
+    return out
+
+
+@admin_router.post("/ctc/calculate")
+async def ctc_calculate(
+    body: CtcCalculateIn,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "calc", (60, 60), closed=True)
+    return await payroll_ctc_gratuity.calculate(session, actor, body)
+
+
+@admin_router.get("/gratuity")
+async def gratuity(
+    as_of: str | None = Query(None, max_length=10),
+    department_id: uuid.UUID | None = None,
+    eligible_only: bool = False,
+    q: str | None = Query(None, max_length=100),
+    page: PageParams = Depends(),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "admin_read", (120, 60))
+    return await payroll_ctc_gratuity.gratuity_report(
+        session, actor, raw_as_of=as_of, department_id=department_id, eligible_only=eligible_only, q=q, page=page
+    )
