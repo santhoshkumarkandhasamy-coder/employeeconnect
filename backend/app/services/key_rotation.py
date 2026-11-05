@@ -82,7 +82,12 @@ async def rotate_all(session: AsyncSession, *, dry_run: bool = False, batch: int
                 stats["rotated"] += 1
                 if not dry_run:
                     cond = [c == v for c, v in zip(pk, pk_vals, strict=True)]
-                    await session.execute(update(table).where(*cond).values({col.name: type_coerce(new, LargeBinary)}))
+                    stmt = update(table).where(*cond).values({col.name: type_coerce(new, LargeBinary)})
+                    if "updated_at" in table.c:
+                        # keep updated_at unchanged: the payroll lock triggers (0018+) refuse any non-*_enc change
+                        # under app.key_rotation=on, and the ORM onupdate would otherwise bump it
+                        stmt = stmt.values(updated_at=table.c.updated_at)
+                    await session.execute(stmt)
             if not dry_run:
                 await session.commit()
 
