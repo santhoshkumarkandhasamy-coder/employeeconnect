@@ -43,6 +43,7 @@ def _relaxed_limits(monkeypatch):
 
     monkeypatch.setattr(pc, "limit", no_limit)
     monkeypatch.setattr(admin_security, "REAUTH_PER_MINUTE", 10_000)
+    monkeypatch.setattr(admin_security, "REAUTH_PER_DAY", 10_000)
 
 
 def err(r):
@@ -83,6 +84,12 @@ async def approve(client, hdr, inc, expect=200, **kw):
     r = await client.post(f"{INC}/{inc['id']}/approve", json=body, headers=hdr)
     assert r.status_code == expect, r.text
     return r.json()
+
+
+async def expected_of(client, hdr, bid):
+    """The `expected` list of a batch approval: id and current version of every submitted row (what the checker reviewed)."""
+    rows = (await client.get(INC, params={"batch_id": bid, "status": "submitted"}, headers=hdr)).json()["items"]
+    return [{"id": r["id"], "version": r["version"]} for r in rows]
 
 
 async def ready(client, payroll, uid, body=None, who="employee"):
@@ -728,7 +735,7 @@ async def test_bulk_submit_approve_partial_failure_reject_cancel(client, payroll
     bid = b["id"]
     rows = (await client.get(INC, params={"batch_id": bid}, headers=hr)).json()["items"]
     # nothing is decided before the batch is submitted
-    r = await client.post(f"{INC}/batches/{bid}/approve", json={"current_password": PASSWORD}, headers=admin)
+    r = await client.post(f"{INC}/batches/{bid}/approve", json={"expected": [], "current_password": PASSWORD}, headers=admin)
     assert r.status_code == 200 and r.json() == {"approved": 0, "failed": [], "arrears_proposed": 0}
     r = await client.post(f"{INC}/batches/{bid}/submit", json={"x": 1}, headers=hr)
     assert r.status_code == 422
@@ -736,13 +743,18 @@ async def test_bulk_submit_approve_partial_failure_reject_cancel(client, payroll
     assert r.status_code == 200 and r.json() == {"submitted": 2, "skipped": []}
     assert (await client.get(f"{INC}/batches/{bid}", headers=hr)).json()["counts"]["submitted"] == 2
     # the batch maker counts as maker of every row (no submitted row is approved, each is reported)
-    r = await client.post(f"{INC}/batches/{bid}/approve", json={"current_password": PASSWORD}, headers=hr)
+    exp = await expected_of(client, hr, bid)
+    r = await client.post(f"{INC}/batches/{bid}/approve", json={"expected": exp, "current_password": PASSWORD}, headers=hr)
     assert r.status_code == 200 and r.json()["approved"] == 0
     assert {f["reason"] for f in r.json()["failed"]} == {"SECOND_PERSON_REQUIRED"}
     # step-up
-    assert (await client.post(f"{INC}/batches/{bid}/approve", json={}, headers=admin)).status_code == 422
+    assert (await client.post(f"{INC}/batches/{bid}/approve", json={"expected": exp}, headers=admin)).status_code == 422
     assert (
-        err(await client.post(f"{INC}/batches/{bid}/approve", json={"current_password": "Wrong!Pass#12345"}, headers=admin))
+        err(
+            await client.post(
+                f"{INC}/batches/{bid}/approve", json={"expected": exp, "current_password": "Wrong!Pass#12345"}, headers=admin
+            )
+        )
         == "REAUTH_FAILED"
     )
     # one row goes stale: it stays submitted and is reported, the other is approved
@@ -753,7 +765,9 @@ async def test_bulk_submit_approve_partial_failure_reject_cancel(client, payroll
         .values(updated_at=dt.datetime(2031, 1, 1, tzinfo=dt.UTC))
     )
     await db.commit()
-    r = await client.post(f"{INC}/batches/{bid}/approve", json={"comment": None, "current_password": PASSWORD}, headers=admin)
+    r = await client.post(
+        f"{INC}/batches/{bid}/approve", json={"expected": exp, "comment": None, "current_password": PASSWORD}, headers=admin
+    )
     assert r.status_code == 200, r.text
     assert r.json()["approved"] == 1 and r.json()["failed"] == [{"id": emp_row["id"], "reason": "INCREMENT_STALE"}]
     counts = (await client.get(f"{INC}/batches/{bid}", headers=hr)).json()["counts"]
@@ -782,7 +796,9 @@ async def test_bulk_cancel_and_unknown_batch(client, payroll, uid):
     assert r.status_code == 409
     assert (await client.get(f"{INC}/batches/{uuid.uuid4()}", headers=hr)).status_code == 404
     assert (
-        await client.post(f"{INC}/batches/{uuid.uuid4()}/approve", json={"current_password": PASSWORD}, headers=payroll["admin"])
+        await client.post(
+            f"{INC}/batches/{uuid.uuid4()}/approve", json={"expected": [], "current_password": PASSWORD}, headers=payroll["admin"]
+        )
     ).status_code == 404
 
 
@@ -880,9 +896,10 @@ async def test_columns_are_encrypted_at_rest(client, payroll, uid, db):
 
 async def test_database_checks_repeat_the_maker_checker_rule(db, uid):
     base = {"user_id": uuid.UUID(uid["employee"]), "kind": "percent", "effective_from": dt.date(2030, 1, 1), "method": "proportional",
-            "percent": "5.00", "proposed": {"basic": "1.00"}, "reason": "Check", "created_by": uuid.UUID(uid["hr"])}  # fmt: skip
+            "percent": "5.00", "proposed": {"basic": "1.00"}, "reason": "Check", "created_by": uuid.UUID(uid["hr"]),
+            "last_edited_by": uuid.UUID(uid["hr"])}  # fmt: skip
     # maker = employee
-    db.add(SalaryIncrement(**{**base, "created_by": uuid.UUID(uid["employee"])}))
+    db.add(SalaryIncrement(**{**base, "created_by": uuid.UUID(uid["employee"]), "last_edited_by": uuid.UUID(uid["employee"])}))
     with pytest.raises(IntegrityError):
         await db.commit()
     await db.rollback()
@@ -914,6 +931,23 @@ async def test_database_checks_repeat_the_maker_checker_rule(db, uid):
     with pytest.raises(IntegrityError):
         await db.commit()
     await db.rollback()
+
+
+async def test_database_check_covers_rejected_and_the_last_editor(db, uid):
+    """H1 / L3: the checker rule also holds for a rejected row and for the last editor."""
+    base = {"user_id": uuid.UUID(uid["employee"]), "kind": "percent", "effective_from": dt.date(2030, 1, 1), "method": "proportional",
+            "percent": "5.00", "proposed": {"basic": "1.00"}, "reason": "Check", "created_by": uuid.UUID(uid["hr"]),
+            "last_edited_by": uuid.UUID(uid["manager"]), "submitted_by": uuid.UUID(uid["hr"]),
+            "submitted_at": dt.datetime.now(dt.UTC), "decided_at": dt.datetime.now(dt.UTC),
+            "decision_comment": "No"}  # fmt: skip
+    for status, decider in (("approved", uid["manager"]), ("rejected", uid["manager"]), ("rejected", uid["hr"]),
+                            ("rejected", uid["employee"])):  # fmt: skip
+        db.add(SalaryIncrement(**base, status=status, decided_by=uuid.UUID(decider)))
+        with pytest.raises(IntegrityError):
+            await db.commit()
+        await db.rollback()
+    db.add(SalaryIncrement(**base, status="rejected", decided_by=uuid.UUID(uid["admin"])))
+    await db.commit()  # a person who took no part may reject
 
 
 # ================================================================================================ fail closed

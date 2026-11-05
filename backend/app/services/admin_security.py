@@ -27,6 +27,7 @@ from . import notifications
 log = logging.getLogger("app.admin_security")
 
 REAUTH_PER_MINUTE = 5
+REAUTH_PER_DAY = 20
 ADMIN_CAPABLE = frozenset({"role.assign", "role.manage"})
 
 
@@ -47,7 +48,14 @@ async def require_reauth(
             "Request validation failed",
             details=[{"field": "current_password", "message": "your own password is required for this action"}],
         )
-    await rate_limit.enforce(redis, [(f"rl:admin:reauth:{actor.id}", REAUTH_PER_MINUTE, 60)], fail_closed=True)
+    await rate_limit.enforce(
+        redis,
+        [
+            (f"rl:admin:reauth:{actor.id}", REAUTH_PER_MINUTE, 60),
+            (f"rl:admin:reauth:day:{actor.id}", REAUTH_PER_DAY, 86400),
+        ],
+        fail_closed=True,
+    )
     if not await security.averify_password(actor.user.password_hash, password.get_secret_value()):
         audit(
             session, action="admin.reauth_failed", actor=actor, entity_type="user", entity_id=actor.id,

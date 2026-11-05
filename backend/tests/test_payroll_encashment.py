@@ -35,6 +35,7 @@ def _env(monkeypatch):
 
     monkeypatch.setattr(pc, "limit", no_limit)
     monkeypatch.setattr(admin_security, "REAUTH_PER_MINUTE", 10_000)
+    monkeypatch.setattr(admin_security, "REAUTH_PER_DAY", 10_000)
     monkeypatch.setattr("app.services.leave.utcnow", lambda: TODAY)
     monkeypatch.setattr("app.services.payroll_runs._today", today)
     from app.core.config import get_settings

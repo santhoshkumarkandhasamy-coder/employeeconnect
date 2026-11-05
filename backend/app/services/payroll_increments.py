@@ -82,6 +82,20 @@ SKIP_REASONS = {  # AppError code -> `skipped[].reason` of the bulk hike
 }
 
 
+def _touch(inc: SalaryIncrement, actor_id: uuid.UUID) -> None:
+    """Record an actor in the append-only `contributors` list (a new list: the ORM must see the change)."""
+    ids = list(inc.contributors or [])
+    if str(actor_id) not in ids:
+        ids.append(str(actor_id))
+    inc.contributors = ids
+
+
+def _is_party(actor_id: uuid.UUID, inc: SalaryIncrement, *extra: uuid.UUID | None) -> bool:
+    """True when the actor prepared the proposal in any way: creator, last editor, current submitter, anybody in the history
+    (every editor, every submitter, also those whose submission was withdrawn), or a bulk batch's maker."""
+    return actor_id in (inc.created_by, inc.last_edited_by, inc.submitted_by, *extra) or str(actor_id) in (inc.contributors or [])
+
+
 def _bad(field_: str, message: str, code: str = "VALIDATION_ERROR") -> AppError:
     return AppError(code, message, details=[{"field": field_, "message": message}])
 
@@ -178,6 +192,19 @@ def body_structure(body: Any) -> dict[str, Any]:
     return ic.normalise(structs_svc._components(body) | {f: getattr(body, f) for f in ic.FLAGS})
 
 
+def within_money_bounds(proposed: dict[str, Any], gross: Decimal | None) -> bool:
+    """L1: every component and the gross stay within calc.MAX_MONEY (the limit of a structure body), also for scaled / split /
+    imported structures whose parts are individually valid."""
+    if gross is not None and gross > calc.MAX_MONEY:
+        return False
+    for key in ic.MONEY_KEYS:
+        v = proposed.get(key)
+        for x in [a.get("amount") for a in v] if isinstance(v, list) else [v]:
+            if x is not None and Decimal(str(x)) > calc.MAX_MONEY:
+                return False
+    return True
+
+
 def _in_force(structures: list[SalaryStructure], eff: dt.date) -> SalaryStructure | None:
     return calc.structure_for([(s.effective_from, s) for s in structures], eff)
 
@@ -260,9 +287,11 @@ def build_plan(
         else:
             assert structure is not None
             proposed = ic.normalise(structure)
-    except ic.IncrementCalcError as exc:
+    except (ic.IncrementCalcError, ValueError) as exc:  # ValueError: a scaled part above calc.MAX_MONEY (L1)
         raise _bad("effective_from" if kind == "remove" else "monthly_gross", str(exc)) from None
     new_gross = ic.gross_of(proposed) if proposed is not None else None
+    if proposed is not None and not within_money_bounds(proposed, new_gross):
+        raise _bad("monthly_gross", f"a component or the gross exceeds {calc.money_str(calc.MAX_MONEY)}")
     backdated = ctx.latest_published is not None and eff <= ctx.latest_published
     warns = ic.warnings_for(
         old, proposed, kind=kind, esi_threshold=cfg.esi_threshold, pf_ceiling=cfg.pf_ceiling, max_pct=cfg.max_pct,
@@ -426,7 +455,8 @@ def _apply_plan(inc: SalaryIncrement, plan: Plan, reason: str | None = None) -> 
 def _new_row(actor: Principal, user_id: uuid.UUID, plan: Plan, reason: str, batch_id: uuid.UUID | None = None) -> SalaryIncrement:
     inc = SalaryIncrement(
         user_id=user_id, batch_id=batch_id, kind=plan.kind, status="draft", version=1, reason=reason,
-        created_by=actor.id, updated_by=actor.id, effective_from=plan.eff,
+        created_by=actor.id, last_edited_by=actor.id, contributors=[str(actor.id)], updated_by=actor.id,
+        effective_from=plan.eff,
     )  # fmt: skip
     _apply_plan(inc, plan)
     return inc
@@ -595,7 +625,8 @@ async def update_increment(session: AsyncSession, actor: Principal, inc_id: uuid
     ctx = (await _contexts(session, [user], with_in_use=body.kind in ("structure", "remove")))[inc.user_id]
     plan = build_plan(cfg=cfg, ctx=ctx, exclude_id=inc.id, **_body_args(body))
     _apply_plan(inc, plan, body.reason)
-    inc.version, inc.updated_by = inc.version + 1, actor.id
+    inc.version, inc.updated_by, inc.last_edited_by = inc.version + 1, actor.id, actor.id
+    _touch(inc, actor.id)
     await pc.flush(session)
     _event(session, inc, "update", actor.id, reason=body.reason)
     _audit(session, actor, "payroll.increment.update", inc)
@@ -626,6 +657,7 @@ async def submit_increment(
     name = actor.user.full_name
     inc.status, inc.submitted_by, inc.submitted_at = "submitted", actor.id, utcnow()
     inc.version, inc.updated_by = inc.version + 1, actor.id
+    _touch(inc, actor.id)
     await pc.flush(session)
     _event(session, inc, "submit", actor.id)
     _audit(session, actor, "payroll.increment.submit", inc)
@@ -640,8 +672,9 @@ async def withdraw_increment(session: AsyncSession, actor: Principal, inc_id: uu
         raise AppError("NOT_SUBMITTED", "Only a submitted increment can be withdrawn")
     if inc.version != body.expected_version:
         raise AppError("VERSION_CONFLICT", "The increment was changed meanwhile; reload it")
-    inc.status, inc.submitted_by, inc.submitted_at = "draft", None, None
+    inc.status, inc.submitted_by, inc.submitted_at = "draft", None, None  # `contributors` keeps the submitter
     inc.version, inc.updated_by = inc.version + 1, actor.id
+    _touch(inc, actor.id)
     await pc.flush(session)
     _event(session, inc, "withdraw", actor.id)
     _audit(session, actor, "payroll.increment.withdraw", inc)
@@ -664,17 +697,18 @@ async def cancel_increment(session: AsyncSession, actor: Principal, inc_id: uuid
 
 # ============================================================================================ checker actions
 async def _gate(session: AsyncSession, actor: Principal, inc: SalaryIncrement) -> None:
-    """The checker is not the employee (403 FORBIDDEN, audited) and neither the creator nor the submitter."""
+    """The checker is not the employee (403 FORBIDDEN, audited) and never took part in the proposal: not the creator, the last
+    editor, the submitter or anybody in the edit / submit history."""
     if inc.user_id == actor.id:
         raise await pc.deny(session, actor, entity_type=ENTITY, entity_id=inc.id, reason="self")
-    if actor.id in (inc.created_by, inc.submitted_by):
+    if _is_party(actor.id, inc):
         raise AppError("SECOND_PERSON_REQUIRED", "A different person must decide an increment you prepared or submitted")
 
 
 def _gate_reason(actor_id: uuid.UUID, inc: SalaryIncrement, batch_maker: uuid.UUID | None = None) -> str | None:
     if inc.user_id == actor_id:
         return "FORBIDDEN"
-    if actor_id in (inc.created_by, inc.submitted_by, batch_maker):
+    if _is_party(actor_id, inc, batch_maker):
         return "SECOND_PERSON_REQUIRED"
     return None
 
@@ -1026,6 +1060,7 @@ async def submit_batch(session: AsyncSession, redis: Redis, actor: Principal, ba
             continue
         r.status, r.submitted_by, r.submitted_at = "submitted", actor.id, utcnow()
         r.version, r.updated_by = r.version + 1, actor.id
+        _touch(r, actor.id)
         done.append(r)
     await pc.flush(session)
     submitted = len(done)
@@ -1053,8 +1088,11 @@ async def approve_batch(
     await items_svc._lock_users(session, list(users))
     ctxs = await _contexts(session, list(users.values()), lock=True, with_in_use=True)
     approved, proposed, failed = 0, 0, []
+    reviewed = {e.id: e.version for e in body.expected}
     for r in rows:
         reason = _gate_reason(actor.id, r, maker)
+        if reason is None and reviewed.get(r.id) != r.version:
+            reason = "VERSION_CONFLICT"  # not reviewed, or changed since the checker looked at it
         if reason is None:
             try:
                 check_approvable(r, ctxs[r.user_id], cfg)
@@ -1094,7 +1132,7 @@ async def reject_batch(session: AsyncSession, actor: Principal, batch_id: uuid.U
     await _batch_or_404(session, batch_id)
     batch = await _batch_or_404(session, batch_id, lock=True)
     rows = [r for r in await _lock_batch_rows(session, batch_id) if r.status == "submitted"]
-    if actor.id == batch.created_by or any(actor.id in (r.created_by, r.submitted_by) for r in rows):
+    if actor.id == batch.created_by or any(_is_party(actor.id, r) for r in rows):
         raise AppError("SECOND_PERSON_REQUIRED", "A different person must decide a batch you prepared or submitted")
     done: list[SalaryIncrement] = []
     now = utcnow()

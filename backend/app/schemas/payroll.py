@@ -612,7 +612,16 @@ class EmptyIn(_Strict):
     """`{}` (a body is required, nothing else is accepted)."""
 
 
+class ExpectedRow(_Strict):
+    id: uuid.UUID
+    version: int = Field(ge=1)
+
+
 class BatchApprove(_Strict):
+    """`expected` binds the approval to what the checker reviewed: every submitted row of the batch that is not listed with its
+    current version fails with VERSION_CONFLICT."""
+
+    expected: list[ExpectedRow] = Field(max_length=500)
     comment: str | None = None
     current_password: SecretStr = Field(min_length=1, max_length=128)
 

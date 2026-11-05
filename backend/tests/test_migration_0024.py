@@ -55,8 +55,15 @@ def test_maker_checker_checks_live_in_the_database():
     up = _load().UPGRADE
     assert "CONSTRAINT ck_salary_increments_maker_not_employee CHECK (created_by <> user_id)" in up
     assert (
-        "CONSTRAINT ck_salary_increments_checker CHECK (status <> 'approved' OR (decided_by IS NOT NULL AND decided_by <> user_id "
-        "AND decided_by IS DISTINCT FROM created_by AND decided_by IS DISTINCT FROM submitted_by))" in up
+        "CONSTRAINT ck_salary_increments_checker CHECK (status NOT IN ('approved','rejected') OR (decided_by IS NOT NULL "
+        "AND decided_by <> user_id AND decided_by IS DISTINCT FROM created_by AND decided_by IS DISTINCT FROM last_edited_by "
+        "AND decided_by IS DISTINCT FROM submitted_by))" in up
+    )
+    assert "last_edited_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT" in up
+    assert "contributors text[] NOT NULL DEFAULT '{}'" in up
+    assert (
+        "CONSTRAINT ck_salary_increments_checker_history CHECK (status NOT IN ('approved','rejected') "
+        "OR decided_by::text <> ALL (contributors))" in up
     )
     assert "created_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT" in up.split("CREATE TABLE salary_increments (")[1]
     assert "CONSTRAINT ck_salary_increments_remove CHECK ((kind = 'remove') = (proposed_enc IS NULL))" in up
@@ -83,6 +90,7 @@ def test_lock_trigger_and_privileges():
         "payroll_strip_enc(to_jsonb(NEW)) IS NOT DISTINCT FROM payroll_strip_enc(to_jsonb(OLD))",
         "'structure_id','base_structure_id','replaces_structure_id'",
         "OLD.status <> 'draft'",
+        "IF pg_trigger_depth() > 1 AND (to_jsonb(NEW) -> col) = 'null'::jsonb",  # L2: only the FK action nulls a structure id
     ):
         assert needle in body, needle
     # the exception compares everything but *_enc, updated_at included: key rotation keeps updated_at unchanged (commit f3cdaa5)

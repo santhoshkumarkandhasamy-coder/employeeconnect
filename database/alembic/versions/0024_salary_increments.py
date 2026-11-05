@@ -11,10 +11,12 @@ Added
 * salary_increments         one proposed salary change per employee and month. draft -> submitted -> approved | rejected
                             (+ cancelled). The proposed structure (encrypted JSON), the percent, the gross figures, the reason
                             and the decision comment are application-encrypted. MAKER-CHECKER IS ENFORCED BY THE DATABASE TOO:
-                            created_by <> user_id, and an approved row needs decided_by that differs from the employee, the
-                            creator and the submitter. A live (draft / submitted) increment per employee and month is unique.
+                            created_by <> user_id, and an approved OR rejected row needs decided_by that differs from the
+                            employee, the creator, the last editor and the submitter, and is not in `contributors` (a never
+                            cleared list of everybody who created, edited, submitted or withdrew the proposal). A live (draft / submitted) increment per employee and month is unique.
 * salary_increments_lock    trigger: an approved / rejected / cancelled row is immutable except the FK `ON DELETE SET NULL` of
-                            structure_id / base_structure_id / replaces_structure_id (and updated_*); key rotation passes
+                            structure_id / base_structure_id / replaces_structure_id (and updated_*; nulling is accepted only inside the FK action,
+                            pg_trigger_depth() > 1); key rotation passes
                             (`app.key_rotation = 'on'` and only *_enc columns changed, updated_at unchanged). Only a draft
                             row can be deleted at all (and app_user has no DELETE privilege anyway).
 * salary_structures         `source` (manual | increment | import), `increment_id` (circular FK, RESTRICT) and
@@ -99,6 +101,8 @@ CREATE TABLE salary_increments (
   structure_id uuid REFERENCES salary_structures(id) ON DELETE SET NULL,
   version integer NOT NULL DEFAULT 1,
   created_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  last_edited_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  contributors text[] NOT NULL DEFAULT '{}',
   updated_by uuid REFERENCES users(id) ON DELETE RESTRICT,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
@@ -116,7 +120,8 @@ CREATE TABLE salary_increments (
   CONSTRAINT ck_salary_increments_decided_status CHECK (status NOT IN ('approved','rejected') OR decided_by IS NOT NULL),
   CONSTRAINT ck_salary_increments_live_submitted CHECK (status NOT IN ('submitted','approved') OR submitted_by IS NOT NULL),
   CONSTRAINT ck_salary_increments_rejected_comment CHECK (status <> 'rejected' OR decision_comment_enc IS NOT NULL),
-  CONSTRAINT ck_salary_increments_checker CHECK (status <> 'approved' OR (decided_by IS NOT NULL AND decided_by <> user_id AND decided_by IS DISTINCT FROM created_by AND decided_by IS DISTINCT FROM submitted_by)),
+  CONSTRAINT ck_salary_increments_checker CHECK (status NOT IN ('approved','rejected') OR (decided_by IS NOT NULL AND decided_by <> user_id AND decided_by IS DISTINCT FROM created_by AND decided_by IS DISTINCT FROM last_edited_by AND decided_by IS DISTINCT FROM submitted_by)),
+  CONSTRAINT ck_salary_increments_checker_history CHECK (status NOT IN ('approved','rejected') OR decided_by::text <> ALL (contributors)),
   CONSTRAINT ck_salary_increments_version CHECK (version >= 1)
 );
 CREATE UNIQUE INDEX uq_salary_increments_live ON salary_increments (user_id, effective_from) WHERE status IN ('draft','submitted');
@@ -129,6 +134,7 @@ CREATE INDEX ix_salary_increments_structure_id ON salary_increments (structure_i
 CREATE INDEX ix_salary_increments_submitted_by ON salary_increments (submitted_by);
 CREATE INDEX ix_salary_increments_decided_by ON salary_increments (decided_by);
 CREATE INDEX ix_salary_increments_created_by ON salary_increments (created_by);
+CREATE INDEX ix_salary_increments_last_edited_by ON salary_increments (last_edited_by);
 CREATE INDEX ix_salary_increments_updated_by ON salary_increments (updated_by);
 
 CREATE FUNCTION salary_increments_lock() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -146,6 +152,7 @@ BEGIN
   IF OLD.status NOT IN ('approved','rejected','cancelled') THEN
     RETURN NEW;
   END IF;
+  -- app.key_rotation is a plain session setting: rotation runs as the application role, so a role check is not possible
   IF current_setting('app.key_rotation', true) = 'on'
      AND payroll_strip_enc(to_jsonb(NEW)) IS NOT DISTINCT FROM payroll_strip_enc(to_jsonb(OLD)) THEN
     RETURN NEW;  -- key rotation: only *_enc columns changed
@@ -153,7 +160,8 @@ BEGIN
   j_new := to_jsonb(NEW) - 'updated_by' - 'updated_at';
   j_old := to_jsonb(OLD) - 'updated_by' - 'updated_at';
   FOREACH col IN ARRAY ARRAY['structure_id','base_structure_id','replaces_structure_id'] LOOP
-    IF (to_jsonb(NEW) -> col) = 'null'::jsonb THEN
+    -- only the ON DELETE SET NULL action (an RI trigger, so trigger depth > 1) may null a structure reference
+    IF pg_trigger_depth() > 1 AND (to_jsonb(NEW) -> col) = 'null'::jsonb THEN
       j_new := j_new - col;  -- ON DELETE SET NULL of a structure
       j_old := j_old - col;
     END IF;

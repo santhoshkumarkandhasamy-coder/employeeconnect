@@ -450,8 +450,9 @@ void main() {
       });
       await repo.bulkHike(const BulkHikeInput(effectiveFrom: '2027-04-01', percent: '8.00', method: 'proportional', reason: 'abc'));
       expect(a.calls.last.path, '/admin/payroll/increments/bulk');
-      expect((await repo.approveIncrementBatch('b1', currentPassword: 'pw')).approved, 1);
+      expect((await repo.approveIncrementBatch('b1', currentPassword: 'pw', expected: [(id: 'i1', version: 2)])).approved, 1);
       expect(a.calls.last.json['current_password'], 'pw');
+      expect(a.calls.last.json['expected'], [{'id': 'i1', 'version': 2}]);
       expect(await repo.rejectIncrementBatch('b1', comment: 'no'), 4);
       expect((await repo.submitIncrementBatch('b1')).submitted, 1);
       expect(a.calls.last.json, <String, Object?>{});

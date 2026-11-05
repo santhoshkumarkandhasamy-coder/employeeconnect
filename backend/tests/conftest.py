@@ -143,6 +143,7 @@ def _adapt_metadata_for_sqlite() -> None:
             elif isinstance(c, CheckConstraint) and (
                 "::" in str(c.sqltext)
                 or "<@" in str(c.sqltext)
+                or "ALL (" in str(c.sqltext)
                 or "btrim" in str(c.sqltext)
                 or "char_length" in str(c.sqltext)
                 or "extract(" in str(c.sqltext)
@@ -165,6 +166,10 @@ def _adapt_metadata_for_sqlite() -> None:
     inc_warn.type = JSON()
     inc_warn.server_default = None
     inc_warn.default = ColumnDefault(list)
+    inc_contrib = Base.metadata.tables["salary_increments"].c.contributors  # text[] in Postgres
+    inc_contrib.type = JSON()
+    inc_contrib.server_default = None
+    inc_contrib.default = ColumnDefault(list)
     wd = Base.metadata.tables["shifts"].c.working_days
     wd.type = JSON()
     wd.server_default = None

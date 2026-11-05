@@ -45,6 +45,15 @@ Future<bool> approveBatchFlow(
   IncrementBatch batch, {
   Map<String, String> names = const {},
 }) async {
+  final repo = ref.read(payrollRepositoryProvider);
+  final List<({String id, int version})> expected;
+  try {
+    expected = await repo.submittedBatchRows(batch.id);
+  } on ApiException catch (e) {
+    if (context.mounted) payrollSnack(context, payrollErrorMessage(e));
+    return false;
+  }
+  if (!context.mounted) return false;
   final comment = await showCommentDialog(
     context,
     title: 'Approve this batch?',
@@ -52,14 +61,18 @@ Future<bool> approveBatchFlow(
     confirmLabel: 'Continue',
   );
   if (comment == null || !context.mounted) return false;
-  final repo = ref.read(payrollRepositoryProvider);
   BatchApproveResult? out;
   try {
     final done = await runWithReauth(
       context,
       reason: 'Approving ${batch.submittedCount} salary changes needs your password.',
       action: (pw) async {
-        out = await repo.approveIncrementBatch(batch.id, currentPassword: pw, comment: comment);
+        out = await repo.approveIncrementBatch(
+          batch.id,
+          currentPassword: pw,
+          expected: expected,
+          comment: comment,
+        );
       },
     );
     if (!done) return false;

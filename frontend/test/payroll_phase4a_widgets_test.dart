@@ -144,7 +144,12 @@ class Fake4a extends FakeRepo {
   Future<IncrementBatch> incrementBatch(String id) async => IncrementBatch.fromJson(_batch());
 
   @override
-  Future<BatchApproveResult> approveIncrementBatch(String id, {required String currentPassword, String? comment}) async {
+  Future<BatchApproveResult> approveIncrementBatch(
+    String id, {
+    required String currentPassword,
+    required List<({String id, int version})> expected,
+    String? comment,
+  }) async {
     approvals.add({'batch': id, 'pw': currentPassword});
     return batchApproveResult;
   }

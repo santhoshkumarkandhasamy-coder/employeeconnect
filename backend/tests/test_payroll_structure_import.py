@@ -29,6 +29,7 @@ from app.services import payroll_structure_import as psi
 from app.services import xlsx_import as xi
 from tests.conftest import PASSWORD
 from tests.payroll_fixtures import PERIOD, new_run, process_and_publish
+from tests.test_payroll_increments import expected_of
 
 IMPORT = "/api/admin/payroll/structures/import"
 TEMPLATE = "/api/admin/payroll/structures/template"
@@ -529,12 +530,17 @@ async def test_commit_creates_structures_and_submitted_increments_in_one_batch(c
         and lst[0]["totals"]["new_gross"] == "28600.00"
     )
     # maker-checker: the importer cannot approve, a second person can
+    exp = await expected_of(client, hr, out["batch_id"])
     r = await client.post(
-        f"/api/admin/payroll/increments/batches/{out['batch_id']}/approve", json={"current_password": PASSWORD}, headers=hr
+        f"/api/admin/payroll/increments/batches/{out['batch_id']}/approve",
+        json={"expected": exp, "current_password": PASSWORD},
+        headers=hr,
     )
     assert r.status_code == 200 and r.json()["approved"] == 0 and r.json()["failed"][0]["reason"] == "SECOND_PERSON_REQUIRED"
     r = await client.post(
-        f"/api/admin/payroll/increments/batches/{out['batch_id']}/approve", json={"current_password": PASSWORD}, headers=admin
+        f"/api/admin/payroll/increments/batches/{out['batch_id']}/approve",
+        json={"expected": exp, "current_password": PASSWORD},
+        headers=admin,
     )
     assert r.status_code == 200 and r.json()["approved"] == 1, r.text
     emp_structures = await structures_of(db, uuid.UUID(uid["employee"]))
@@ -553,6 +559,7 @@ async def test_commit_requires_the_whole_checklist(client, payroll, db, seeded, 
 
     monkeypatch.setattr(pc, "limit", no_limit)  # the checklist makes more than ten calls in a minute
     monkeypatch.setattr(admin_security, "REAUTH_PER_MINUTE", 10_000)
+    monkeypatch.setattr(admin_security, "REAUTH_PER_DAY", 10_000)
     hr, admin = payroll["hr"], payroll["admin"]
     await make_user(db, seeded, "EMP900")
     data = make_book([srow("EMP900", gross=40000)])
@@ -689,9 +696,10 @@ async def test_backdated_increment_row_waits_for_approval_then_proposes_arrears(
     assert (await client.get("/api/admin/payroll/arrears", params={"status": "proposed"}, headers=hr)).json()["items"] == []
     inc = (await db.execute(select(SalaryIncrement))).scalars().one()
     assert inc.warnings == ["BACKDATED"]
+    exp = await expected_of(client, hr, r.json()["batch_id"])
     ap = await client.post(
         f"/api/admin/payroll/increments/batches/{r.json()['batch_id']}/approve",
-        json={"current_password": PASSWORD},
+        json={"expected": exp, "current_password": PASSWORD},
         headers=admin,
     )
     assert ap.json()["approved"] == 1 and ap.json()["arrears_proposed"] == 1

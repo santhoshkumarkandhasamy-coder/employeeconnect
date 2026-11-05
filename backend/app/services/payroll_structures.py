@@ -20,6 +20,7 @@ from ..schemas.payroll import DetailsIn, StructureIn
 from . import admin_security
 from . import attendance as att
 from . import payroll_common as pc
+from . import payroll_items as items_svc
 from . import payroll_settings as pset
 from .payroll_calc import StructureData, money_str, structure_for
 
@@ -163,7 +164,9 @@ async def _approval_required(session: AsyncSession) -> bool:
 
 
 def _needs_increment() -> AppError:
-    return AppError("APPROVAL_REQUIRED", "Use an increment: salary changes after the first structure need a second person's approval")
+    return AppError(
+        "APPROVAL_REQUIRED", "Use an increment: salary changes after the first structure need a second person's approval"
+    )
 
 
 async def _gate_existing(session: AsyncSession, s: SalaryStructure) -> None:
@@ -181,9 +184,11 @@ async def _gate_existing(session: AsyncSession, s: SalaryStructure) -> None:
 async def create_structure(session: AsyncSession, actor: Principal, user_id: uuid.UUID, body: StructureIn) -> dict[str, Any]:
     await get_user_or_404(session, user_id)
     await pc.forbid_self(session, actor, user_id, entity_type="salary_structure", entity_id=None)
-    if await _approval_required(session) and (
-        await session.execute(select(exists().where(SalaryStructure.user_id == user_id)))
-    ).scalar():
+    await items_svc._lock_users(session, [user_id])  # M2: serialise with increments / imports BEFORE the F2 exists() check
+    if (
+        await _approval_required(session)
+        and (await session.execute(select(exists().where(SalaryStructure.user_id == user_id)))).scalar()
+    ):
         raise _needs_increment()  # only the FIRST structure of an employee is created directly (plan 16 F2)
     _check_effective(body.effective_from)
     taken = (
@@ -229,8 +234,20 @@ async def _arrears_hook(session: AsyncSession, actor: Principal, user_id: uuid.U
 
 
 async def _structure_or_404(session: AsyncSession, structure_id: uuid.UUID) -> SalaryStructure:
+    """Lock order (F15): users -> salary_structures. The owner is read without a lock, locked, then the structure is locked."""
+    owner = (
+        await session.execute(select(SalaryStructure.user_id).where(SalaryStructure.id == structure_id))
+    ).scalar_one_or_none()
+    if owner is None:
+        raise AppError("NOT_FOUND", "Structure not found")
+    await items_svc._lock_users(session, [owner])
     s = (
-        await session.execute(select(SalaryStructure).where(SalaryStructure.id == structure_id).with_for_update())
+        await session.execute(
+            select(SalaryStructure)
+            .where(SalaryStructure.id == structure_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
     ).scalar_one_or_none()
     if s is None:
         raise AppError("NOT_FOUND", "Structure not found")

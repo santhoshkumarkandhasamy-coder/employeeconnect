@@ -382,12 +382,30 @@ class PayrollRepository {
   Future<BatchSubmitResult> submitIncrementBatch(String id) async =>
       BatchSubmitResult.fromJson(await _json('POST', '$_a/increments/batches/$id/submit', body: const {}));
 
+  /// Id and version of every submitted row of a batch (what a checker reviews).
+  Future<List<({String id, int version})>> submittedBatchRows(String batchId) async {
+    final out = <({String id, int version})>[];
+    for (var page = 1; page <= 30; page++) {
+      final r = await increments(IncrementQuery(status: 'submitted', batchId: batchId), page: page);
+      for (final i in r.items) {
+        out.add((id: i.id, version: i.version));
+      }
+      if (!r.hasMore) break;
+    }
+    return out;
+  }
+
+  /// [expected] = the rows and versions the checker saw; the server skips any other.
   Future<BatchApproveResult> approveIncrementBatch(
     String id, {
     required String currentPassword,
+    required List<({String id, int version})> expected,
     String? comment,
   }) async =>
       BatchApproveResult.fromJson(await _json('POST', '$_a/increments/batches/$id/approve', body: {
+        'expected': [
+          for (final e in expected) {'id': e.id, 'version': e.version},
+        ],
         'comment': (comment == null || comment.trim().isEmpty) ? null : comment.trim(),
         'current_password': currentPassword,
       },),);

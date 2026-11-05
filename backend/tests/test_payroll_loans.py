@@ -78,6 +78,7 @@ def _relaxed_limits(request, monkeypatch):
 
     monkeypatch.setattr(pc, "limit", no_limit)
     monkeypatch.setattr(admin_security, "REAUTH_PER_MINUTE", 10_000)
+    monkeypatch.setattr(admin_security, "REAUTH_PER_DAY", 10_000)
 
 
 # ================================================================================================ pure schedule

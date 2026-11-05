@@ -8,12 +8,15 @@ import uuid
 from types import SimpleNamespace
 from typing import Any
 
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from redis.asyncio import Redis
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core import rate_limit
 from ..core.audit import audit
+from ..core.config import get_settings
 from ..core.errors import AppError
 from ..core.rbac import Principal
 from ..models import User
@@ -127,3 +130,14 @@ def mask_pan(value: str | None) -> str | None:
     if not value:
         return None
     return "XXXXX" + value[5:9] + "X" if len(value) == 10 else mask_tail(value)
+
+
+IMPORT_BINDING_LABEL = b"employee-connect/payroll-import-dry-run/v1"
+
+
+def import_binding_key() -> bytes:
+    """L6: a key of its own for the import dry-run binding (HKDF-SHA256 of the server secret with a purpose label), so the raw
+    JWT secret is never used as an HMAC key for anything else."""
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=IMPORT_BINDING_LABEL).derive(
+        get_settings().jwt_secret.encode()
+    )

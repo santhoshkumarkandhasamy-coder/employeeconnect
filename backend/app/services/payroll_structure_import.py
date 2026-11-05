@@ -36,7 +36,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.audit import audit
 from ..core.clock import utcnow
-from ..core.config import get_settings
 from ..core.errors import AppError
 from ..core.rbac import Principal
 from ..core.text import clean_text
@@ -443,6 +442,9 @@ async def _validate(
     for pr, user, eff, proposed in parsed_rows:
         ctx = ctxs[user.id]
         gross_total = ic.gross_of(proposed)
+        if not ig.within_money_bounds(proposed, gross_total):
+            rep.err("Structures", pr.row, "gross", "INVALID_AMOUNT")
+            continue
         warns: list[str] = []
         if not ctx.structures:
             last = ig.last_employed_day(user, cfg.tz)
@@ -488,7 +490,7 @@ def _dry_run_key(actor: Principal, digest: str) -> str:
     """HMAC(actor, "structures", sha256 of the file) under the server secret: only this admin's dry run of this exact file
     unlocks the commit."""
     msg = f"{actor.id}|structures|{digest}".encode()
-    mac = hmac.new(get_settings().jwt_secret.encode(), msg, hashlib.sha256).hexdigest()
+    mac = hmac.new(pc.import_binding_key(), msg, hashlib.sha256).hexdigest()
     return f"payroll:import:dry:{mac}"
 
 

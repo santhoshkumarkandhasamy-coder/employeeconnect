@@ -135,9 +135,14 @@ class SalaryIncrement(TimestampMixin, Base):
         CheckConstraint("status NOT IN ('submitted','approved') OR submitted_by IS NOT NULL", name="ck_salary_increments_live_submitted"),
         CheckConstraint("status <> 'rejected' OR decision_comment_enc IS NOT NULL", name="ck_salary_increments_rejected_comment"),
         CheckConstraint(
-            "status <> 'approved' OR (decided_by IS NOT NULL AND decided_by <> user_id AND decided_by IS DISTINCT FROM created_by "
+            "status NOT IN ('approved','rejected') OR (decided_by IS NOT NULL AND decided_by <> user_id "
+            "AND decided_by IS DISTINCT FROM created_by AND decided_by IS DISTINCT FROM last_edited_by "
             "AND decided_by IS DISTINCT FROM submitted_by)",
             name="ck_salary_increments_checker",
+        ),
+        CheckConstraint(
+            "status NOT IN ('approved','rejected') OR decided_by::text <> ALL (contributors)",
+            name="ck_salary_increments_checker_history",
         ),
         CheckConstraint("version >= 1", name="ck_salary_increments_version"),
         Index(
@@ -153,6 +158,7 @@ class SalaryIncrement(TimestampMixin, Base):
         Index("ix_salary_increments_submitted_by", "submitted_by"),
         Index("ix_salary_increments_decided_by", "decided_by"),
         Index("ix_salary_increments_created_by", "created_by"),
+        Index("ix_salary_increments_last_edited_by", "last_edited_by"),
         Index("ix_salary_increments_updated_by", "updated_by"),
     )
 
@@ -180,6 +186,13 @@ class SalaryIncrement(TimestampMixin, Base):
     structure_id: Mapped[uuid.UUID | None] = fk_uuid("salary_structures.id", ondelete="SET NULL", nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     created_by: Mapped[uuid.UUID] = fk_uuid("users.id")
+    # last actor who changed the proposal (create / edit); never touched by submit, approve or reject
+    last_edited_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False,
+        default=lambda ctx: ctx.get_current_parameters()["created_by"],
+    )  # fmt: skip
+    # user ids (text) of everybody who created, edited, submitted or withdrew it; append-only, survives a withdraw
+    contributors: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default=text("'{}'"))
     updated_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
 
 

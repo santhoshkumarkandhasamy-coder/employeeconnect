@@ -25,7 +25,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.audit import audit
 from ..core.clock import utcnow
-from ..core.config import get_settings
 from ..core.errors import AppError
 from ..core.pagination import PageParams, make_page
 from ..core.rbac import Principal
@@ -435,7 +434,7 @@ def _dry_run_key(actor: Principal, period: dt.date, digest: str) -> str:
     """HMAC(actor, period, sha256 of the file) under the server secret: only this admin's dry run of this exact file for
     this month unlocks the commit."""
     msg = f"{actor.id}|{pc.period_str(period)}|{digest}".encode()
-    mac = hmac.new(get_settings().jwt_secret.encode(), msg, hashlib.sha256).hexdigest()
+    mac = hmac.new(pc.import_binding_key(), msg, hashlib.sha256).hexdigest()
     return f"payroll:import:dry:{mac}"
 
 
