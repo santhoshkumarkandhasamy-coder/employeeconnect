@@ -4,14 +4,18 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/security/screen_protect.dart';
 import '../../admin/presentation/admin_widgets.dart' show NoPermissionScreen, adminPermissionsProvider;
 import '../domain/payroll_models.dart';
+import '../domain/phase4a_models.dart' show canApprovePayroll;
+import 'approvals_tab.dart';
 import 'dashboard_tab.dart';
 import 'employees_tab.dart';
 import 'pay_items_tab.dart';
+import 'payroll_providers.dart' show approvalQueueProvider;
 import 'payroll_settings_tab.dart';
 import 'runs_tab.dart';
 import 'statutory_tab.dart';
 
-/// HR / Admin payroll area: Dashboard | Runs | Employees | Pay items | Statutory | Settings. Shown with
+/// HR / Admin payroll area: Dashboard | Runs | Employees | Pay items | Approvals (only with
+/// `payroll.approve`) | Statutory | Settings. Shown with
 /// `payroll.view_all`; write actions need `payroll.manage` / `payroll.publish`
 /// (the server enforces all of it again). FLAG_SECURE is on for every payroll
 /// admin screen.
@@ -22,33 +26,46 @@ class PayrollHomeScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final perms = ref.watch(adminPermissionsProvider);
     if (!canOpenPayroll(perms)) return const NoPermissionScreen(title: 'Payroll');
+    final approver = canApprovePayroll(perms);
+    final pending = approver ? ref.watch(approvalQueueProvider).valueOrNull?.count ?? 0 : 0;
     return SecureScreen(
       child: DefaultTabController(
-        length: 6,
+        length: approver ? 7 : 6,
         child: Scaffold(
           appBar: AppBar(
             title: const Text('Payroll'),
-            bottom: const TabBar(
+            bottom: TabBar(
               isScrollable: true,
               tabAlignment: TabAlignment.start,
               tabs: [
-                Tab(text: 'Dashboard'),
-                Tab(text: 'Runs'),
-                Tab(text: 'Employees'),
-                Tab(text: 'Pay items'),
-                Tab(text: 'Statutory'),
-                Tab(text: 'Settings'),
+                const Tab(text: 'Dashboard'),
+                const Tab(text: 'Runs'),
+                const Tab(text: 'Employees'),
+                const Tab(text: 'Pay items'),
+                if (approver)
+                  Tab(
+                    key: const ValueKey('tab-approvals'),
+                    child: Badge(
+                      label: Text('$pending'),
+                      isLabelVisible: pending > 0,
+                      offset: const Offset(10, -6),
+                      child: const Text('Approvals'),
+                    ),
+                  ),
+                const Tab(text: 'Statutory'),
+                const Tab(text: 'Settings'),
               ],
             ),
           ),
-          body: const TabBarView(
+          body: TabBarView(
             children: [
-              PayrollDashboardTab(),
-              RunsTab(),
-              PayrollEmployeesTab(),
-              PayItemsTab(),
-              StatutoryTab(),
-              PayrollSettingsTab(),
+              const PayrollDashboardTab(),
+              const RunsTab(),
+              const PayrollEmployeesTab(),
+              const PayItemsTab(),
+              if (approver) const ApprovalsTab(),
+              const StatutoryTab(),
+              const PayrollSettingsTab(),
             ],
           ),
         ),

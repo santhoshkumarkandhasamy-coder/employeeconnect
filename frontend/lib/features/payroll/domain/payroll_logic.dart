@@ -381,6 +381,29 @@ const List<PayrollSettingSpec> payrollSettingSpecs = [
       PayrollSettingKind.boolean, 'Overtime',),
   PayrollSettingSpec('payroll.overtime_include_auto_closed', 'Include auto-closed days',
       PayrollSettingKind.boolean, 'Overtime',),
+  // 4a: salary structure approval, increments, gratuity (contract 18.11).
+  PayrollSettingSpec('payroll.structure_changes_need_approval',
+      'Salary structure changes after the first need approval (increment)', PayrollSettingKind.boolean,
+      'Salary changes',),
+  PayrollSettingSpec('payroll.split_basic_pct', 'Split from gross: basic', PayrollSettingKind.number,
+      'Salary changes', min: 1, max: 100, suffix: '% of gross',),
+  PayrollSettingSpec('payroll.split_hra_pct_of_basic', 'Split from gross: HRA', PayrollSettingKind.number,
+      'Salary changes', min: 0, max: 100, suffix: '% of basic',),
+  PayrollSettingSpec('payroll.increment_max_pct', 'Largest increment', PayrollSettingKind.number,
+      'Salary changes', min: 1, max: 100, suffix: '%',),
+  PayrollSettingSpec('payroll.increment_backdate_months', 'Backdating allowed', PayrollSettingKind.number,
+      'Salary changes', min: 0, max: 24, suffix: 'months',),
+  PayrollSettingSpec('payroll.ctc_include_gratuity', 'Include gratuity accrual in CTC',
+      PayrollSettingKind.boolean, 'Gratuity',),
+  PayrollSettingSpec('payroll.gratuity_min_years', 'Years of service to be eligible',
+      PayrollSettingKind.number, 'Gratuity', min: 0, max: 10,),
+  PayrollSettingSpec(
+    'payroll.gratuity_wage_basis',
+    'Gratuity wage basis',
+    PayrollSettingKind.choice,
+    'Gratuity',
+    options: [('basic', 'Basic'), ('basic_or_half_gross', 'Basic, or half the gross if higher')],
+  ),
 ];
 
 const String reimbursementCategoriesKey = 'payroll.reimbursement_categories';

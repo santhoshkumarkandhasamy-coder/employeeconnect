@@ -5,7 +5,9 @@ import '../../announcements/presentation/announcement_providers.dart' show Paged
 import '../../attendance/domain/attendance_models.dart' show Paged;
 import '../data/payroll_repository.dart';
 import '../domain/claims_models.dart';
+import '../domain/gross_split.dart';
 import '../domain/pay_items_models.dart';
+import '../domain/phase4a_models.dart';
 import '../domain/payroll_models.dart';
 
 /// All payroll state is autoDispose and in memory only: it is never written to
@@ -232,4 +234,91 @@ final myOvertimeProvider = FutureProvider.autoDispose.family<MyOvertime, String>
 final overtimeEnabledProvider = FutureProvider.autoDispose<bool>((ref) async {
   final s = await ref.watch(payrollSettingsProvider.future);
   return s['payroll.overtime_enabled'] == true;
+});
+
+// ---- phase 4a (contract section 18) ---------------------------------------------------
+
+/// The company split rule from the server settings (plan 16 F9). A failed read
+/// falls back to the defaults: the split is only a preview, the server decides.
+final splitRuleProvider = FutureProvider.autoDispose<SplitRule>((ref) async {
+  try {
+    return SplitRule.fromSettings(await ref.watch(payrollSettingsProvider.future));
+  } on Object {
+    return SplitRule.defaults;
+  }
+});
+
+/// `payroll.increment_max_pct` (default 50), for the percent field limit.
+final incrementMaxPctProvider = FutureProvider.autoDispose<int>((ref) async {
+  try {
+    final v = (await ref.watch(payrollSettingsProvider.future))['payroll.increment_max_pct'];
+    return v is num && v >= 1 && v <= 100 ? v.toInt() : 50;
+  } on Object {
+    return 50;
+  }
+});
+
+class IncrementsNotifier extends AdminPagedNotifier<Increment, IncrementQuery> {
+  @override
+  Future<Paged<Increment>> fetchPage(IncrementQuery arg, int page) =>
+      ref.read(payrollRepositoryProvider).increments(arg, page: page);
+
+  @override
+  String idOf(Increment item) => item.id;
+}
+
+final incrementsProvider = AsyncNotifierProvider.autoDispose
+    .family<IncrementsNotifier, PagedList<Increment>, IncrementQuery>(IncrementsNotifier.new);
+
+final incrementProvider = FutureProvider.autoDispose.family<Increment, String>(
+  (ref, id) => ref.watch(payrollRepositoryProvider).increment(id),
+);
+
+class IncrementBatchesNotifier extends AdminPagedNotifier<IncrementBatch, String?> {
+  @override
+  Future<Paged<IncrementBatch>> fetchPage(String? arg, int page) =>
+      ref.read(payrollRepositoryProvider).incrementBatches(kind: arg, page: page);
+
+  @override
+  String idOf(IncrementBatch item) => item.id;
+}
+
+/// Argument: the batch kind filter (`percent` | `import`) or null.
+final incrementBatchesProvider = AsyncNotifierProvider.autoDispose
+    .family<IncrementBatchesNotifier, PagedList<IncrementBatch>, String?>(IncrementBatchesNotifier.new);
+
+final incrementBatchProvider = FutureProvider.autoDispose.family<IncrementBatch, String>(
+  (ref, id) => ref.watch(payrollRepositoryProvider).incrementBatch(id),
+);
+
+final salaryHistoryProvider = FutureProvider.autoDispose.family<List<SalaryHistoryEntry>, String>(
+  (ref, userId) => ref.watch(payrollRepositoryProvider).salaryHistory(userId),
+);
+
+final gratuityProvider = FutureProvider.autoDispose.family<GratuityPage, GratuityKey>(
+  (ref, key) => ref.watch(payrollRepositoryProvider).gratuity(key.$1, page: key.$2),
+);
+
+/// Submitted increments (outside bulk batches) and batches waiting for a
+/// decision: the Approvals queue and its badge. The batch endpoint has no
+/// status filter, so the first page of batches is filtered here.
+class ApprovalQueue {
+  const ApprovalQueue({required this.increments, required this.batches});
+  final List<Increment> increments;
+  final List<IncrementBatch> batches;
+  int get count => increments.length + batches.length;
+}
+
+final approvalQueueProvider = FutureProvider.autoDispose<ApprovalQueue>((ref) async {
+  final repo = ref.watch(payrollRepositoryProvider);
+  final results = await Future.wait([
+    repo.increments(const IncrementQuery(status: 'submitted')),
+    repo.incrementBatches(),
+  ]);
+  final incs = (results[0] as Paged<Increment>).items;
+  final batches = (results[1] as Paged<IncrementBatch>).items;
+  return ApprovalQueue(
+    increments: [for (final i in incs) if (!i.isInBatch) i],
+    batches: [for (final b in batches) if (!b.isCancelled && b.submittedCount > 0) b],
+  );
 });

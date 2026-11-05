@@ -13,6 +13,10 @@ import '../data/payroll_repository.dart';
 import '../domain/payroll_logic.dart';
 import '../domain/payroll_models.dart';
 import '../domain/payroll_money.dart';
+import '../domain/phase4a_models.dart';
+import 'increment_detail_screen.dart';
+import 'increment_form_screen.dart';
+import 'increment_widgets.dart' show effectiveLabel;
 import 'payroll_details_screen.dart';
 import 'payroll_providers.dart';
 import 'payroll_widgets.dart';
@@ -108,6 +112,16 @@ class _EmployeePayrollScreenState extends ConsumerState<EmployeePayrollScreen> {
     if (saved == true) ref.invalidate(payrollStructuresProvider(_userId));
   }
 
+  Future<void> _newIncrement() async {
+    await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(
+        builder: (_) => IncrementFormScreen(userId: _userId, userName: widget.employee.fullName),
+      ),
+    );
+    ref.invalidate(salaryHistoryProvider(_userId));
+    ref.invalidate(payrollStructuresProvider(_userId));
+  }
+
   @override
   Widget build(BuildContext context) {
     final perms = ref.watch(adminPermissionsProvider);
@@ -147,11 +161,22 @@ class _EmployeePayrollScreenState extends ConsumerState<EmployeePayrollScreen> {
             if (canEdit)
               Align(
                 alignment: Alignment.centerLeft,
-                child: TextButton.icon(
-                  key: const ValueKey('recalc-arrears'),
-                  onPressed: _recalculateArrears,
-                  icon: const Icon(Icons.calculate_outlined),
-                  label: const Text('Recalculate arrears'),
+                child: Wrap(
+                  spacing: 8,
+                  children: [
+                    TextButton.icon(
+                      key: const ValueKey('new-increment'),
+                      onPressed: _newIncrement,
+                      icon: const Icon(Icons.trending_up),
+                      label: const Text('New increment'),
+                    ),
+                    TextButton.icon(
+                      key: const ValueKey('recalc-arrears'),
+                      onPressed: _recalculateArrears,
+                      icon: const Icon(Icons.calculate_outlined),
+                      label: const Text('Recalculate arrears'),
+                    ),
+                  ],
                 ),
               ),
             structures.when(
@@ -178,7 +203,8 @@ class _EmployeePayrollScreenState extends ConsumerState<EmployeePayrollScreen> {
                               title: Text('From ${_monthLabel(s.effectiveFrom)}'),
                               subtitle: Text(
                                 'Gross ${formatRupees(s.monthlyGross)}'
-                                '${s.effectiveTo == null ? '  -  current' : '  -  until ${s.effectiveTo}'}',
+                                '${s.effectiveTo == null ? '  -  current' : '  -  until ${s.effectiveTo}'}'
+                                '  -  ${structureSourceLabel(s.source)}',
                               ),
                               trailing: Row(
                                 mainAxisSize: MainAxisSize.min,
@@ -197,6 +223,9 @@ class _EmployeePayrollScreenState extends ConsumerState<EmployeePayrollScreen> {
                       ],
                     ),
             ),
+            const SizedBox(height: 16),
+            Text('Salary history', style: theme.textTheme.titleMedium),
+            SalaryHistorySection(userId: _userId),
             const SizedBox(height: 16),
             Row(
               children: [
@@ -280,4 +309,67 @@ class _EmployeePayrollScreenState extends ConsumerState<EmployeePayrollScreen> {
           ],
         ),
       );
+}
+
+/// Timeline of an employee's salary: structures (newest first, with the
+/// source and change percent) and open increments (contract 18.4).
+class SalaryHistorySection extends ConsumerWidget {
+  const SalaryHistorySection({required this.userId, super.key});
+  final String userId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final async = ref.watch(salaryHistoryProvider(userId));
+    return async.when(
+      skipLoadingOnReload: true,
+      loading: () => const Padding(padding: EdgeInsets.all(24), child: LoadingView(label: 'Loading history')),
+      error: (e, _) => ErrorView(
+        message: payrollMsg(e),
+        onRetry: () => ref.invalidate(salaryHistoryProvider(userId)),
+      ),
+      data: (items) => items.isEmpty
+          ? const EmptyView(icon: Icons.history, message: 'No salary history yet.')
+          : Column(
+              key: const ValueKey('salary-history'),
+              children: [for (final e in items) _SalaryHistoryTile(entry: e)],
+            ),
+    );
+  }
+}
+
+class _SalaryHistoryTile extends StatelessWidget {
+  const _SalaryHistoryTile({required this.entry});
+  final SalaryHistoryEntry entry;
+
+  @override
+  Widget build(BuildContext context) {
+    final e = entry;
+    final theme = Theme.of(context);
+    final pct = e.changePercent;
+    return Card(
+      key: ValueKey('history-${e.incrementId ?? e.structureId}'),
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      child: ListTile(
+        leading: Icon(e.isOpenIncrement ? Icons.hourglass_top : Icons.account_balance_wallet_outlined),
+        title: Text('From ${effectiveLabel(e.effectiveFrom)}: ${formatBigRupees(e.monthlyGross)}'),
+        subtitle: Text(
+          e.isOpenIncrement
+              ? 'Increment ${incrementStatusLabel(e.status ?? '').toLowerCase()} (${incrementKindLabel(e.kind ?? '')})'
+              : [
+                  structureSourceLabel(e.source ?? 'manual'),
+                  if (pct != null) '${pct.startsWith('-') ? '' : '+'}$pct%',
+                  if (e.effectiveTo != null) 'until ${e.effectiveTo}' else 'current',
+                  if (e.approvedBy != null) 'approved by ${e.approvedBy!.fullName}',
+                ].join('  -  '),
+          style: theme.textTheme.bodySmall,
+        ),
+        trailing: e.isOpenIncrement ? const Icon(Icons.chevron_right) : null,
+        onTap: e.isOpenIncrement && e.incrementId != null
+            ? () => Navigator.of(context).push<void>(
+                  MaterialPageRoute<void>(builder: (_) => IncrementDetailScreen(incrementId: e.incrementId!)),
+                )
+            : null,
+      ),
+    );
+  }
 }

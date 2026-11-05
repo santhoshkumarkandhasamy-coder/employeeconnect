@@ -6,6 +6,7 @@ import '../domain/payroll_models.dart';
 import 'arrears_section.dart';
 import 'claims_review.dart';
 import 'encashment_section.dart';
+import 'increments_section.dart';
 import 'loans_section.dart';
 import 'one_time_section.dart';
 import 'overtime_section.dart';
@@ -17,7 +18,8 @@ enum PaySection {
   arrears('Arrears'),
   encashment('Encashment'),
   claims('Claims'),
-  overtime('Overtime');
+  overtime('Overtime'),
+  increments('Increments');
 
   const PaySection(this.label);
   final String label;
@@ -73,6 +75,7 @@ class _PayItemsTabState extends ConsumerState<PayItemsTab> {
             PaySection.encashment => EncashmentSection(canManage: canManage),
             PaySection.claims => ClaimsSection(canManage: canManage),
             PaySection.overtime => OvertimeSection(canManage: canManage),
+            PaySection.increments => IncrementsSection(canManage: canManage),
           },
         ),
       ],

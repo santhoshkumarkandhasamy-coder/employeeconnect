@@ -10,6 +10,7 @@ import '../../export/data/export_repository.dart' show decodeErrorBody, decodeSt
 import '../../../core/files/file_service.dart' show fileIdFromUrl;
 import '../domain/claims_models.dart';
 import '../domain/pay_items_models.dart';
+import '../domain/phase4a_models.dart';
 import '../domain/payroll_models.dart';
 
 /// A downloaded file held in memory (a payslip PDF or the register workbook).
@@ -282,6 +283,165 @@ class PayrollRepository {
       'current_password': currentPassword,
     },);
   }
+
+  // ---- phase 4a: CTC, gratuity, increments, bulk hike, structure import (section 18) --------
+
+  /// Pure calculation; nothing is stored. Needs `payroll.view_all`.
+  Future<CtcResult> ctcCalculate(CtcInput input) async =>
+      CtcResult.fromJson(await _json('POST', '$_a/ctc/calculate', body: input.toJson()));
+
+  /// [GratuityQuery.asOf] is `YYYY-MM-DD` (null = today). Totals cover the whole filtered set.
+  Future<GratuityPage> gratuity(GratuityQuery q, {int page = 1}) async => GratuityPage.fromJson(
+        await _json('GET', '$_a/gratuity', query: {
+          if (q.asOf != null) 'as_of': q.asOf,
+          if (q.departmentId != null) 'department_id': q.departmentId,
+          'eligible_only': q.eligibleOnly,
+          if (q.q.trim().isNotEmpty) 'q': q.q.trim(),
+          'page': page,
+          'page_size': 50,
+        },),
+      );
+
+  /// Gratuity workbook for a month (as of its last day). Needs `payroll.view_all`.
+  Future<PayrollFile> gratuityReport(String period) => report('gratuity', period);
+
+  Future<Paged<Increment>> increments(IncrementQuery q, {int page = 1}) async => Paged.parse(
+        await _json('GET', '$_a/increments', query: {
+          if (q.status != null) 'status': q.status,
+          if (q.userId != null) 'user_id': q.userId,
+          if (q.batchId != null) 'batch_id': q.batchId,
+          if (q.effectiveFrom != null) 'effective_from': q.effectiveFrom,
+          'page': page,
+          'page_size': 20,
+        },),
+        Increment.fromJson,
+      );
+
+  Future<Increment> increment(String id) async =>
+      Increment.fromJson(await _json('GET', '$_a/increments/$id'));
+
+  Future<Increment> createIncrement(String userId, IncrementInput input) async => Increment.fromJson(
+        await _json('POST', '$_a/employees/$userId/increments', body: input.toJson()),
+      );
+
+  Future<Increment> updateIncrement(String id, IncrementInput input, {required int expectedVersion}) async =>
+      Increment.fromJson(
+        await _json('PUT', '$_a/increments/$id', body: input.toJson(expectedVersion: expectedVersion)),
+      );
+
+  Future<Increment> submitIncrement(String id, {required int expectedVersion}) async => Increment.fromJson(
+        await _json('POST', '$_a/increments/$id/submit', body: {'expected_version': expectedVersion}),
+      );
+
+  Future<Increment> withdrawIncrement(String id, {required int expectedVersion}) async => Increment.fromJson(
+        await _json('POST', '$_a/increments/$id/withdraw', body: {'expected_version': expectedVersion}),
+      );
+
+  /// Needs `payroll.approve` and the caller's own password (step-up, never kept).
+  Future<Increment> approveIncrement(
+    String id, {
+    required int expectedVersion,
+    required String currentPassword,
+    String? comment,
+  }) async =>
+      Increment.fromJson(await _json('POST', '$_a/increments/$id/approve', body: {
+        'expected_version': expectedVersion,
+        'comment': (comment == null || comment.trim().isEmpty) ? null : comment.trim(),
+        'current_password': currentPassword,
+      },),);
+
+  Future<Increment> rejectIncrement(String id, {required int expectedVersion, required String comment}) async =>
+      Increment.fromJson(await _json('POST', '$_a/increments/$id/reject', body: {
+        'expected_version': expectedVersion,
+        'comment': comment.trim(),
+      },),);
+
+  Future<Increment> cancelIncrement(String id, String reason) async => Increment.fromJson(
+        await _json('POST', '$_a/increments/$id/cancel', body: {'reason': reason.trim()}),
+      );
+
+  Future<List<SalaryHistoryEntry>> salaryHistory(String userId) async =>
+      SalaryHistoryEntry.parseList(await _json('GET', '$_a/employees/$userId/salary-history'));
+
+  Future<BulkHikeResult> bulkHike(BulkHikeInput input) async =>
+      BulkHikeResult.fromJson(await _json('POST', '$_a/increments/bulk', body: input.toJson()));
+
+  /// [kind] `percent` | `import` | null (all).
+  Future<Paged<IncrementBatch>> incrementBatches({String? kind, int page = 1}) async => Paged.parse(
+        await _json('GET', '$_a/increments/batches', query: {
+          if (kind != null) 'kind': kind,
+          'page': page,
+          'page_size': 20,
+        },),
+        IncrementBatch.fromJson,
+      );
+
+  Future<IncrementBatch> incrementBatch(String id) async =>
+      IncrementBatch.fromJson(await _json('GET', '$_a/increments/batches/$id'));
+
+  Future<BatchSubmitResult> submitIncrementBatch(String id) async =>
+      BatchSubmitResult.fromJson(await _json('POST', '$_a/increments/batches/$id/submit', body: const {}));
+
+  Future<BatchApproveResult> approveIncrementBatch(
+    String id, {
+    required String currentPassword,
+    String? comment,
+  }) async =>
+      BatchApproveResult.fromJson(await _json('POST', '$_a/increments/batches/$id/approve', body: {
+        'comment': (comment == null || comment.trim().isEmpty) ? null : comment.trim(),
+        'current_password': currentPassword,
+      },),);
+
+  /// Returns the number of rows rejected.
+  Future<int> rejectIncrementBatch(String id, {required String comment}) async {
+    final j = await _json('POST', '$_a/increments/batches/$id/reject', body: {'comment': comment.trim()});
+    final n = j['rejected'];
+    return n is num ? n.toInt() : 0;
+  }
+
+  Future<BatchCancelResult> cancelIncrementBatch(String id, String reason) async =>
+      BatchCancelResult.fromJson(
+        await _json('POST', '$_a/increments/batches/$id/cancel', body: {'reason': reason.trim()}),
+      );
+
+  Future<PayrollFile> structuresTemplate() => _file(
+        'GET',
+        '$_a/structures/template',
+        fallbackName: 'salary-structures-template.xlsx',
+        ext: '.xlsx',
+      );
+
+  Future<StructureImportReport> structureImportDryRun({
+    required List<int> bytes,
+    required String filename,
+  }) async =>
+      StructureImportReport.fromJson(await _json(
+        'POST',
+        '$_a/structures/import',
+        query: {'dry_run': true},
+        body: FormData.fromMap({'file': MultipartFile.fromBytes(bytes, filename: filename)}),
+      ),);
+
+  /// Re-sends the same file with the dry run's [fileSha256], a [reason] (3-200)
+  /// and the caller's own password (step-up, never kept).
+  Future<StructureImportCommit> structureImportCommit({
+    required List<int> bytes,
+    required String filename,
+    required String fileSha256,
+    required String reason,
+    required String currentPassword,
+  }) async =>
+      StructureImportCommit.fromJson(await _json(
+        'POST',
+        '$_a/structures/import',
+        query: {'dry_run': false},
+        body: FormData.fromMap({
+          'file': MultipartFile.fromBytes(bytes, filename: filename),
+          'file_sha256': fileSha256,
+          'reason': reason.trim(),
+          'current_password': currentPassword,
+        }),
+      ),);
 
   // ---- pay items: one-time items and bulk import (contract 17.2) ---------------------
 

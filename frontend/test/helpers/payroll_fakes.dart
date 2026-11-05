@@ -936,6 +936,7 @@ Future<void> pumpPayroll(
   PayrollImportPicker? picker,
   ClaimBillPicker? billPicker,
   Size size = const Size(800, 2400),
+  List<Override> extraOverrides = const [],
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
@@ -950,6 +951,7 @@ Future<void> pumpPayroll(
         if (picker != null) payrollImportPickerProvider.overrideWithValue(picker),
         if (billPicker != null) claimBillPickerProvider.overrideWithValue(billPicker),
         payrollClockProvider.overrideWithValue(() => DateTime(2026, 10, 25)),
+        ...extraOverrides,
       ],
       child: MaterialApp(home: child),
     ),

@@ -680,6 +680,8 @@ class SalaryStructure {
     required this.monthlyGross,
     required this.inUse,
     this.effectiveTo,
+    this.source = 'manual',
+    this.incrementId,
   });
   final String id;
   final String userId;
@@ -696,6 +698,10 @@ class SalaryStructure {
   final bool ptApplicable;
   final String monthlyGross;
   final bool inUse;
+
+  /// `manual` | `increment` | `import` (contract 18.1, read-only).
+  final String source;
+  final String? incrementId;
 
   factory SalaryStructure.fromJson(Map<String, dynamic> j) => SalaryStructure(
         id: _s(j['id']),
@@ -715,6 +721,8 @@ class SalaryStructure {
         ptApplicable: j['pt_applicable'] != false,
         monthlyGross: _opt(j['monthly_gross']) ?? '0.00',
         inUse: j['in_use'] == true,
+        source: _opt(j['source']) ?? 'manual',
+        incrementId: _opt(j['increment_id']),
       );
 
   static List<SalaryStructure> parseList(Map<String, dynamic> j) =>
@@ -1077,7 +1085,31 @@ String payrollErrorMessage(ApiException e) {
           'set up to 12 months ahead.';
     case 'SECOND_PERSON_REQUIRED':
       return 'A different person must do this: the person who processed the run, last edited a payslip '
-          'in it, or verified a claim cannot also publish or approve it.';
+          'in it, verified a claim, or made or submitted an increment cannot also publish or approve it.';
+    case 'APPROVAL_REQUIRED':
+      return 'This salary change needs approval. Use an increment: create it, submit it, '
+          'and another person approves it.';
+    case 'INCREMENT_EXISTS':
+      return 'This employee already has a draft or submitted increment for that month.';
+    case 'INCREMENT_STALE':
+      return 'The salary structure changed after this increment was made. '
+          'Cancel it and create a new one from the current structure.';
+    case 'LATER_STRUCTURE_EXISTS':
+      return 'A salary structure starting after that month already exists, so this increment would be overridden.';
+    case 'NOT_SUBMITTED':
+      return 'This increment is no longer waiting for approval. Reload to see its state.';
+    case 'NOT_DRAFT':
+      return 'Only a draft can be changed or submitted. Reload to see its state.';
+    case 'AFTER_EXIT':
+      return 'The employee leaves before that month.';
+    case 'NO_CHANGE':
+      return 'This is the same as the current salary structure. Change something first.';
+    case 'INVALID_PERCENT':
+      return 'The percent is above the allowed maximum or not a valid percent.';
+    case 'TOO_MANY_ROWS':
+      return 'More than 500 employees are in scope. Narrow it by department or employee.';
+    case 'IMPORT_NOT_CHECKED':
+      return 'This file has not been checked in the last 15 minutes. Check it again, then import.';
     case 'FORBIDDEN':
       return e.message.isNotEmpty && e.message != 'Something went wrong.'
           ? e.message

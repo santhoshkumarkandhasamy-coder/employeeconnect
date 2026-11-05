@@ -3,12 +3,15 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../admin/presentation/admin_widgets.dart' show AdminPagedBody;
+import '../../admin/presentation/admin_widgets.dart' show AdminPagedBody, adminPermissionsProvider;
 import '../domain/payroll_models.dart';
 import '../domain/payroll_money.dart';
+import 'ctc_calculator_screen.dart';
 import 'employee_payroll_screen.dart';
+import 'gratuity_screen.dart';
 import 'payroll_providers.dart';
 import 'payroll_widgets.dart';
+import 'structure_import_wizard_screen.dart';
 
 /// Employees with their payroll status: structure, gross and missing details.
 class PayrollEmployeesTab extends ConsumerStatefulWidget {
@@ -34,6 +37,7 @@ class _PayrollEmployeesTabState extends ConsumerState<PayrollEmployeesTab> {
   Widget build(BuildContext context) {
     final async = ref.watch(payrollEmployeesProvider(_query));
     final notifier = ref.read(payrollEmployeesProvider(_query).notifier);
+    final canManage = canManagePayroll(ref.watch(adminPermissionsProvider));
     return AdminPagedBody<PayrollEmployee>(
       async: async,
       onRefresh: notifier.reload,
@@ -83,6 +87,43 @@ class _PayrollEmployeesTabState extends ConsumerState<PayrollEmployeesTab> {
                           () => _query = PayrollEmployeeQuery(q: _query.q, hasStructure: f.$1),
                         ),
                       ),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 4),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Wrap(
+                spacing: 8,
+                children: [
+                  TextButton.icon(
+                    key: const ValueKey('tool-ctc'),
+                    onPressed: () => Navigator.of(context).push<void>(
+                      MaterialPageRoute<void>(builder: (_) => CtcCalculatorScreen(canManage: canManage)),
+                    ),
+                    icon: const Icon(Icons.calculate_outlined),
+                    label: const Text('CTC calculator'),
+                  ),
+                  TextButton.icon(
+                    key: const ValueKey('tool-gratuity'),
+                    onPressed: () => Navigator.of(context).push<void>(
+                      MaterialPageRoute<void>(builder: (_) => const GratuityScreen()),
+                    ),
+                    icon: const Icon(Icons.savings_outlined),
+                    label: const Text('Gratuity'),
+                  ),
+                  if (canManage)
+                    TextButton.icon(
+                      key: const ValueKey('tool-import-structures'),
+                      onPressed: () async {
+                        await Navigator.of(context).push<void>(
+                          MaterialPageRoute<void>(builder: (_) => const StructureImportWizardScreen()),
+                        );
+                        ref.invalidate(payrollEmployeesProvider(_query));
+                      },
+                      icon: const Icon(Icons.upload_file_outlined),
+                      label: const Text('Import structures'),
                     ),
                 ],
               ),

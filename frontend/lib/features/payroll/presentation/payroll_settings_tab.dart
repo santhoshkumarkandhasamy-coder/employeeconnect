@@ -23,6 +23,10 @@ import 'pt_slab_editor.dart';
 /// runs and to a draft run after "Refresh" (runs snapshot the settings).
 const String secondPersonKey = 'payroll.publish_requires_second_person';
 
+/// Needs role.assign + the caller's password too (contract 18.1).
+const String structureApprovalKey = 'payroll.structure_changes_need_approval';
+const Set<String> stepUpSettingKeys = {secondPersonKey, structureApprovalKey};
+
 class PayrollSettingsTab extends ConsumerWidget {
   const PayrollSettingsTab({super.key});
 
@@ -44,11 +48,11 @@ class PayrollSettingsTab extends ConsumerWidget {
         onSave: (changes) async {
           final repo = ref.read(payrollRepositoryProvider);
           try {
-            if (changes.containsKey(secondPersonKey)) {
+            if (changes.keys.any(stepUpSettingKeys.contains)) {
               // Flipping maker-checker needs role.assign AND the caller's password (13.3).
               final done = await runWithReauth(
                 context,
-                reason: 'Changing who may publish payroll needs your password.',
+                reason: 'Changing this approval rule needs your password.',
                 action: (pw) async {
                   await repo.saveSettings(changes, currentPassword: pw);
                 },
@@ -332,11 +336,11 @@ class _PayrollSettingsFormState extends State<PayrollSettingsForm> {
         return SwitchListTile(
           contentPadding: EdgeInsets.zero,
           title: Text(s.label),
-          subtitle: s.key == secondPersonKey && !widget.canChangeSecondPerson
+          subtitle: stepUpSettingKeys.contains(s.key) && !widget.canChangeSecondPerson
               ? const Text('Only an administrator can change this.')
               : null,
           value: _bools[s.key]!,
-          onChanged: enabled && (s.key != secondPersonKey || widget.canChangeSecondPerson)
+          onChanged: enabled && (!stepUpSettingKeys.contains(s.key) || widget.canChangeSecondPerson)
               ? (v) => setState(() => _bools[s.key] = v)
               : null,
         );

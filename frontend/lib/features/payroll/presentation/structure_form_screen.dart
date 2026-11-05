@@ -11,6 +11,8 @@ import '../domain/gross_split.dart';
 import '../domain/payroll_logic.dart';
 import '../domain/payroll_models.dart';
 import '../domain/payroll_money.dart';
+import '../domain/phase4a_models.dart' show structureSourceLabel;
+import 'increment_form_screen.dart';
 import 'payroll_providers.dart';
 import 'payroll_widgets.dart';
 
@@ -51,8 +53,18 @@ class _DeductionRow {
 /// Add, copy or edit an effective-dated salary structure. A structure that a
 /// processed or published payslip already uses is read-only (add a new one).
 class StructureFormScreen extends ConsumerStatefulWidget {
-  const StructureFormScreen({required this.userId, super.key, this.existing, this.copyFrom});
+  const StructureFormScreen({
+    required this.userId,
+    super.key,
+    this.existing,
+    this.copyFrom,
+    this.returnInput = false,
+  });
   final String userId;
+
+  /// Do not save: validate and pop with the [StructureInput] (used by the
+  /// increment form, kind "full structure"). Callers push `<StructureInput>`.
+  final bool returnInput;
 
   /// Edit this structure (PUT = full replace).
   final SalaryStructure? existing;
@@ -167,21 +179,22 @@ class _StructureFormScreenState extends ConsumerState<StructureFormScreen> {
       payrollSnack(context, 'Enter the total monthly gross first');
       return;
     }
-    final split = splitGross((paise + 50) ~/ 100);
+    final rule = ref.read(splitRuleProvider).valueOrNull ?? SplitRule.defaults;
+    final split = splitGross((paise + 50) ~/ 100, rule: rule);
     setState(() {
       _basic.text = paiseToMoney(split.basic * 100);
       _hra.text = paiseToMoney(split.hra * 100);
       _listError = null;
       _AllowanceRow? row;
       for (final r in _allowances) {
-        if (r.code.text.trim().toUpperCase() == splitAllowanceCode) row = r;
+        if (r.code.text.trim().toUpperCase() == rule.allowanceCode) row = r;
       }
       if (row == null) {
         if (_allowances.length >= 15) {
-          payrollSnack(context, 'Too many allowances to add $splitAllowanceCode');
+          payrollSnack(context, 'Too many allowances to add ${rule.allowanceCode}');
           return;
         }
-        row = _AllowanceRow(code: splitAllowanceCode, name: splitAllowanceName);
+        row = _AllowanceRow(code: rule.allowanceCode, name: rule.allowanceName);
         _allowances.add(row);
       }
       row.amount.text = paiseToMoney(split.allowance * 100);
@@ -198,9 +211,14 @@ class _StructureFormScreenState extends ConsumerState<StructureFormScreen> {
       setState(() => _listError = listError);
       return;
     }
+    if (widget.returnInput) {
+      Navigator.of(context).pop(input);
+      return;
+    }
     setState(() => _saving = true);
     final repo = ref.read(payrollRepositoryProvider);
     final nav = Navigator.of(context);
+    ApiException? failure;
     try {
       if (widget.existing != null) {
         await repo.updateStructure(widget.existing!.id, input);
@@ -209,10 +227,43 @@ class _StructureFormScreenState extends ConsumerState<StructureFormScreen> {
       }
       nav.pop(true);
     } on ApiException catch (e) {
-      if (mounted) payrollSnack(context, payrollErrorMessage(e));
+      failure = e;
     } finally {
       if (mounted) setState(() => _saving = false);
     }
+    if (failure != null && mounted) await _showError(failure);
+  }
+
+  /// 409 APPROVAL_REQUIRED (contract 18.1): direct changes are closed once an
+  /// employee has a structure; the change goes through an increment.
+  Future<void> _showError(ApiException e) async {
+    if (e.code != 'APPROVAL_REQUIRED') {
+      payrollSnack(context, payrollErrorMessage(e));
+      return;
+    }
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        key: const ValueKey('approval-required'),
+        title: const Text('Use an increment'),
+        content: const Text(
+          'Salary changes after the first structure need approval. Create an increment instead: '
+          'you prepare it and submit it, and another person approves it.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Close')),
+          FilledButton(
+            key: const ValueKey('go-increment'),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Create an increment'),
+          ),
+        ],
+      ),
+    );
+    if (go != true || !mounted) return;
+    await Navigator.of(context).pushReplacement(
+      MaterialPageRoute<bool>(builder: (_) => IncrementFormScreen(userId: widget.userId)),
+    );
   }
 
   Future<void> _delete() async {
@@ -229,7 +280,7 @@ class _StructureFormScreenState extends ConsumerState<StructureFormScreen> {
       await repo.deleteStructure(widget.existing!.id);
       nav.pop(true);
     } on ApiException catch (e) {
-      if (mounted) payrollSnack(context, payrollErrorMessage(e));
+      if (mounted) await _showError(e);
     }
   }
 
@@ -242,6 +293,8 @@ class _StructureFormScreenState extends ConsumerState<StructureFormScreen> {
     final gross = _input().monthlyGross;
     final ro = _readOnly;
     final title = widget.existing != null ? 'Salary structure' : 'New salary structure';
+    final rule = ref.watch(splitRuleProvider).valueOrNull ?? SplitRule.defaults;
+    final src = widget.existing?.source;
 
     return SecureScreen(
       child: Scaffold(
@@ -286,6 +339,15 @@ class _StructureFormScreenState extends ConsumerState<StructureFormScreen> {
                         ),
                       ],
                     ),
+                  ),
+                ),
+              if (src != null && src != 'manual')
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    'Source: ${structureSourceLabel(src)}',
+                    key: const ValueKey('structure-source'),
+                    style: theme.textTheme.bodySmall,
                   ),
                 ),
               Text('Effective from', style: theme.textTheme.titleSmall),
@@ -334,12 +396,12 @@ class _StructureFormScreenState extends ConsumerState<StructureFormScreen> {
                         controller: _grossTarget,
                         keyboardType: const TextInputType.numberWithOptions(decimal: true),
                         inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))],
-                        decoration: const InputDecoration(
+                        decoration: InputDecoration(
                           labelText: 'Total monthly gross',
                           prefixText: '₹ ',
-                          border: OutlineInputBorder(),
-                          helperText: 'Basic $grossBasicPercent% of gross, HRA $basicHraPercent% of basic, '
-                              'rest in $splitAllowanceCode',
+                          border: const OutlineInputBorder(),
+                          helperText: 'Basic ${rule.basicPct}% of gross, HRA ${rule.hraPctOfBasic}% of basic, '
+                              'rest in ${rule.allowanceCode}',
                           helperMaxLines: 2,
                         ),
                       ),
@@ -436,7 +498,7 @@ class _StructureFormScreenState extends ConsumerState<StructureFormScreen> {
                   onPressed: _saving ? null : _save,
                   child: _saving
                       ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Text('Save structure'),
+                      : Text(widget.returnInput ? 'Use this structure' : 'Save structure'),
                 ),
             ],
           ),
