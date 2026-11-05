@@ -179,7 +179,7 @@ async def open_items(
 # ============================================================================================ estimate
 async def estimate(
     session: AsyncSession, f: FnfSettlement, user: User, det: EmployeePayrollDetails | None, extra: list[dict[str, Any]],
-    today: dt.date, *, run: PayrollRun | None = None,
+    today: dt.date, *, run: PayrollRun | None = None, payslip: Payslip | None = None,
 ) -> dict[str, Any]:  # fmt: skip
     """Estimate of the payslip of the settlement month: the structure in force, LOP so far, the pending pay items that would be
     pulled, plus `extra` planned lines. Writes nothing (the rows read are not locked)."""
@@ -191,7 +191,10 @@ async def estimate(
     settlement_only = days is None
     if days is None:
         days = pdays.settlement_only_days(ctx, cfg)
-    ps = SimpleNamespace(id=None, user_id=user.id, supersedes_id=None, inputs=runs._blank_inputs())
+    base = runs._blank_inputs()
+    if payslip is not None:  # the open payslip's manual inputs (TDS, PT override, adjustments) also shape the net (review L4)
+        base.update({k: copy.deepcopy((payslip.inputs or {}).get(k, base[k])) for k in ("tds", "pt_override", "adjustments")})
+    ps = SimpleNamespace(id=None, user_id=user.id, supersedes_id=None, inputs=base)
     await comps.pull_for(session, [ps], period, lock=False)  # type: ignore[list-item]
     inputs = copy.deepcopy(ps.inputs)
     inputs["components"] = [*inputs.get("components", []), *extra]

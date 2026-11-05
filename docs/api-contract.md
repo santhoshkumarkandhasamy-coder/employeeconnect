@@ -1334,8 +1334,8 @@ gratuity xlsx and F&F statement PDF `payroll:report` 10/min; employee `/me/fnf` 
   is allowed only when the employee has NO structure, and `PUT` / `DELETE /admin/payroll/structures/{id}` only on the employee's only structure while it is `manual` and not in use; otherwise 409 `APPROVAL_REQUIRED`
   ("Use an increment"). Unchanged when the setting is false.
 - **13.3 settings**: changing `payroll.structure_changes_need_approval` needs `role.assign` + `current_password` (same rules and errors as `payroll.publish_requires_second_person`); after commit an `admin_alert` push goes to `role.assign` holders.
-- **13.4 payroll details [4b]** gain `"notice_period_days": 30|null` (editable, 0..365, no step-up when it is the only key sent) and read-only `"last_working_day":"2026-12-15"|null` (written by 18.8; sending it -> 422).
-- **13.5 / 13.6 [4b]**: payroll eligibility and the employment window end at `last_working_day` when it is set (else deactivation date - 1, as before). An employee with an `approved` F&F whose
+- **13.4 payroll details [4b]** gain `"notice_period_days": 30|null` (editable, 0..365, no step-up when it is the only key sent) and read-only `"last_working_day":"2026-12-15"|null` (written by 18.8 when the F&F is APPROVED and cleared when it is revoked; sending it -> 422).
+- **13.5 / 13.6 [4b]**: payroll eligibility and the employment window end at the EARLIEST of the month end, `last_working_day` (details, set only by an approved F&F) and deactivation date - 1: a last working day can only shorten the window. An employee with an `approved` F&F whose
   `settlement_period` is the run month is eligible even when not employed in it: a **settlement-only payslip** (`employed_days` 0, `paid_days` 0, structure earnings 0, components only, warning `FNF_SETTLEMENT_ONLY`).
   AdminPayslip gains `"final_settlement": { "fnf_id":"uuid","status":"approved|settled" } | null`; employee `Payslip` and list items gain `"is_final": true|false`. New warning codes `FNF_SETTLEMENT_ONLY`, `EXIT_IN_MONTH` (LWD inside the month).
 - **13.0 reserved codes [4b]** gain `NOTICE_RECOVERY` (deduction, system-only, not a PF / ESI wage): refused in `adjustments`, structure components and the 17.2 endpoints / import (422).
@@ -1542,8 +1542,8 @@ Same per-row checks as 17.4 accept; one transaction; run lock first. Audit `payr
 
 **POST** `{ "resignation_date":"2026-11-15"|null,"last_working_day":"2026-12-15","exit_reason":"resignation|termination|retirement|death|contract_end|absconding|other",
 "notice_period_days":30|null,"settlement_period":"2026-12","remarks":null }` -> 201 FnF (`draft`). `notice_period_days` null = payroll details value, else `payroll.notice_period_days`.
-Sets `employee_payroll_details.last_working_day` (row created when missing). Rules: LWD >= join date and <= today + 180 days; `resignation_date` <= LWD (422 `INVALID_DATE`);
-`settlement_period` from the LWD month to LWD month + 3 and 17.0 target month rule at approve (422 `INVALID_PERIOD`). Errors: 409 `FNF_EXISTS` (a live one), 403 `FORBIDDEN` (own), 422.
+Does NOT touch `employee_payroll_details.last_working_day` (only the approval does, see 18.14). Rules: LWD >= join date, <= today + 180 days and <= the day before the account's deactivation / deletion (422 `INVALID_DATE`; re-checked at submit and approve); `resignation_date` <= LWD (422 `INVALID_DATE`);
+`settlement_period` from the LWD month to LWD month + 3 and 17.0 target month rule at approve (422 `INVALID_PERIOD`). Errors: 409 `FNF_EXISTS` (a live one, or a `settled` one unless the employee was reactivated or rejoined after its LWD), 403 `FORBIDDEN` (own), 422.
 **FnF**:
 ```json
 { "id":"uuid","user":UserSummary,"status":"draft|submitted|approved|settled|cancelled",
@@ -1581,8 +1581,8 @@ Errors: 409 `NOT_DRAFT`, `VERSION_CONFLICT`, `INSUFFICIENT_BALANCE` (encashment 
 **approve** `{ "expected_version":4,"comment":null,"current_password":"..." }` -> 200 FnF (`approved`). In one transaction (lock order plan 16 F15, F&F row last): target month rule for `settlement_period`,
 then creates the `NOTICE_RECOVERY` one-time item (when amount > 0), the other items, the encashments (`source: fnf`), the loan foreclosures (`payroll`: installment in `settlement_period`; `outside`: loan closed),
 moves open items (when `move_open_items`), all with `fnf_id`, events and the `summary` snapshot. Any failure rolls everything back: 409 `PERIOD_LOCKED`, `ITEM_LOCKED`, `INSUFFICIENT_BALANCE`, `LOAN_NOT_ACTIVE`,
-`TOO_MANY_ITEMS`, `FNF_NEGATIVE` (net estimate below 0), `VERSION_CONFLICT`, `NOT_SUBMITTED`; 403 `SECOND_PERSON_REQUIRED`, `FORBIDDEN`, `REAUTH_FAILED`; `details[0].field` names the part (`notice`, `encashments[0]`, `loans[1]`, `items[2]`).
-**reject** `{ "expected_version","comment":"required" }` -> 200 (back to `draft`, `decision_comment` set). **cancel** `{ "reason" }` -> 200 (draft / submitted; clears `last_working_day`).
+`TOO_MANY_ITEMS`, `FNF_NEGATIVE` (net estimate below 0), `FNF_STALE_QUOTE` (notice, encashment or loan amounts differ from the ones frozen at submit), `FNF_EXISTS` (another approved / settled F&F for the employee and month), `VERSION_CONFLICT`, `NOT_SUBMITTED`; 403 `SECOND_PERSON_REQUIRED`, `FORBIDDEN`, `REAUTH_FAILED`; `details[0].field` names the part (`notice`, `encashments[0]`, `loans[1]`, `items[2]`).
+**reject** `{ "expected_version","comment":"required" }` -> 200 (back to `draft`, `decision_comment` set). **cancel** `{ "reason" }` -> 200 (draft / submitted; changes nothing in the payroll details).
 **revoke** `{ "expected_version","reason","current_password" }` -> 200 (`draft`): only while no `fnf_id` row is `processing` / `paid` (409 `FNF_NOT_REVOCABLE`); cancels created items and encashments (days back),
 cancels `payroll` foreclosure installments and regenerates the loan schedule with its EMI from `settlement_period`; `outside` foreclosures stay closed (`details` lists them). Moved items stay moved.
 **Settlement**: the publish (13.5 / 13.6) of the employee's payslip in `settlement_period` sets `settled` and `final_payslip_id` in the same transaction (audit `payroll.fnf.settle`, push `fnf_settled`);
@@ -1626,7 +1626,7 @@ Best effort, after commit.
 | `payroll.notice_recovery_divisor` [4b] | 30 | 1..31 |
 
 ### 18.12 Error codes (new)
-409: `APPROVAL_REQUIRED`, `INCREMENT_EXISTS`, `INCREMENT_STALE`, `LATER_STRUCTURE_EXISTS`, `NOT_SUBMITTED`, `NOT_DRAFT`, `FNF_EXISTS`, `FNF_OPEN`, `FNF_NOT_REVOCABLE`, `FNF_NEGATIVE`, `FNF_MANAGED`.
+409: `APPROVAL_REQUIRED`, `INCREMENT_EXISTS`, `INCREMENT_STALE`, `LATER_STRUCTURE_EXISTS`, `NOT_SUBMITTED`, `NOT_DRAFT`, `FNF_EXISTS`, `FNF_OPEN`, `FNF_NOT_REVOCABLE`, `FNF_NEGATIVE`, `FNF_MANAGED`, `FNF_STALE_QUOTE` (review fix, 18.14).
 422: `INVALID_PERCENT`, `AFTER_EXIT`, `NO_CHANGE`, `LOAN_UNRESOLVED`, `TOO_MANY_ROWS`.
 Reused: `SECOND_PERSON_REQUIRED`, `STRUCTURE_EXISTS`, `STRUCTURE_IN_USE`, `STRUCTURE_MISSING` (422), `VERSION_CONFLICT`, `PERIOD_LOCKED`, `ITEM_LOCKED`, `TOO_MANY_ITEMS`, `INSUFFICIENT_BALANCE`, `NOT_ENCASHABLE`,
 `LOAN_NOT_ACTIVE`, `ARREARS_STALE`, `NOT_PROPOSED`, `IMPORT_*` (17.2), `FILE_TYPE_NOT_ALLOWED`, `FILE_TOO_LARGE`, `INVALID_PERIOD`, `INVALID_DATE`, `REAUTH_FAILED`, `FORBIDDEN`, `RATE_LIMITED`, `TEMPORARILY_UNAVAILABLE`.
@@ -1660,7 +1660,7 @@ Where the backend refines 18.0, 18.1 [4b] and 18.8 to 18.12 (Flutter should foll
   `reject` and `revoke` keep `decided_by`: that person can no longer edit or submit the record (403 `SECOND_PERSON_REQUIRED` on PUT; the next `submit` clears the old decision). The revoker must not be the employee; the revoker and the reason go to the money history only.
   Order for approve: step-up (422 when `current_password` is missing, 403 `REAUTH_FAILED`), employee / second person, `NOT_SUBMITTED`, `VERSION_CONFLICT`, then the target month (`PERIOD_LOCKED`) and the content checks.
 - **PUT**: at least one field besides `expected_version` (else 422); `last_working_day`, `exit_reason`, `settlement_period`, `notice`, `encashments`, `loans`, `items`, `move_open_items` cannot be `null`; `resignation_date`, `remarks` and `notice_period_days` can
-  (`notice_period_days: null` = the payroll details value, else the company setting). Changing the LWD also moves `employee_payroll_details.last_working_day`. `override.days` above `notice_period_days` is 422. Encashment lines are validated with the quote
+  (`notice_period_days: null` = the payroll details value, else the company setting). Changing the LWD changes the F&F only (the details follow at approval). `override.days` above `notice_period_days` is 422. Encashment lines are validated with the quote
   (year = LWD year or the year before; 409 `INSUFFICIENT_BALANCE` / 422 `NOT_ENCASHABLE` carry `details[0].field = "encashments[i]"`), loan lines must be active loans of the employee (`paid_on` not in the future).
 - **FnF shape**: `notice.served_days` is `null` without a resignation date (shortfall 0 then); `notice` also has `status` (of the created recovery item, else `null`); `encashments[].available_days` is `null` when the quote failed (the response then carries the
   `ENCASHMENT_INVALID` warning). `loans` lists every ACTIVE loan of the employee (`mode: null` until chosen) plus the ones in the plan; after approval `outstanding` is the amount fixed at approval and an `outside` loan shows `status: "closed"`.
@@ -1686,3 +1686,15 @@ Where the backend refines 18.0, 18.1 [4b] and 18.8 to 18.12 (Flutter should foll
 - **Push**: `payroll_approval` (`kind: "fnf"`): to approvers on submit (`<maker name> submitted a final settlement for <employee name>`) and to the maker on approve ("Final settlement approved") / reject ("Final settlement rejected", body = employee name). `fnf_settled` after the publish commit.
 - **Statements**: `GET /admin/payroll/fnf/{id}/statement` works in every status (watermark `DRAFT - NOT FINAL` unless `settled`); `GET /me/fnf/statement` only for the caller's settled F&F (anything else 404, audited `payroll.denied`; success audited `payroll.fnf.view_own`).
 - **Rate limits** as 18.0; reads, preview and list `payroll:admin_read`; the statement `payroll:report` (fail closed).
+- **Security review fixes (4b, migration 0025 edited in place; request / response shapes unchanged)**:
+  - **Details last working day (H1)**: `employee_payroll_details.last_working_day` is written ONLY by `approve` (second person + step-up) and cleared by `revoke`; a draft, submitted, rejected or cancelled F&F keeps the LWD on the F&F row alone, so
+    payroll eligibility, the ESI file, dashboard `leavers`, increment `AFTER_EXIT` and gratuity ignore it until it is approved. The employment window is `min(month end, LWD, deactivation / deletion date - 1)`: an LWD can never extend pay past the deactivation.
+    Create / PUT / submit / approve refuse an LWD later than the deactivation (or deletion) date - 1 (422 `INVALID_DATE`, `details[0].field` `last_working_day`). An LWD before a month that is already processed / published is NOT refused (HR files late exits):
+    `PAID_AFTER_EXIT` warns on the draft, and the approval audit row and money-history event carry `paid_after_exit: true`.
+  - **One settlement per exit (M1)**: create is 409 `FNF_EXISTS` while a `settled` F&F exists, unless the employee was reactivated (details LWD cleared) or `join_date` is after that LWD. Database: unique `(user_id, settlement_period)` for `approved` / `settled`
+    (409 `FNF_EXISTS`). Cancelling a draft / submitted F&F never changes the details, so a second F&F cannot clear the first exit's LWD.
+  - **Quote freeze (M2)**: `submit` stores the notice (basis, divisor, daily rate, amount), the encashment rate / amount per line and the outstanding amount per planned loan in the submitted (frozen, encrypted) row; `approve` recomputes them and answers
+    409 `FNF_STALE_QUOTE` when anything differs (nothing is written; the checker rejects, or the maker withdraws and submits again). Withdraw and reject discard the snapshot; the approval summary replaces it. Not exposed in `FnF`.
+  - **Maker guard (L1)**: `submit` and `withdraw` are 403 `SECOND_PERSON_REQUIRED` for the person who last decided the record. **Approve (L5)**: 409 `PERIOD_LOCKED` when the settlement month's run is `processed` (reopen it first); the net check (L4) uses the run's
+    settings snapshot and the manual TDS / PT / adjustments of the open payslip; the item cap (L6) counts moved arrears and claims. **Revoke (L2, L3)**: every cancelled row must carry this F&F's id and the employee (else 409 `CONFLICT`, database triggers repeat it);
+    the regenerated loan schedule starts at the first month that accepts a new row (published months without an open revision for the employee are skipped).

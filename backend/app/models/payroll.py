@@ -377,6 +377,10 @@ class FnfSettlement(TimestampMixin, Base):
             "uq_fnf_settlements_live", "user_id", unique=True,
             postgresql_where=text("status IN ('draft','submitted','approved')"),
         ),  # fmt: skip
+        Index(
+            "uq_fnf_settlements_period", "user_id", "settlement_period", unique=True,
+            postgresql_where=text("status IN ('approved','settled')"),
+        ),  # fmt: skip
         Index("ix_fnf_settlements_status_created", "status", "created_at"),
         Index("ix_fnf_settlements_user_created", "user_id", "created_at"),
         Index("ix_fnf_settlements_period_status", "settlement_period", "status"),

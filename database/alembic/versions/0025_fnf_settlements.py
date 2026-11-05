@@ -13,11 +13,13 @@ Added
                              differs from the employee, the creator, the last editor and the submitter and is not in `contributors`
                              (a never shrinking list of everybody who created, edited, submitted or withdrew the record). The rule holds
                              for every status, so a rejected or revoked draft keeps its checker bound. A live (draft / submitted /
-                             approved) F&F per employee is unique.
+                             approved) F&F per employee is unique, and so is an approved / settled one per employee and settlement month
+                             (uq_fnf_settlements_period).
 * fnf_settlements_lock       trigger (INSERT / UPDATE / DELETE): an insert must be a draft; user_id, created_by and created_at never
                              change; contributors never shrink; only the lifecycle transitions of the contract exist
                              (draft>submitted|cancelled, submitted>draft|approved|cancelled, approved>draft|settled);
-                             draft>submitted changes nothing but the submit / decision columns; submitted>submitted and approved>approved change
+                             draft>submitted changes nothing but the submit / decision columns and `summary_enc` (the quote snapshot the
+                             checker reviews, review M2); submitted>submitted and approved>approved change
                              nothing (the bait-and-switch window between submit and approve is closed in the database);
                              submitted>approved changes only the decision columns and `summary_enc`; approved>settled only
                              `final_payslip_id`; a settled row may move only `final_payslip_id` (revision carry; it stays set); a cancelled
@@ -30,7 +32,9 @@ Added
 * leave_encashments          `fnf_id` (RESTRICT, indexed); a tagged row must have source `fnf` (the reverse is NOT enforced: the 17.5
                              API could already create untagged rows with source `fnf` before this migration).
 * payroll_loan_installments  `fnf_id` (RESTRICT, indexed); a tagged row must be a `foreclosure`.
-* fnf_id is write-once on the three source tables (trigger *_fnf_id_immutable): once set it can neither change nor be cleared.
+* fnf_id is INSERT-only on the three source tables (trigger *_fnf_id_immutable): an UPDATE can neither set (NULL -> value), change
+  nor clear it. A second trigger (*_fnf_user_match) requires a tagged row's user_id to equal fnf_settlements.user_id (INSERT, and UPDATE of
+  fnf_id / user_id).
 * payroll_item_events        nothing to do: 0024 already allows item_type `fnf` and the actions submit / withdraw / settle / revoke / remove.
 * settings payroll.notice_period_days, payroll.notice_recovery_basis, payroll.notice_recovery_divisor (also defaults in code).
 * REVOKE DELETE, TRUNCATE FROM app_user on fnf_settlements (cancelling is a status, never a delete).
@@ -102,6 +106,7 @@ CREATE TABLE fnf_settlements (
   CONSTRAINT ck_fnf_settlements_version CHECK (version >= 1)
 );
 CREATE UNIQUE INDEX uq_fnf_settlements_live ON fnf_settlements (user_id) WHERE status IN ('draft','submitted','approved');
+CREATE UNIQUE INDEX uq_fnf_settlements_period ON fnf_settlements (user_id, settlement_period) WHERE status IN ('approved','settled');
 CREATE INDEX ix_fnf_settlements_status_created ON fnf_settlements (status, created_at);
 CREATE INDEX ix_fnf_settlements_user_created ON fnf_settlements (user_id, created_at);
 CREATE INDEX ix_fnf_settlements_period_status ON fnf_settlements (settlement_period, status);
@@ -158,7 +163,7 @@ BEGIN
   ELSIF OLD.status = 'approved' AND NEW.status = 'settled' THEN
     allowed := allowed || ARRAY['status','final_payslip_id'];
   ELSIF OLD.status = 'draft' AND NEW.status = 'submitted' THEN
-    allowed := allowed || ARRAY['status','submitted_by','submitted_at','contributors','decided_by','decided_at','decision_comment_enc'];
+    allowed := allowed || ARRAY['status','submitted_by','submitted_at','contributors','decided_by','decided_at','decision_comment_enc','summary_enc'];
   ELSE
     RETURN NEW;  -- draft edits, cancel, reject / withdraw, revoke: free
   END IF;
@@ -180,8 +185,17 @@ ALTER TABLE employee_payroll_details ADD CONSTRAINT ck_employee_payroll_details_
 
 CREATE FUNCTION payroll_fnf_id_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  IF OLD.fnf_id IS NOT NULL AND NEW.fnf_id IS DISTINCT FROM OLD.fnf_id THEN
-    RAISE EXCEPTION 'payroll item %% belongs to a final settlement; fnf_id cannot change', OLD.id USING ERRCODE = '23000';
+  IF NEW.fnf_id IS DISTINCT FROM OLD.fnf_id THEN
+    RAISE EXCEPTION 'payroll item %% : fnf_id is set on INSERT only and never changes', OLD.id USING ERRCODE = '23000';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION payroll_fnf_user_match() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.fnf_id IS NOT NULL AND NEW.user_id IS DISTINCT FROM (SELECT f.user_id FROM fnf_settlements f WHERE f.id = NEW.fnf_id) THEN
+    RAISE EXCEPTION 'payroll item %% : a row tagged by a final settlement must belong to the settlement employee', NEW.id USING ERRCODE = '23000';
   END IF;
   RETURN NEW;
 END
@@ -194,16 +208,19 @@ ALTER TABLE payroll_one_time_items ADD CONSTRAINT ck_payroll_one_time_items_noti
 ALTER TABLE payroll_one_time_items ADD CONSTRAINT ck_payroll_one_time_items_fnf_batch CHECK (fnf_id IS NULL OR batch_id IS NULL);
 CREATE INDEX ix_payroll_one_time_items_fnf_id ON payroll_one_time_items (fnf_id);
 CREATE TRIGGER trg_payroll_one_time_items_fnf_id_immutable BEFORE UPDATE OF fnf_id ON payroll_one_time_items FOR EACH ROW EXECUTE FUNCTION payroll_fnf_id_immutable();
+CREATE TRIGGER trg_payroll_one_time_items_fnf_user_match BEFORE INSERT OR UPDATE OF fnf_id, user_id ON payroll_one_time_items FOR EACH ROW EXECUTE FUNCTION payroll_fnf_user_match();
 
 ALTER TABLE leave_encashments ADD COLUMN fnf_id uuid REFERENCES fnf_settlements(id) ON DELETE RESTRICT;
 ALTER TABLE leave_encashments ADD CONSTRAINT ck_leave_encashments_fnf_source CHECK (fnf_id IS NULL OR source = 'fnf');
 CREATE INDEX ix_leave_encashments_fnf_id ON leave_encashments (fnf_id);
 CREATE TRIGGER trg_leave_encashments_fnf_id_immutable BEFORE UPDATE OF fnf_id ON leave_encashments FOR EACH ROW EXECUTE FUNCTION payroll_fnf_id_immutable();
+CREATE TRIGGER trg_leave_encashments_fnf_user_match BEFORE INSERT OR UPDATE OF fnf_id, user_id ON leave_encashments FOR EACH ROW EXECUTE FUNCTION payroll_fnf_user_match();
 
 ALTER TABLE payroll_loan_installments ADD COLUMN fnf_id uuid REFERENCES fnf_settlements(id) ON DELETE RESTRICT;
 ALTER TABLE payroll_loan_installments ADD CONSTRAINT ck_payroll_loan_installments_fnf_kind CHECK (fnf_id IS NULL OR kind = 'foreclosure');
 CREATE INDEX ix_payroll_loan_installments_fnf_id ON payroll_loan_installments (fnf_id);
 CREATE TRIGGER trg_payroll_loan_installments_fnf_id_immutable BEFORE UPDATE OF fnf_id ON payroll_loan_installments FOR EACH ROW EXECUTE FUNCTION payroll_fnf_id_immutable();
+CREATE TRIGGER trg_payroll_loan_installments_fnf_user_match BEFORE INSERT OR UPDATE OF fnf_id, user_id ON payroll_loan_installments FOR EACH ROW EXECUTE FUNCTION payroll_fnf_user_match();
 
 INSERT INTO settings (key, value) VALUES ('payroll.notice_period_days', '30'::jsonb) ON CONFLICT (key) DO NOTHING;
 INSERT INTO settings (key, value) VALUES ('payroll.notice_recovery_basis', '"gross"'::jsonb) ON CONFLICT (key) DO NOTHING;
@@ -232,16 +249,19 @@ $$;
 
 DELETE FROM settings WHERE key IN ('payroll.notice_period_days', 'payroll.notice_recovery_basis', 'payroll.notice_recovery_divisor');
 
+DROP TRIGGER IF EXISTS trg_payroll_loan_installments_fnf_user_match ON payroll_loan_installments;
 DROP TRIGGER IF EXISTS trg_payroll_loan_installments_fnf_id_immutable ON payroll_loan_installments;
 DROP INDEX IF EXISTS ix_payroll_loan_installments_fnf_id;
 ALTER TABLE payroll_loan_installments DROP CONSTRAINT IF EXISTS ck_payroll_loan_installments_fnf_kind;
 ALTER TABLE payroll_loan_installments DROP COLUMN IF EXISTS fnf_id;
 
+DROP TRIGGER IF EXISTS trg_leave_encashments_fnf_user_match ON leave_encashments;
 DROP TRIGGER IF EXISTS trg_leave_encashments_fnf_id_immutable ON leave_encashments;
 DROP INDEX IF EXISTS ix_leave_encashments_fnf_id;
 ALTER TABLE leave_encashments DROP CONSTRAINT IF EXISTS ck_leave_encashments_fnf_source;
 ALTER TABLE leave_encashments DROP COLUMN IF EXISTS fnf_id;
 
+DROP TRIGGER IF EXISTS trg_payroll_one_time_items_fnf_user_match ON payroll_one_time_items;
 DROP TRIGGER IF EXISTS trg_payroll_one_time_items_fnf_id_immutable ON payroll_one_time_items;
 DROP INDEX IF EXISTS ix_payroll_one_time_items_fnf_id;
 ALTER TABLE payroll_one_time_items DROP CONSTRAINT IF EXISTS ck_payroll_one_time_items_fnf_batch;
@@ -250,6 +270,7 @@ DELETE FROM payroll_one_time_items WHERE code = 'NOTICE_RECOVERY';
 ALTER TABLE payroll_one_time_items DROP CONSTRAINT ck_payroll_one_time_items_code;
 ALTER TABLE payroll_one_time_items ADD CONSTRAINT ck_payroll_one_time_items_code CHECK (code IN ('BONUS','INCENTIVE','OTHER_EARNING','OTHER_DEDUCTION'));
 ALTER TABLE payroll_one_time_items DROP COLUMN IF EXISTS fnf_id;
+DROP FUNCTION IF EXISTS payroll_fnf_user_match();
 DROP FUNCTION IF EXISTS payroll_fnf_id_immutable();
 
 ALTER TABLE employee_payroll_details DROP CONSTRAINT IF EXISTS ck_employee_payroll_details_notice_days;

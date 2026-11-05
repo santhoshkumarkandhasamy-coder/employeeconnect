@@ -1162,6 +1162,8 @@ String payrollErrorMessage(ApiException e) {
     case 'FNF_NEGATIVE':
       return 'The employee would owe the company money. Record a loan as paid outside payroll or reduce the items, '
           'then submit again.';
+    case 'FNF_STALE_QUOTE':
+      return 'The amounts changed since this settlement was submitted. Reject it, or withdraw and submit it again.';
     case 'FNF_NOT_INCLUDED':
       return 'This payslip does not carry every line of the final settlement. Reopen the payroll run, '
           'refresh it and process it again, then publish.';

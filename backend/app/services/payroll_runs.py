@@ -526,7 +526,7 @@ async def settled_fnf(session: AsyncSession, user_id: uuid.UUID, period: dt.date
     st = ("approved", "settled") if live else ("settled",)
     q = select(FnfSettlement).where(
         FnfSettlement.user_id == user_id, FnfSettlement.settlement_period == period, FnfSettlement.status.in_(st)
-    )  # fmt: skip
+    ).order_by(FnfSettlement.created_at.desc(), FnfSettlement.id)  # fmt: skip
     return (await session.execute(q)).scalars().first()
 
 

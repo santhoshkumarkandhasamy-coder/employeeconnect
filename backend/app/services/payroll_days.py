@@ -92,20 +92,25 @@ async def load_context(session: AsyncSession, period: dt.date, user_ids: list[uu
     return ctx
 
 
+def gone_last_day(gone: dt.datetime, tz: ZoneInfo) -> dt.date:
+    """The last day of employment implied by a deactivation / deletion instant: the day before it, in the office timezone."""
+    return as_utc(gone).astimezone(tz).date() - dt.timedelta(days=1)
+
+
 def employment_window(
     user: User, period_start: dt.date, period_end: dt.date, tz: ZoneInfo, last_working_day: dt.date | None = None
 ) -> tuple[dt.date, dt.date] | None:
-    """[max(period start, join date), min(period end, last end)] or None when the user was not employed. The last day is the
-    last working day when one is set (plan 16 F12: an F&F decides what is paid, not the deactivation), else the day before the
+    """[max(period start, join date), min(period end, last end)] or None when the user was not employed. A last working day can
+    only SHORTEN the window (review H1: it never extends pay past the day before the deactivation / deletion, and never pays a
+    month the employee has not reached): the end is the earliest of the period end, the last working day and the day before the
     deactivation."""
     start = max(period_start, user.join_date) if user.join_date else period_start
     end = period_end
     if last_working_day is not None:
         end = min(end, last_working_day)
-    else:
-        gone = user.deactivated_at or user.deleted_at
-        if gone is not None:
-            end = min(end, as_utc(gone).astimezone(tz).date() - dt.timedelta(days=1))
+    gone = user.deactivated_at or user.deleted_at
+    if gone is not None:
+        end = min(end, gone_last_day(gone, tz))
     return (start, end) if start <= end else None
 
 

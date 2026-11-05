@@ -234,8 +234,10 @@ async def live_counts(session: AsyncSession, user_ids: list[uuid.UUID], period: 
     return out
 
 
-def check_caps(counts: dict[str, int], adding: int = 1) -> None:
-    if counts["one_time"] + adding > MAX_ONE_TIME_PER_MONTH or counts["total"] + adding > MAX_LINES_PER_MONTH:
+def check_caps(counts: dict[str, int], adding: int = 1, *, adding_total: int | None = None) -> None:
+    """`adding_total` = rows added to the month in total when that differs from the one-time rows added (rows of other kinds)."""
+    total_add = adding if adding_total is None else adding_total
+    if counts["one_time"] + adding > MAX_ONE_TIME_PER_MONTH or counts["total"] + total_add > MAX_LINES_PER_MONTH:
         raise AppError("TOO_MANY_ITEMS", "That employee already has the maximum number of items for the month")
 
 

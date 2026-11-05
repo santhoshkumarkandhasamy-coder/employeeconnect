@@ -30,7 +30,7 @@ from app.models import (
 )
 from app.services import notifications
 from tests.conftest import PASSWORD, bearer
-from tests.payroll_fixtures import PERIOD, new_run, process_and_publish, publish_run, row_for
+from tests.payroll_fixtures import PERIOD, new_run, process_and_publish, row_for
 
 FNF = "/api/admin/payroll/fnf"
 EMP = "/api/admin/payroll/employees"
@@ -107,6 +107,20 @@ async def submitted(client, payroll, uid, expect_put=None, **put_kw):
     return await act(client, payroll["hr"], f, "submit")
 
 
+async def details_lwd(db, user_id):
+    db.expire_all()
+    det = (
+        await db.execute(select(EmployeePayrollDetails).where(EmployeePayrollDetails.user_id == uuid.UUID(user_id)))
+    ).scalar_one_or_none()
+    return det.last_working_day if det is not None else None
+
+
+async def approved(client, payroll, uid, **put_kw):
+    """Draft (+ edits) -> submitted by HR -> approved by the admin."""
+    f = await submitted(client, payroll, uid, **put_kw)
+    return await act(client, payroll["admin"], f, "approve")
+
+
 async def items_of(db, user_id):
     return list((await db.execute(select(PayrollOneTimeItem).where(PayrollOneTimeItem.user_id == uuid.UUID(user_id)))).scalars())
 
@@ -179,12 +193,9 @@ async def test_create_sets_lwd_and_notice(client, payroll, uid, db):
     n = f["notice"]
     assert (n["required_days"], n["served_days"], n["shortfall_days"], n["computed_shortfall_days"]) == (30, 27, 3, 3)
     assert (n["basis"], n["divisor"], n["daily_rate"], n["amount"]) == ("gross", 30, "833.33", "2499.99")
-    det = (
-        await db.execute(select(EmployeePayrollDetails).where(EmployeePayrollDetails.user_id == uuid.UUID(uid["employee"])))
-    ).scalar_one()
-    assert det.last_working_day == dt.date(2025, 6, 20)
+    assert await details_lwd(db, uid["employee"]) is None  # review H1: a draft never writes the details last working day
     d = await client.get(f"{EMP}/{uid['employee']}/details", headers=payroll["hr"])
-    assert d.json()["last_working_day"] == "2025-06-20" and d.json()["notice_period_days"] is None
+    assert d.json()["last_working_day"] is None and d.json()["notice_period_days"] is None
     rows = (await db.execute(select(AuditLog).where(AuditLog.action == "payroll.fnf.create"))).scalars().all()
     assert (
         len(rows) == 1
@@ -254,9 +265,9 @@ async def test_edit_replaces_lists_and_checks_version(client, payroll, uid, type
     r = await client.put(
         f"{FNF}/{f4['id']}", json={"expected_version": f4["version"], "last_working_day": "2025-06-25"}, headers=payroll["admin"]
     )
-    assert r.status_code == 200  # payroll.manage holder; the LWD and details follow
+    assert r.status_code == 200 and r.json()["last_working_day"] == "2025-06-25"  # payroll.manage holder
     ev = (await client.get(f"{EMP}/{uid['employee']}/details", headers=h)).json()
-    assert ev["last_working_day"] == "2025-06-25"
+    assert ev["last_working_day"] is None  # the details follow only the approval (review H1)
 
 
 async def test_encashment_line_validation(client, payroll, uid, types):
@@ -295,10 +306,7 @@ async def test_submit_withdraw_cancel(client, payroll, uid, db):
     assert err(r) == "NOT_SUBMITTED"
     c = await act(client, h, w, "cancel")
     assert c["status"] == "cancelled"
-    det = (
-        await db.execute(select(EmployeePayrollDetails).where(EmployeePayrollDetails.user_id == uuid.UUID(uid["employee"])))
-    ).scalar_one()
-    assert det.last_working_day is None  # cancel clears it
+    assert await details_lwd(db, uid["employee"]) is None  # cancel has nothing to clear
     await mk(client, h, uid["employee"])  # a new one may follow
 
 
@@ -706,10 +714,18 @@ async def test_publish_refuses_a_payslip_without_the_fnf_lines(client, payroll, 
     r = await client.post(f"{RUNS}/{run['id']}/process", headers=h)
     assert r.status_code == 200
     f = await submitted(client, payroll, uid)
+    r = await client.post(
+        f"{FNF}/{f['id']}/approve", json={"expected_version": f["version"], "current_password": PASSWORD}, headers=a
+    )
+    assert (
+        r.status_code == 409 and err(r) == "PERIOD_LOCKED"
+    )  # review L5: refused at approve, publish is never blocked for others
+    assert (await get(client, h, f["id"]))["status"] == "submitted"
+    reopen = await client.post(f"{RUNS}/{run['id']}/reopen", json={"reason": "Final settlement"}, headers=h)
+    assert reopen.status_code == 200, reopen.text
     await act(client, a, f, "approve")
-    r = await publish_run(client, a, run["id"])
-    assert r.status_code == 409 and err(r) == "FNF_NOT_INCLUDED"
-    assert (await get(client, h, f["id"]))["status"] == "approved"
+    r = await process_and_publish(client, h, run["id"])
+    assert (await get(client, h, f["id"]))["status"] == "settled"
 
 
 # ================================================================================================ FNF_MANAGED
@@ -809,12 +825,11 @@ async def test_dashboard_alerts_and_leavers(client, payroll, uid):
     f = await submitted(client, payroll, uid)
     d = (await client.get("/api/admin/payroll/dashboard", params={"period": PERIOD}, headers=h)).json()
     assert "FNF_PENDING_APPROVAL" in d["calendar"]["alerts"]
-    assert {"employee_id": "EMP001", "name": "Test Employee", "date": "2025-06-20"} in [
-        {**x, "name": "Test Employee"} for x in d["leavers"]
-    ] or any(x["employee_id"] == "EMP001" and x["date"] == "2025-06-20" for x in d["leavers"])
+    assert not any(x["employee_id"] == "EMP001" for x in d["leavers"])  # review H1: only an approved F&F counts
     await act(client, a, f, "approve")
     d = (await client.get("/api/admin/payroll/dashboard", params={"period": PERIOD}, headers=h)).json()
     assert "FNF_PENDING_APPROVAL" not in d["calendar"]["alerts"]
+    assert any(x["employee_id"] == "EMP001" and x["date"] == "2025-06-20" for x in d["leavers"])
 
 
 async def test_exit_without_fnf_alert(client, payroll, uid):
@@ -948,4 +963,9 @@ async def test_increment_after_the_last_working_day_is_refused(client, payroll, 
     h = payroll["hr"]
     await mk(client, h, uid["employee"])
     r = await client.post(f"{EMP}/{uid['employee']}/increments", json=pct_body(user_eff=first(2)), headers=h)
+    assert r.status_code != 422 or err(r) != "AFTER_EXIT"  # a draft has no effect (review H1)
+    f = (await client.get(FNF, params={"status": "draft"}, headers=h)).json()["items"][0]
+    f = await get(client, h, f["id"])
+    await act(client, payroll["admin"], await act(client, h, f, "submit"), "approve")
+    r = await client.post(f"{EMP}/{uid['employee']}/increments", json=pct_body(user_eff=first(3)), headers=h)
     assert r.status_code == 422 and err(r) == "AFTER_EXIT"

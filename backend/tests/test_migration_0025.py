@@ -132,7 +132,7 @@ def test_tagged_columns_and_reserved_code():
         assert f"trg_{t}_fnf_id_immutable BEFORE UPDATE OF fnf_id ON {t}" in up, t
         assert f"DROP TRIGGER IF EXISTS trg_{t}_fnf_id_immutable ON {t}" in mod.DOWNGRADE, t
     body = up.split("CREATE FUNCTION payroll_fnf_id_immutable")[1].split("$$;")[0]
-    assert "OLD.fnf_id IS NOT NULL AND NEW.fnf_id IS DISTINCT FROM OLD.fnf_id" in body
+    assert "IF NEW.fnf_id IS DISTINCT FROM OLD.fnf_id THEN" in body  # INSERT-only: NULL -> value on UPDATE is refused too (review L2)
     assert "CHECK (code IN ('BONUS','INCENTIVE','OTHER_EARNING','OTHER_DEDUCTION','NOTICE_RECOVERY'))" in up
     assert "CHECK (code <> 'NOTICE_RECOVERY' OR fnf_id IS NOT NULL)" in up  # system-only
     assert "CHECK (fnf_id IS NULL OR batch_id IS NULL)" in up

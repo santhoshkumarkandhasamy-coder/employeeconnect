@@ -2354,6 +2354,8 @@ CREATE TABLE fnf_settlements (
 
 CREATE UNIQUE INDEX uq_fnf_settlements_live ON fnf_settlements (user_id) WHERE status IN ('draft','submitted','approved');
 
+CREATE UNIQUE INDEX uq_fnf_settlements_period ON fnf_settlements (user_id, settlement_period) WHERE status IN ('approved','settled');
+
 CREATE INDEX ix_fnf_settlements_status_created ON fnf_settlements (status, created_at);
 
 CREATE INDEX ix_fnf_settlements_user_created ON fnf_settlements (user_id, created_at);
@@ -2418,7 +2420,7 @@ BEGIN
   ELSIF OLD.status = 'approved' AND NEW.status = 'settled' THEN
     allowed := allowed || ARRAY['status','final_payslip_id'];
   ELSIF OLD.status = 'draft' AND NEW.status = 'submitted' THEN
-    allowed := allowed || ARRAY['status','submitted_by','submitted_at','contributors','decided_by','decided_at','decision_comment_enc'];
+    allowed := allowed || ARRAY['status','submitted_by','submitted_at','contributors','decided_by','decided_at','decision_comment_enc','summary_enc'];
   ELSE
     RETURN NEW;  -- draft edits, cancel, reject / withdraw, revoke: free
   END IF;
@@ -2445,8 +2447,17 @@ ALTER TABLE employee_payroll_details ADD CONSTRAINT ck_employee_payroll_details_
 
 CREATE FUNCTION payroll_fnf_id_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  IF OLD.fnf_id IS NOT NULL AND NEW.fnf_id IS DISTINCT FROM OLD.fnf_id THEN
-    RAISE EXCEPTION 'payroll item % belongs to a final settlement; fnf_id cannot change', OLD.id USING ERRCODE = '23000';
+  IF NEW.fnf_id IS DISTINCT FROM OLD.fnf_id THEN
+    RAISE EXCEPTION 'payroll item % : fnf_id is set on INSERT only and never changes', OLD.id USING ERRCODE = '23000';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION payroll_fnf_user_match() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.fnf_id IS NOT NULL AND NEW.user_id IS DISTINCT FROM (SELECT f.user_id FROM fnf_settlements f WHERE f.id = NEW.fnf_id) THEN
+    RAISE EXCEPTION 'payroll item % : a row tagged by a final settlement must belong to the settlement employee', NEW.id USING ERRCODE = '23000';
   END IF;
   RETURN NEW;
 END
@@ -2466,6 +2477,8 @@ CREATE INDEX ix_payroll_one_time_items_fnf_id ON payroll_one_time_items (fnf_id)
 
 CREATE TRIGGER trg_payroll_one_time_items_fnf_id_immutable BEFORE UPDATE OF fnf_id ON payroll_one_time_items FOR EACH ROW EXECUTE FUNCTION payroll_fnf_id_immutable();
 
+CREATE TRIGGER trg_payroll_one_time_items_fnf_user_match BEFORE INSERT OR UPDATE OF fnf_id, user_id ON payroll_one_time_items FOR EACH ROW EXECUTE FUNCTION payroll_fnf_user_match();
+
 ALTER TABLE leave_encashments ADD COLUMN fnf_id uuid REFERENCES fnf_settlements(id) ON DELETE RESTRICT;
 
 ALTER TABLE leave_encashments ADD CONSTRAINT ck_leave_encashments_fnf_source CHECK (fnf_id IS NULL OR source = 'fnf');
@@ -2474,6 +2487,8 @@ CREATE INDEX ix_leave_encashments_fnf_id ON leave_encashments (fnf_id);
 
 CREATE TRIGGER trg_leave_encashments_fnf_id_immutable BEFORE UPDATE OF fnf_id ON leave_encashments FOR EACH ROW EXECUTE FUNCTION payroll_fnf_id_immutable();
 
+CREATE TRIGGER trg_leave_encashments_fnf_user_match BEFORE INSERT OR UPDATE OF fnf_id, user_id ON leave_encashments FOR EACH ROW EXECUTE FUNCTION payroll_fnf_user_match();
+
 ALTER TABLE payroll_loan_installments ADD COLUMN fnf_id uuid REFERENCES fnf_settlements(id) ON DELETE RESTRICT;
 
 ALTER TABLE payroll_loan_installments ADD CONSTRAINT ck_payroll_loan_installments_fnf_kind CHECK (fnf_id IS NULL OR kind = 'foreclosure');
@@ -2481,6 +2496,8 @@ ALTER TABLE payroll_loan_installments ADD CONSTRAINT ck_payroll_loan_installment
 CREATE INDEX ix_payroll_loan_installments_fnf_id ON payroll_loan_installments (fnf_id);
 
 CREATE TRIGGER trg_payroll_loan_installments_fnf_id_immutable BEFORE UPDATE OF fnf_id ON payroll_loan_installments FOR EACH ROW EXECUTE FUNCTION payroll_fnf_id_immutable();
+
+CREATE TRIGGER trg_payroll_loan_installments_fnf_user_match BEFORE INSERT OR UPDATE OF fnf_id, user_id ON payroll_loan_installments FOR EACH ROW EXECUTE FUNCTION payroll_fnf_user_match();
 
 INSERT INTO settings (key, value) VALUES ('payroll.notice_period_days', '30'::jsonb) ON CONFLICT (key) DO NOTHING;
 
