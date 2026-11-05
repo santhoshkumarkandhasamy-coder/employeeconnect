@@ -13,6 +13,7 @@ Lock order (P7): run row (target month) -> overtime rows (ORDER BY id), the last
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import logging
 import uuid
 from typing import Any
@@ -76,6 +77,20 @@ async def require_enabled(session: AsyncSession) -> dict[str, Any]:
 
 
 # ============================================================================================ compute
+def _stale(session: AsyncSession, actor: Principal, row: OT, mins: int, why: str) -> int:
+    """M2 / M3: an `approved` / `rejected` row whose attendance changed (or vanished) gets the fresh computed minutes, its
+    approved minutes are clamped to them, and it is flagged ATTENDANCE_CHANGED so a stale approval is never paid silently
+    (the review clears the flag only with explicit minutes; bulk approve skips it). Returns 1 when the row changed."""
+    row.computed_minutes = mins
+    if row.status == "approved" and row.approved_minutes is not None:
+        row.approved_minutes = min(row.approved_minutes, mins)
+    row.flags = sorted({*(row.flags or []), "ATTENDANCE_CHANGED"})
+    row.updated_by, row.version = actor.id, row.version + 1
+    comps.add_event(session, item_type="overtime", item=row, action="update", actor_id=actor.id,
+                    detail={why: True, "minutes": mins, "approved_minutes": row.approved_minutes})  # fmt: skip
+    return 1
+
+
 async def compute(session: AsyncSession, actor: Principal, raw_period: str) -> dict[str, Any]:
     cfg = await require_enabled(session)
     today = await runs._today(session)
@@ -173,19 +188,21 @@ async def compute(session: AsyncSession, actor: Principal, raw_period: str) -> d
                         session, item_type="overtime", item=row, action="update", actor_id=actor.id, detail={"minutes": mins}
                     )
                     updated += 1
-            elif row.status in ("approved", "rejected") and mins != row.computed_minutes:
-                if "ATTENDANCE_CHANGED" not in (row.flags or []):
-                    row.flags = sorted({*(row.flags or []), "ATTENDANCE_CHANGED"})
-                    row.updated_by, row.version = actor.id, row.version + 1
-                    comps.add_event(session, item_type="overtime", item=row, action="update", actor_id=actor.id,
-                                    detail={"attendance_changed": True, "minutes": mins})  # fmt: skip
-                    flagged += 1
+            elif row.status in ("approved", "rejected"):
+                row.attendance_id = a.id
+                if mins != row.computed_minutes:
+                    flagged += _stale(session, actor, row, mins, "attendance_changed")
         for key, row in existing.items():  # a day that no longer qualifies (attendance removed or changed below the minimum)
-            if key in seen or row.status != "computed" or row.computed_minutes == 0:
+            if key in seen:
                 continue
-            row.computed_minutes, row.updated_by, row.version = 0, actor.id, row.version + 1
-            comps.add_event(session, item_type="overtime", item=row, action="update", actor_id=actor.id, detail={"minutes": 0})
-            updated += 1
+            if row.status == "computed" and row.computed_minutes != 0:
+                row.computed_minutes, row.updated_by, row.version = 0, actor.id, row.version + 1
+                comps.add_event(
+                    session, item_type="overtime", item=row, action="update", actor_id=actor.id, detail={"minutes": 0}
+                )
+                updated += 1
+            elif row.status in ("approved", "rejected") and row.computed_minutes != 0:
+                flagged += _stale(session, actor, row, 0, "attendance_removed")  # M3: deleted / lost its check-out
     audit(session, action="payroll.overtime.compute", actor=actor, entity_type=ENTITY, entity_id=None,
           after={"period": pc.period_str(period), "created": created, "updated": updated, "flagged_changed": flagged,
                  "employees": len(users)})  # fmt: skip
@@ -275,11 +292,12 @@ async def my_overtime(session: AsyncSession, actor: Principal, raw_period: str |
 
 
 # ============================================================================================ review
-def _apply(row: OT, actor: Principal, status: str, minutes: int | None, comment: str | None) -> None:
+def _apply(row: OT, actor: Principal, status: str, minutes: int | None, comment: str | None, *, clear_flag: bool = True) -> None:
     row.status = status
     row.approved_minutes = minutes if status == "approved" else None
     row.reviewer_id, row.reviewed_at, row.comment = actor.id, utcnow(), comment
-    row.flags = [f for f in (row.flags or []) if f != "ATTENDANCE_CHANGED"]
+    if clear_flag:
+        row.flags = [f for f in (row.flags or []) if f != "ATTENDANCE_CHANGED"]
     row.updated_by, row.version = actor.id, row.version + 1
 
 
@@ -303,7 +321,9 @@ async def update_day(session: AsyncSession, actor: Principal, day_id: uuid.UUID,
     if approve and minutes > row.computed_minutes:
         raise AppError("VALIDATION_ERROR", "approved_minutes cannot exceed the computed minutes",
                        details=[{"field": "approved_minutes", "message": "above computed_minutes"}])  # fmt: skip
-    _apply(row, actor, body.status, minutes if approve else None, body.comment)
+    # a stale approval is only cleared by explicit minutes (M2); a rejection pays nothing, so it clears the flag too
+    _apply(row, actor, body.status, minutes if approve else None, body.comment,
+           clear_flag=not approve or body.approved_minutes is not None)  # fmt: skip
     await pc.flush(session)
     comps.add_event(session, item_type="overtime", item=row, action="approve" if approve else "reject", actor_id=actor.id,
                     detail={"minutes": minutes if approve else None, "comment": body.comment})  # fmt: skip
@@ -345,12 +365,17 @@ async def bulk(session: AsyncSession, actor: Principal, body: OvertimeBulk) -> d
     )
     closed: dict[tuple[uuid.UUID, dt.date], bool] = {}
     updated = 0
+    done: list[uuid.UUID] = []
     for i in todo:
         r = locked[i]
         if r.status not in EDITABLE:
             skipped.append({"id": str(i), "reason": "ITEM_LOCKED"})
             continue
         if approve:
+            fl = set(r.flags or [])
+            if "ATTENDANCE_CHANGED" in fl or (not body.include_flagged and fl & {"SUSPICIOUS", "AUTO_CLOSED"}):
+                skipped.append({"id": str(i), "reason": "NEEDS_REVIEW"})  # L5 / M2: review these one by one
+                continue
             k = (r.user_id, r.period)
             if k not in closed:
                 try:
@@ -366,8 +391,11 @@ async def bulk(session: AsyncSession, actor: Principal, body: OvertimeBulk) -> d
         comps.add_event(session, item_type="overtime", item=r, action="approve" if approve else "reject", actor_id=actor.id,
                         detail={"minutes": r.approved_minutes, "comment": body.comment, "bulk": True})  # fmt: skip
         updated += 1
+        done.append(i)
+    ids_digest = hashlib.sha256(",".join(sorted(str(x) for x in done)).encode()).hexdigest()[:16]
     audit(session, action="payroll.overtime.review", actor=actor, entity_type=ENTITY, entity_id=None,
-          after={"decision": "approved" if approve else "rejected", "bulk": True, "updated": updated, "skipped": len(skipped)})  # fmt: skip
+          after={"decision": "approved" if approve else "rejected", "bulk": True, "updated": updated, "skipped": len(skipped),
+                 "include_flagged": body.include_flagged, "ids_count": len(done), "ids_digest": ids_digest})  # fmt: skip
     await pc.commit(session)
     return {"updated": updated, "skipped": skipped}
 
@@ -399,6 +427,8 @@ def _lines(rows: list[OT]) -> list[dict]:
             "amount": "0.00",  # filled in by payroll_runs.recompute (structure, shift and run settings)
             "minutes": total,
             "minutes_total": total,
+            "paid_minutes": sum(int(r.approved_minutes or 0) for r in rows if r.status == "paid"),  # carried on a revision (M1)
+            "paid_ids": [str(r.id) for r in rows if r.status == "paid"],
             "sources": [{"type": "overtime", "id": str(r.id)} for r in rows],
         }
     ]
@@ -407,8 +437,18 @@ def _lines(rows: list[OT]) -> list[dict]:
 async def _warn(session: AsyncSession, user_ids: list[uuid.UUID], period: dt.date) -> dict[uuid.UUID, list[str]]:
     if not user_ids or not await pset.current_value(session, "payroll.overtime_enabled"):
         return {}
+    out: dict[uuid.UUID, list[str]] = {}
     q = select(OT.user_id).where(OT.user_id.in_(user_ids), OT.period == period, OT.status == "computed", OT.computed_minutes > 0)
-    return {u: ["OVERTIME_UNREVIEWED"] for u in set((await session.execute(q)).scalars())}
+    for u in set((await session.execute(q)).scalars()):
+        out.setdefault(u, []).append("OVERTIME_UNREVIEWED")
+    # M3: an approved row whose attendance changed / vanished after the review (its minutes were clamped, HR must look)
+    q2 = select(OT.user_id, OT.flags).where(
+        OT.user_id.in_(user_ids), OT.period == period, OT.status.in_(("approved", "processing"))
+    )
+    for u, flags in (await session.execute(q2)).all():
+        if "ATTENDANCE_CHANGED" in (flags or []) and "OVERTIME_ATTENDANCE_CHANGED" not in out.get(u, []):
+            out.setdefault(u, []).append("OVERTIME_ATTENDANCE_CHANGED")
+    return out
 
 
 comps.register(

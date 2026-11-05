@@ -430,7 +430,7 @@ class _LoanDetailScreenState extends ConsumerState<LoanDetailScreen> {
           children: [
             for (final i in l.installments)
               Padding(
-                key: ValueKey('inst-${i.seq}'),
+                key: ValueKey('inst-${i.id}'),
                 padding: const EdgeInsets.symmetric(vertical: 4),
                 child: Row(
                   children: [
@@ -439,7 +439,7 @@ class _LoanDetailScreenState extends ConsumerState<LoanDetailScreen> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            '${i.seq}. ${monthTitle(i.period)}'
+                            '${i.hasLiveNumber ? '${i.seq}. ' : ''}${monthTitle(i.period)}'
                             '${i.kind == 'foreclosure' ? '  (foreclosure)' : ''}',
                           ),
                           Text(
@@ -452,7 +452,7 @@ class _LoanDetailScreenState extends ConsumerState<LoanDetailScreen> {
                     ),
                     if (actions && i.isPendingEmi)
                       TextButton(
-                        key: ValueKey('skip-${i.seq}'),
+                        key: ValueKey('skip-${i.id}'),
                         onPressed: () => _skip(l, i),
                         child: const Text('Skip'),
                       ),

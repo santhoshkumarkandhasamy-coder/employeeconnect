@@ -138,6 +138,7 @@ async def _out_many(session: AsyncSession, rows: list[CLAIM], *, admin: bool) ->
         if admin:
             item["user"] = pc.user_out(people.get(r.user_id))
             item["payslip_id"] = str(r.payslip_id) if r.payslip_id else None
+            item["combined"] = r.verifier_id is not None and r.verifier_id == r.approver_id  # manager+HR in one call (L1)
             item["run_status"], item["flags"] = states[r.id]
         out.append(item)
     return out
@@ -155,6 +156,20 @@ def _event(session: AsyncSession, row: CLAIM, action: str, actor_id: uuid.UUID, 
 
 
 # ============================================================================================ manager capability / pushes
+async def skip_reason(session: AsyncSession, user: User) -> str | None:
+    """Why the manager step cannot run for this employee now (None = a manager can act). L1 audit value."""
+    if user.status != "active" or user.deleted_at is not None:
+        return "requester_inactive"
+    if not user.manager_id:
+        return "no_manager"
+    m = await session.get(User, user.manager_id)
+    if m is None or m.status != "active" or m.deleted_at is not None:
+        return "manager_inactive"
+    if m.id not in await leave_svc._holders(session, MANAGER_PERMS):
+        return "manager_no_perm"
+    return None
+
+
 async def manager_can_act(session: AsyncSession, user: User) -> bool:
     """True when the employee's reporting manager is active and holds request.approve_team / approve_all."""
     if not user.manager_id:
@@ -437,7 +452,7 @@ async def reject(session: AsyncSession, actor: Principal, claim_id: uuid.UUID, b
             raise await _deny(session, actor, claim_id, "out_of_scope", status=404)
     row = await _claim(session, claim_id, lock=True)
     ok = ("submitted", "verified") if hr else ("submitted",)
-    if row.status not in ok:
+    if row.status not in ok or (not hr and row.manager_step != "pending"):  # L3: a manager only rejects at their own step
         raise _not_pending(row)
     row.status, row.approver_id, row.decided_at, row.decision_comment = "rejected", actor.id, utcnow(), body.comment
     row.updated_by, row.version = actor.id, row.version + 1
@@ -465,7 +480,7 @@ async def approve(session: AsyncSession, actor: Principal, claim_id: uuid.UUID, 
     row = await _claim(session, claim_id, lock=True)
     if row.version != body.expected_version:
         raise AppError("VERSION_CONFLICT", "The claim was changed by someone else; reload it")
-    combined = False
+    combined, skipped_reason = False, None
     if row.status == "verified":
         if row.verifier_id == actor.id:
             raise AppError("SECOND_PERSON_REQUIRED", "A second person must approve a claim you verified", status=403)
@@ -477,6 +492,7 @@ async def approve(session: AsyncSession, actor: Principal, claim_id: uuid.UUID, 
             or not await manager_can_act(session, owner)
         )
         if step_skipped:
+            skipped_reason = await skip_reason(session, owner) or "at_submit"
             row.manager_step = "skipped"
         elif _is_report(actor, owner):
             combined = True  # the employee's manager also holds payroll.manage: both steps in one logged call
@@ -496,7 +512,7 @@ async def approve(session: AsyncSession, actor: Principal, claim_id: uuid.UUID, 
     _event(session, row, "approve", actor.id, detail={"comment": body.comment, "combined": combined})
     audit(session, action="reimbursement.approve", actor=actor, entity_type=ENTITY, entity_id=row.id,
           after={"user_id": str(row.user_id), "category": row.category, "period": pc.period_str(period),
-                 "combined": combined, "run_status": run_status})  # fmt: skip
+                 "combined": combined, "step_skipped_reason": skipped_reason, "run_status": run_status})  # fmt: skip
     user_id, category = row.user_id, row.category
     await pc.commit(session)
     await _push_decision(session, claim_id, user_id, category, "approved")

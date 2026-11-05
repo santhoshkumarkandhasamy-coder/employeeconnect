@@ -31,6 +31,7 @@ class _OvertimeSectionState extends ConsumerState<OvertimeSection> {
   String? _status;
   final Set<String> _selected = {};
   bool _busy = false;
+  bool _includeFlagged = false; // bulk approve also takes SUSPICIOUS / AUTO_CLOSED rows (ATTENDANCE_CHANGED never)
 
   OvertimeQuery get _query => OvertimeQuery(period: _period, status: _status);
 
@@ -139,7 +140,7 @@ class _OvertimeSectionState extends ConsumerState<OvertimeSection> {
     final ids = _selected.toList();
     setState(() => _busy = true);
     await _guard(() async {
-      final r = await repo.bulkOvertime(ids, action: action, comment: comment);
+      final r = await repo.bulkOvertime(ids, action: action, comment: comment, includeFlagged: _includeFlagged);
       if (mounted) payrollSnack(context, r.message);
       return true;
     });
@@ -216,6 +217,12 @@ class _OvertimeSectionState extends ConsumerState<OvertimeSection> {
                   onPressed: _busy ? null : () => _bulk('approve'),
                   icon: const Icon(Icons.check),
                   label: Text('Approve ${_selected.length}'),
+                ),
+                FilterChip(
+                  key: const ValueKey('ot-include-flagged'),
+                  label: const Text('Include flagged'),
+                  selected: _includeFlagged,
+                  onSelected: _busy ? null : (v) => setState(() => _includeFlagged = v),
                 ),
                 OutlinedButton.icon(
                   key: const ValueKey('ot-bulk-reject'),

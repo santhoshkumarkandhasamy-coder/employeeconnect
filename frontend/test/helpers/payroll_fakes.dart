@@ -888,7 +888,12 @@ class FakeRepo extends PayrollRepository {
   }
 
   @override
-  Future<OvertimeBulkResult> bulkOvertime(List<String> ids, {required String action, String? comment}) async {
+  Future<OvertimeBulkResult> bulkOvertime(
+    List<String> ids, {
+    required String action,
+    String? comment,
+    bool includeFlagged = false,
+  }) async {
     overtimeCalls.add({'op': 'bulk', 'ids': ids, 'action': action, 'comment': comment});
     if (overtimeError != null) throw overtimeError!;
     return bulkResult;

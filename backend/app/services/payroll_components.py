@@ -240,6 +240,23 @@ def check_caps(counts: dict[str, int], adding: int = 1) -> None:
 
 
 # ============================================================================================ pull
+def _attach_carried(new_lines: list[dict], old: Payslip | None) -> None:
+    """M1: a line that carries `paid_minutes` (rows already paid on the superseded copy) keeps the PUBLISHED amount of that
+    portion: `carried` = the superseded copy's line of the same code (amount, capped minutes, total minutes). A revision then
+    prices only the newly approved minutes; the paid part never changes with the structure, shift or settings."""
+    if old is None:
+        return
+    prev = {c["code"]: c for c in (old.inputs or {}).get("components", [])}
+    for line in new_lines:
+        if int(line.get("paid_minutes", 0)) > 0 and line["code"] in prev:
+            o = prev[line["code"]]
+            line["carried"] = {
+                "amount": o["amount"],
+                "minutes": int(o.get("minutes", 0)),
+                "minutes_total": int(o.get("minutes_total", o.get("minutes", 0))),
+            }
+
+
 def _sort_key(r: Any) -> tuple:
     return (r.created_at or dt.datetime.min.replace(tzinfo=dt.UTC), str(r.id))
 
@@ -281,7 +298,11 @@ async def pull_for(session: AsyncSession, payslips: list[Payslip], period: dt.da
         if prov.warn is not None:
             for uid, codes in (await prov.warn(session, list(by_user), period)).items():
                 warnings[uid].extend(codes)
+    olds: dict[uuid.UUID, Payslip] = {}
+    if sup_ids:
+        olds = {o.id: o for o in (await session.execute(select(Payslip).where(Payslip.id.in_(sup_ids)))).scalars()}
     for uid, p in by_user.items():
+        _attach_carried(lines[uid], olds.get(p.supersedes_id) if p.supersedes_id else None)
         inputs = copy.deepcopy(p.inputs or {})
         inputs["components"] = lines[uid]
         if warnings[uid]:
@@ -376,5 +397,12 @@ async def mark_paid(session: AsyncSession, payslips: list[Payslip], actor_id: uu
                 continue
             else:
                 raise _changed()
+        sup = {p.supersedes_id: p for p in payslips if p.supersedes_id is not None}
+        if sup:  # M1: a paid row of the superseded copy that the revision does not carry would lose published pay
+            m = prov.model
+            q = select(m.id).where(m.status == "paid", m.payslip_id.in_(list(sup))).order_by(m.id)
+            for rid in (await session.execute(q)).scalars():
+                if rid not in want:
+                    raise _changed()
         if paid_now and prov.after_paid is not None:
             await prov.after_paid(session, paid_now, actor_id)

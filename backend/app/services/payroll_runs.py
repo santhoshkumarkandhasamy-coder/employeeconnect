@@ -205,26 +205,47 @@ def _finalize_overtime(ps: Payslip, user: User, basic: Decimal, cfg: dict, warns
         return
     shift_min = calc.shift_length_minutes(user.shift.start_time, user.shift.end_time) if user.shift is not None else 0
     out: list[dict] = []
+    mult, mdays = Decimal(str(cfg.get("overtime_multiplier", 2))), int(cfg.get("overtime_month_days", 26))
+    max_hours, mode = int(cfg.get("overtime_max_hours_month", 50)), cfg.get("rounding", "rupee")
     for c in lines:
         if c["code"] != "OVERTIME":
             out.append(c)
             continue
-        if not cfg.get("overtime_enabled", False):
-            continue
         total = int(c.get("minutes_total", c.get("minutes", 0)))
-        amount, paid, capped = calc.overtime_amount(
-            basic, shift_min, total,
-            month_days=int(cfg.get("overtime_month_days", 26)),
-            multiplier=Decimal(str(cfg.get("overtime_multiplier", 2))),
-            max_hours=int(cfg.get("overtime_max_hours_month", 50)),
-            mode=cfg.get("rounding", "rupee"),
-        )  # fmt: skip
-        if amount <= 0:
+        carried = c.get("carried")
+        if carried is None:  # nothing paid yet: the whole line is priced from the adopted structure
+            if not cfg.get("overtime_enabled", False):
+                continue
+            amount, paid, capped = calc.overtime_amount(
+                basic, shift_min, total, month_days=mdays, multiplier=mult, max_hours=max_hours, mode=mode
+            )  # fmt: skip
+            if amount <= 0:
+                continue
+            if capped:
+                warns.append("OVERTIME_CAPPED")
+            out.append({**c, "label": f"Overtime ({_hours_label(paid)} h)", "amount": calc.money_str(amount),
+                        "minutes": paid, "minutes_total": total})  # fmt: skip
             continue
-        if capped:
+        # M1: the paid part keeps its published amount; only the newly approved minutes are priced (and capped on what is left)
+        paid_total = int(c.get("paid_minutes", 0))
+        old_amount, old_min = Decimal(carried["amount"]), int(carried["minutes"])
+        new_min = max(0, total - paid_total) if cfg.get("overtime_enabled", False) else 0
+        if max_hours > 0 and new_min > max(0, max_hours * 60 - old_min):
+            new_min = max(0, max_hours * 60 - old_min)
             warns.append("OVERTIME_CAPPED")
-        out.append({**c, "label": f"Overtime ({_hours_label(paid)} h)", "amount": calc.money_str(amount),
-                    "minutes": paid, "minutes_total": total})  # fmt: skip
+        extra = (
+            calc.overtime_amount(basic, shift_min, new_min, month_days=mdays, multiplier=mult, max_hours=0, mode=mode)[0]
+            if new_min > 0
+            else Decimal("0.00")
+        )
+        line = {**c, "amount": calc.money_str(old_amount + extra)}
+        if extra > 0:
+            line.update(minutes=old_min + new_min, minutes_total=total)
+        else:  # nothing new is payable (overtime off, no shift): the new rows stay `approved`, only the paid rows are kept
+            keep = set(c.get("paid_ids", []))
+            line.update(minutes=old_min, minutes_total=paid_total, sources=[x for x in c["sources"] if x["id"] in keep])
+        line["label"] = f"Overtime ({_hours_label(line['minutes'])} h)"
+        out.append(line)
     inputs = copy.deepcopy(ps.inputs)
     inputs["components"] = out
     ps.inputs = inputs

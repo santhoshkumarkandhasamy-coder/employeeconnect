@@ -474,19 +474,19 @@ void main() {
 
     testWidgets('detail lists instalments; skip only on pending EMIs; a viewer has no actions', (tester) async {
       await pumpPayroll(tester, const LoanDetailScreen(loanId: 'l1'), repo: withLoan(), perms: _view);
-      expect(find.byKey(const ValueKey('inst-1')), findsOneWidget);
+      expect(find.byKey(const ValueKey('inst-n1')), findsOneWidget);
       expect(find.textContaining('₹2,500.00  -  In payslip'), findsOneWidget);
       expect(find.textContaining('Medical emergency'), findsOneWidget);
-      expect(find.byKey(const ValueKey('skip-4')), findsNothing);
+      expect(find.byKey(const ValueKey('skip-n4')), findsNothing);
       expect(find.byKey(const ValueKey('loan-cancel')), findsNothing);
     });
 
     testWidgets('skip needs a reason and no password', (tester) async {
       final repo = withLoan();
       await pumpPayroll(tester, const LoanDetailScreen(loanId: 'l1'), repo: repo, perms: _manage);
-      expect(find.byKey(const ValueKey('skip-3')), findsNothing); // processing
-      expect(find.byKey(const ValueKey('skip-1')), findsNothing); // paid
-      await _tapKey(tester, 'skip-4');
+      expect(find.byKey(const ValueKey('skip-n3')), findsNothing); // processing
+      expect(find.byKey(const ValueKey('skip-n1')), findsNothing); // paid
+      await _tapKey(tester, 'skip-n4');
       await _enter(tester, 'reason-field', 'Festival month');
       await tester.tap(find.widgetWithText(FilledButton, 'Skip'));
       await tester.pumpAndSettle();
@@ -568,7 +568,7 @@ void main() {
       final repo = _repo()..loanDetail = closed;
       await pumpPayroll(tester, const LoanDetailScreen(loanId: 'l1'), repo: repo, perms: _manage);
       expect(find.byKey(const ValueKey('loan-cancel')), findsNothing);
-      expect(find.byKey(const ValueKey('skip-4')), findsNothing);
+      expect(find.byKey(const ValueKey('skip-n4')), findsNothing);
     });
   });
 

@@ -522,6 +522,7 @@ class OvertimeBulk(_Strict):
     ids: list[uuid.UUID] = Field(min_length=1, max_length=200)
     action: Literal["approve", "reject"]
     comment: str | None = None
+    include_flagged: bool = False  # L5: also approve SUSPICIOUS / AUTO_CLOSED rows (ATTENDANCE_CHANGED rows never bulk)
 
     _c = field_validator("comment")(_opt_comment)
 

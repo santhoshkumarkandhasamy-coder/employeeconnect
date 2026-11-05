@@ -301,12 +301,74 @@ async def test_recompute_updates_computed_rows_and_only_flags_reviewed_ones(clie
     assert await compute(client, hr) == {"period": PERIOD, "created": 0, "updated": 0, "flagged_changed": 2}
     after = {i["work_date"]: i for i in (await days(client, hr))["items"]}
     assert after["2025-06-03"]["flags"] == ["ATTENDANCE_CHANGED"] and after["2025-06-03"]["approved_minutes"] == 120
-    assert after["2025-06-03"]["computed_minutes"] == 150 and after["2025-06-03"]["status"] == "approved"  # keeps its minutes
+    assert after["2025-06-03"]["computed_minutes"] == 210 and after["2025-06-03"]["status"] == "approved"  # fresh minutes (M2)
     assert after["2025-06-07"]["status"] == "rejected" and "ATTENDANCE_CHANGED" in after["2025-06-07"]["flags"]
+    assert after["2025-06-07"]["computed_minutes"] == 90
     assert await compute(client, hr) == {"period": PERIOD, "created": 0, "updated": 0, "flagged_changed": 0}  # flagged once
-    # a new review clears the flag
-    again = await review(client, hr, after["2025-06-03"], "approved", approved_minutes=90)
+    # approving without explicit minutes keeps the flag; explicit minutes clear it
+    kept = await review(client, hr, after["2025-06-03"], "approved")
+    assert kept["flags"] == ["ATTENDANCE_CHANGED"] and kept["approved_minutes"] == 210
+    again = await review(client, hr, kept, "approved", approved_minutes=90)
     assert again["flags"] == [] and again["approved_minutes"] == 90 and approved["version"] < again["version"] and rejected
+
+
+async def test_downward_corrected_punches_clamp_the_approval_and_bulk_skips_them(client, payroll, uid, db, seeded):
+    hr = payroll["hr"]
+    await enable(client, payroll, uid)
+    a = await add_att(db, seeded, "employee", TUE, 690)  # 150 minutes
+    await add_att(db, seeded, "employee", dt.date(2025, 6, 4), 690)
+    await compute(client, hr)
+    rows = (await days(client, hr))["items"]
+    first = await review(client, hr, rows[0], "approved")  # approved at 150
+    assert first["approved_minutes"] == 150
+    a.worked_minutes = 575  # corrected down to 35 minutes over -> 30
+    await db.commit()
+    assert (await compute(client, hr))["flagged_changed"] == 1
+    got = {i["id"]: i for i in (await days(client, hr))["items"]}[first["id"]]
+    assert (got["computed_minutes"], got["approved_minutes"], got["flags"]) == (30, 30, ["ATTENDANCE_CHANGED"])
+    assert (await days(client, hr))["summary"][0]["approved_minutes"] == 30
+    r = await client.post(f"{OT}/bulk", json={"ids": [rows[0]["id"], rows[1]["id"]], "action": "approve"}, headers=hr)
+    assert r.json() == {"updated": 1, "skipped": [{"id": rows[0]["id"], "reason": "NEEDS_REVIEW"}]}
+    r = await client.post(f"{OT}/bulk", json={"ids": [rows[0]["id"]], "action": "approve", "include_flagged": True}, headers=hr)
+    assert r.json()["skipped"] == [{"id": rows[0]["id"], "reason": "NEEDS_REVIEW"}]  # ATTENDANCE_CHANGED is never bulk-approved
+
+
+async def test_bulk_approve_skips_suspicious_and_auto_closed_unless_included(client, payroll, uid, db, seeded):
+    hr = payroll["hr"]
+    await enable(client, payroll, uid, overtime_include_auto_closed=True)
+    await add_att(db, seeded, "employee", TUE, 690, suspicious=True)
+    await add_att(db, seeded, "employee", dt.date(2025, 6, 4), 690, auto_closed=True)
+    await add_att(db, seeded, "employee", dt.date(2025, 6, 5), 690)
+    await compute(client, hr)
+    ids = [i["id"] for i in (await days(client, hr))["items"]]
+    r = await client.post(f"{OT}/bulk", json={"ids": ids, "action": "approve"}, headers=hr)
+    assert r.json()["updated"] == 1 and [x["reason"] for x in r.json()["skipped"]] == ["NEEDS_REVIEW"] * 2
+    r = await client.post(f"{OT}/bulk", json={"ids": ids, "action": "approve", "include_flagged": True}, headers=hr)
+    assert r.json()["updated"] == 3  # approved rows may be approved again; the flagged ones now go through
+    db.expire_all()
+    audit_row = (
+        (await db.execute(select(AuditLog).where(AuditLog.action == "payroll.overtime.review").order_by(AuditLog.id.desc())))
+        .scalars()
+        .first()
+    )
+    assert audit_row.after["include_flagged"] is True and audit_row.after["ids_count"] == 3
+    assert len(audit_row.after["ids_digest"]) == 16 and ids[0] not in str(audit_row.after)
+
+
+async def test_lost_checkout_flags_the_row_and_raises_a_payslip_warning(client, payroll, uid, db, seeded):
+    hr = payroll["hr"]
+    await _approved_ot(client, payroll, uid, db, seeded)  # TUE 150 + SAT 300, both approved
+    att = (await db.execute(select(Attendance).where(Attendance.work_date == SAT))).scalar_one()
+    att.check_out_at, att.worked_minutes = None, None  # the check-out was removed
+    await db.commit()
+    assert (await compute(client, hr))["flagged_changed"] == 1
+    got = {i["work_date"]: i for i in (await days(client, hr))["items"]}
+    assert (got["2025-06-07"]["computed_minutes"], got["2025-06-07"]["approved_minutes"]) == (0, 0)
+    assert got["2025-06-07"]["flags"] == ["ATTENDANCE_CHANGED", "OFF_DAY"] and got["2025-06-03"]["flags"] == []
+    assert (await compute(client, hr))["flagged_changed"] == 0  # once
+    run = await new_run(client, hr)
+    p = await payslip(client, hr, run["id"])
+    assert "OVERTIME_ATTENDANCE_CHANGED" in p["warnings"] and line(p)["minutes"] == 150
 
 
 async def test_a_computed_row_whose_day_no_longer_qualifies_drops_to_zero(client, payroll, uid, db, seeded):
@@ -600,3 +662,103 @@ async def test_audit_carries_counts_only(client, payroll, uid, db, seeded):
     assert {r.action for r in rows} >= {"payroll.overtime.compute", "payroll.overtime.review"}
     comp = next(r for r in rows if r.action == "payroll.overtime.compute")
     assert comp.after["created"] == 2 and "1282" not in str(rows)
+
+
+# ================================================================================================ M1: paid overtime in a revision
+async def _published_with_ot(client, payroll, uid, db, seeded):
+    hr = payroll["hr"]
+    await _approved_ot(client, payroll, uid, db, seeded)
+    run = await new_run(client, hr)
+    assert (await client.post(f"{RUNS}/{run['id']}/process", headers=hr)).status_code == 200
+    assert (await publish_run(client, hr, run["id"])).status_code == 200
+    return run
+
+
+async def _revise(client, hr, run, uid, expect=201):
+    r = await client.post(f"{RUNS}/{run['id']}/employees/{uid['employee']}/revise", json={"reason": "Fix"}, headers=hr)
+    assert r.status_code == expect, r.text
+    return r.json()
+
+
+async def _publish_revision(client, hr, rev, process=True):
+    if process:
+        assert (await client.post(f"/api/admin/payroll/payslips/{rev['id']}/process", headers=hr)).status_code == 200
+    r = await client.post(f"/api/admin/payroll/payslips/{rev['id']}/publish", json={"current_password": PASSWORD}, headers=hr)
+    assert r.status_code == 200, r.text
+
+
+async def _approve_extra_day(client, payroll, db, seeded):
+    hr = payroll["hr"]
+    await add_att(db, seeded, "employee", dt.date(2025, 6, 10), 700)  # 160 -> 150 min
+    await compute(client, hr)
+    d = next(i for i in (await days(client, hr))["items"] if i["work_date"] == "2025-06-10")
+    await review(client, hr, d)
+
+
+async def test_revision_keeps_paid_overtime_at_its_published_amount_and_prices_only_new_minutes(client, payroll, uid, db, seeded):
+    from tests.payroll_fixtures import add_structure
+
+    hr = payroll["hr"]
+    run = await _published_with_ot(client, payroll, uid, db, seeded)  # 450 min paid = 1282.00 on basic 20000
+    await add_structure(client, hr, uid["employee"], basic="40000", hra="0", eff="2025-03-01")  # would re-price a naive revision
+    rev = await _revise(client, hr, run, uid)
+    await _approve_extra_day(client, payroll, db, seeded)  # allowed: the employee has an open revision (P9)
+    assert (await client.post(f"/api/admin/payroll/payslips/{rev['id']}/process", headers=hr)).status_code == 200  # re-pulls
+    rev = (await client.get(f"/api/admin/payroll/payslips/{rev['id']}", headers=hr)).json()
+    # 40000 / 26 / 9 x 2.5 h x 2 = 854.70 -> 855 on top of the published 1282; the paid part is not re-priced
+    assert (line(rev)["amount"], line(rev)["minutes"], line(rev)["minutes_total"]) == ("2137.00", 600, 600)
+    await _publish_revision(client, hr, rev, process=False)
+    db.expire_all()
+    assert {r_.status for r_ in (await db.execute(select(OvertimeDay))).scalars()} == {"paid"}
+    # a second revision on top carries all three rows at the same amount
+    rev2 = await _revise(client, hr, run, uid)
+    assert (line(rev2)["amount"], line(rev2)["minutes"]) == ("2137.00", 600)
+
+
+async def test_structure_change_alone_does_not_re_price_paid_overtime(client, payroll, uid, db, seeded):
+    from tests.payroll_fixtures import add_structure
+
+    hr = payroll["hr"]
+    run = await _published_with_ot(client, payroll, uid, db, seeded)
+    await add_structure(client, hr, uid["employee"], basic="40000", hra="0", eff="2025-03-01")
+    rev = await _revise(client, hr, run, uid)
+    assert (line(rev)["amount"], line(rev)["minutes"]) == ("1282.00", 450)
+
+
+async def test_revision_without_a_shift_keeps_paid_overtime_and_leaves_new_rows_approved(client, payroll, uid, db, seeded):
+    from sqlalchemy import update
+
+    from app.models import User
+
+    hr = payroll["hr"]
+    run = await _published_with_ot(client, payroll, uid, db, seeded)
+    rev = await _revise(client, hr, run, uid)
+    await _approve_extra_day(client, payroll, db, seeded)
+    await db.execute(update(User).where(User.id == seeded["users"]["employee"]).values(shift_id=None))
+    await db.commit()
+    assert (await client.post(f"/api/admin/payroll/payslips/{rev['id']}/process", headers=hr)).status_code == 200  # re-pulls
+    rev = (await client.get(f"/api/admin/payroll/payslips/{rev['id']}", headers=hr)).json()
+    assert (line(rev)["amount"], line(rev)["minutes"]) == ("1282.00", 450) and len(line(rev)["sources"]) == 2
+    assert "NO_SHIFT" in rev["warnings"]
+    await _publish_revision(client, hr, rev, process=False)
+    db.expire_all()
+    by = {r_.work_date: r_.status for r_ in (await db.execute(select(OvertimeDay))).scalars()}
+    assert by == {TUE: "paid", SAT: "paid", dt.date(2025, 6, 10): "approved"}
+
+
+async def test_publishing_a_revision_that_drops_a_paid_row_is_components_changed(client, payroll, uid, db, seeded):
+    from app.core.errors import AppError
+    from app.models import Payslip
+    from app.services import payroll_components as comps
+
+    hr = payroll["hr"]
+    run = await _published_with_ot(client, payroll, uid, db, seeded)
+    rev = await _revise(client, hr, run, uid)
+    p = await db.get(Payslip, uuid.UUID(rev["id"]))
+    inputs = dict(p.inputs)
+    inputs["components"] = []  # the overtime line vanished (e.g. dropped by a recompute)
+    p.inputs = inputs
+    with pytest.raises(AppError) as e:
+        await comps.mark_paid(db, [p], uuid.UUID(str(p.created_by)))
+    assert e.value.code == "COMPONENTS_CHANGED"
+    await db.rollback()

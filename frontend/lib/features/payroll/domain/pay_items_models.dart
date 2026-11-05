@@ -315,6 +315,9 @@ class LoanInstallment {
   final List<String> flags;
 
   bool get isPendingEmi => status == 'pending' && kind == 'emi';
+
+  /// Skipped / cancelled (employee view: deferred) rows may share their number with a live instalment, so they show without it.
+  bool get hasLiveNumber => status != 'skipped' && status != 'cancelled' && status != 'deferred';
 }
 
 class NextInstallment {
@@ -504,6 +507,9 @@ class MyLoanInstallment {
 
   /// `scheduled | deducted | deferred | cancelled`.
   final String status;
+
+  /// Deferred / cancelled rows may share their number with a live instalment, so they show without it.
+  bool get hasLiveNumber => status != 'deferred' && status != 'cancelled';
 }
 
 const Map<String, String> myInstallmentLabels = {
@@ -863,6 +869,7 @@ const Map<String, String> payItemWarningLabels = {
   'ARREARS_PROPOSED': 'Arrears proposed: review in Pay items',
   'MANUAL_COMPONENT_OVERLAP': 'A manual adjustment may duplicate an automatic line',
   'OVERTIME_UNREVIEWED': 'Overtime not reviewed',
+  'OVERTIME_ATTENDANCE_CHANGED': 'Overtime: attendance changed after review',
   'OVERTIME_CAPPED': 'Overtime capped',
 };
 

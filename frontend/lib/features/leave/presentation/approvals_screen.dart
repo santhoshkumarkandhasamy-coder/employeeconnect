@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/api/api_exception.dart';
+import '../../../core/security/screen_protect.dart' show SecureScreen;
 import '../../../core/widgets/state_views.dart';
 import '../../admin/presentation/admin_widgets.dart' show adminPermissionsProvider, adminSelfIdProvider;
 import '../../payroll/domain/claims_models.dart' show canSeeTeamClaims;
@@ -122,7 +123,7 @@ class _ApprovalsScreenState extends ConsumerState<ApprovalsScreen> {
             ),
           ),
           if (_claims)
-            const Expanded(child: ManagerClaimsBody())
+            const Expanded(child: SecureScreen(child: ManagerClaimsBody()))
           else ...[
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,

@@ -107,10 +107,10 @@ class MyLoanDetailScreen extends ConsumerWidget {
                 title: 'Schedule',
                 children: [
                   if (l.installments.isEmpty) const Text('No instalments.'),
-                  for (final i in l.installments)
+                  for (final (n, i) in l.installments.indexed)
                     AmountRow(
-                      key: ValueKey('my-inst-${i.seq}'),
-                      label: '${i.seq}. ${monthTitle(i.period)}',
+                      key: ValueKey('my-inst-$n'),
+                      label: '${i.hasLiveNumber ? '${i.seq}. ' : ''}${monthTitle(i.period)}',
                       value: formatRupees(i.amount),
                       caption: myInstallmentLabels[i.status] ?? i.status,
                     ),

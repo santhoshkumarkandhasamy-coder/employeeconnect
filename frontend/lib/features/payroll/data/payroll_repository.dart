@@ -6,7 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/api/api_exception.dart';
 import '../../../core/api/dio_client.dart';
 import '../../attendance/domain/attendance_models.dart' show Paged;
-import '../../export/data/export_repository.dart' show decodeErrorBody;
+import '../../export/data/export_repository.dart' show decodeErrorBody, decodeStreamErrorBody;
 import '../../../core/files/file_service.dart' show fileIdFromUrl;
 import '../domain/claims_models.dart';
 import '../domain/pay_items_models.dart';
@@ -679,17 +679,24 @@ class PayrollRepository {
     final id = fileIdFromUrl(url);
     if (id == null) throw const ApiException(code: 'NOT_FOUND', message: 'The bill is not available.');
     try {
-      final res = await _dio.get<List<int>>(
+      final res = await _dio.get<ResponseBody>(
         '/files/$id',
-        options: Options(responseType: ResponseType.bytes),
+        options: Options(responseType: ResponseType.stream),
       );
-      final data = res.data ?? const <int>[];
-      if (data.length > payrollMaxFileBytes) {
-        throw const ApiException(code: 'FILE_TOO_LARGE', message: 'The file is too large.');
+      const tooLarge = ApiException(code: 'FILE_TOO_LARGE', message: 'The file is too large.');
+      final declared = int.tryParse(res.headers.value(Headers.contentLengthHeader) ?? '');
+      if (declared != null && declared > payrollMaxFileBytes) {
+        await res.data?.stream.listen(null).cancel();
+        throw tooLarge;
       }
-      return Uint8List.fromList(data);
+      final builder = BytesBuilder(copy: false);
+      await for (final chunk in res.data!.stream) {
+        builder.add(chunk);
+        if (builder.length > payrollMaxFileBytes) throw tooLarge; // never buffer more than the cap
+      }
+      return builder.takeBytes();
     } on DioException catch (e) {
-      throw ApiException.fromDio(decodeErrorBody(e));
+      throw ApiException.fromDio(await decodeStreamErrorBody(e));
     }
   }
 
@@ -785,10 +792,16 @@ class PayrollRepository {
       },),);
 
   /// [action] is `approve` or `reject` (comment required for reject); 1..200 ids.
-  Future<OvertimeBulkResult> bulkOvertime(List<String> ids, {required String action, String? comment}) async =>
+  Future<OvertimeBulkResult> bulkOvertime(
+    List<String> ids, {
+    required String action,
+    String? comment,
+    bool includeFlagged = false,
+  }) async =>
       OvertimeBulkResult.fromJson(await _json('POST', '$_a/overtime/bulk', body: {
         'ids': ids,
         'action': action,
+        if (includeFlagged) 'include_flagged': true,
         if (comment != null && comment.trim().isNotEmpty) 'comment': comment.trim(),
       },),);
 

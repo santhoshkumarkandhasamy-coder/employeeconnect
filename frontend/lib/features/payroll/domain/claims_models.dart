@@ -501,6 +501,7 @@ const Map<String, String> overtimeSkipReasons = {
   'FORBIDDEN': 'your own overtime',
   'NOT_FOUND': 'not found',
   'PERIOD_LOCKED': 'month is locked',
+  'NEEDS_REVIEW': 'needs a single review (flagged)',
 };
 
 class OvertimeBulkResult {

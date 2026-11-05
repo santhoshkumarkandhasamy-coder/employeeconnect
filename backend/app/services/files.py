@@ -339,17 +339,23 @@ async def _leave_attachment_visible(session: AsyncSession, actor: Principal, f: 
 
 async def _bill_visible(session: AsyncSession, actor: Principal, f: File) -> bool:
     """A reimbursement bill (plan 15, contract 17.6) is readable by `payroll.view_all` holders once a claim carries it, and by the
-    owner's CURRENT manager (request.view_team / approve_team) while that claim is still `submitted`. Everyone else: 404."""
+    owner's CURRENT manager (request.view_team / approve_team) while that claim is still `submitted` with `manager_step = pending`. Everyone else: 404."""
     claim = (
         await session.execute(
-            select(ReimbursementClaim.user_id, ReimbursementClaim.status).where(ReimbursementClaim.bill_file_id == f.id).limit(1)
+            select(ReimbursementClaim.user_id, ReimbursementClaim.status, ReimbursementClaim.manager_step)
+            .where(ReimbursementClaim.bill_file_id == f.id)
+            .limit(1)
         )
     ).first()
     if claim is None:
         return False  # an upload nobody claimed yet is owner-only
     if actor.has("payroll.view_all"):
         return True
-    if claim.status == "submitted" and (actor.has("request.view_team") or actor.has("request.approve_team")):
+    if (
+        claim.status == "submitted"
+        and claim.manager_step == "pending"
+        and (actor.has("request.view_team") or actor.has("request.approve_team"))
+    ):
         owner = await session.get(User, claim.user_id)
         return owner is not None and owner.manager_id == actor.id
     return False

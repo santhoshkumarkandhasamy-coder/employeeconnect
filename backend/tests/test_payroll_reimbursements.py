@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import datetime as dt
 import io
+import uuid
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -645,3 +646,44 @@ async def test_permission_and_unknown_fields(client, payroll):
     r = await client.put(f"{ADMIN}/{ghost}/payout", json={"period": PERIOD, "expected_version": 1}, headers=payroll["manager"])
     assert r.status_code == 403
     assert (await client.post(CLAIMS, json={}, headers={})).status_code == 401
+
+
+# ================================================================================================ 3b security review (L1 / L3 / L4)
+async def _skip_step(db, claim):
+    from sqlalchemy import update
+
+    from app.models import ReimbursementClaim
+
+    await db.execute(
+        update(ReimbursementClaim).where(ReimbursementClaim.id == uuid.UUID(claim["id"])).values(manager_step="skipped")
+    )
+    await db.commit()
+
+
+async def test_manager_cannot_reject_or_read_the_bill_once_the_step_is_skipped(client, payroll, db):
+    emp, mgr, hr = payroll["employee"], payroll["manager"], payroll["hr"]
+    c = await submit(client, emp)
+    assert (await client.get(c["bill"]["url"], headers=mgr)).status_code == 200  # step pending
+    await _skip_step(db, c)
+    await put(client, mgr, c, "reject", 409, comment="Not my step any more")  # L3
+    assert (await client.get(c["bill"]["url"], headers=mgr)).status_code == 404  # L4
+    assert (await client.get(c["bill"]["url"], headers=hr)).status_code == 200
+    assert (await put(client, hr, c, "reject", comment="HR decides"))["status"] == "rejected"
+
+
+async def test_approve_audits_why_the_step_was_skipped_and_lists_combined(client, payroll, db, seeded):
+    emp, mgr, hr = payroll["employee"], payroll["manager"], payroll["hr"]
+    c = await submit(client, mgr, color=(5, 5, 5))  # MGR001 has no manager
+    await approve(client, hr, c)
+    await give_manager_payroll_manage(db, seeded)
+    c2 = await submit(client, emp, color=(6, 6, 6))
+    await approve(client, mgr, c2)  # combined
+    db.expire_all()
+    rows = {
+        r.entity_id: r.after
+        for r in (await db.execute(select(AuditLog).where(AuditLog.action == "reimbursement.approve"))).scalars()
+    }
+    assert rows[c["id"]]["step_skipped_reason"] == "no_manager" and rows[c["id"]]["combined"] is False
+    assert rows[c2["id"]]["step_skipped_reason"] is None and rows[c2["id"]]["combined"] is True
+    items = {i["id"]: i for i in (await client.get(f"{ADMIN}?stage=all", headers=hr)).json()["items"]}
+    assert items[c["id"]]["combined"] is False and items[c2["id"]]["combined"] is True
