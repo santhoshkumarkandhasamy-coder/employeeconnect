@@ -25,9 +25,18 @@ from ..core.redis import get_redis
 from ..models import Payslip
 from ..schemas.payroll import (
     ArrearsAccept,
+    ArrearsBulkAccept,
+    BatchApprove,
+    BatchReject,
+    BulkIncrementCreate,
     ChallanIn,
     DetailsIn,
+    EmptyIn,
     EncashmentCreate,
+    IncrementApprove,
+    IncrementCreate,
+    IncrementReject,
+    IncrementUpdate,
     LoanCancel,
     LoanCreate,
     LoanForeclose,
@@ -47,11 +56,13 @@ from ..schemas.payroll import (
     RunCreate,
     StatutoryFileIn,
     StructureIn,
+    VersionIn,
 )
 from ..services import (
     admin_security,
     payroll_arrears,
     payroll_encashment,
+    payroll_increments,
     payroll_items,
     payroll_loans,
     payroll_overtime,
@@ -78,6 +89,7 @@ me_router = APIRouter(prefix="/me", tags=["payroll-own"])
 VIEW_OWN = require_permission("payroll.view_own")
 VIEW_ALL = require_permission("payroll.view_all")
 MANAGE = require_permission("payroll.manage")
+APPROVE = require_permission("payroll.approve")
 PUBLISH = require_permission("payroll.publish")
 
 
@@ -1039,3 +1051,223 @@ async def my_overtime(
 ):
     await pc.limit(redis, actor, "own_list", (60, 60))
     return await payroll_overtime.my_overtime(session, actor, period)
+
+
+# ============================================================================================ plan 16 4a: arrears bulk accept
+@admin_router.post("/arrears/bulk-accept")
+async def bulk_accept_arrears(
+    body: ArrearsBulkAccept,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "action", (10, 60), closed=True)
+    return await payroll_arrears.bulk_accept(session, redis, actor, body)
+
+
+# ============================================================================================ plan 16 4a: increment batches (bulk hike)
+# static paths first: `/increments/batches` must not be read as `/increments/{increment_id}`
+@admin_router.post("/increments/bulk", status_code=201)
+async def create_increment_batch(
+    body: BulkIncrementCreate,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "action", (10, 60), closed=True)
+    return await payroll_increments.create_batch(session, actor, body)
+
+
+@admin_router.get("/increments/batches")
+async def list_increment_batches(
+    kind: Literal["percent", "import"] | None = None,
+    page: PageParams = Depends(),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "admin_read", (120, 60))
+    return await payroll_increments.list_batches(session, kind, page)
+
+
+@admin_router.get("/increments/batches/{batch_id}")
+async def get_increment_batch(
+    batch_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "admin_read", (120, 60))
+    return await payroll_increments.get_batch(session, batch_id)
+
+
+@admin_router.post("/increments/batches/{batch_id}/submit")
+async def submit_increment_batch(
+    batch_id: uuid.UUID,
+    body: EmptyIn,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "write", (60, 60), closed=True)
+    return await payroll_increments.submit_batch(session, redis, actor, batch_id)
+
+
+@admin_router.post("/increments/batches/{batch_id}/approve")
+async def approve_increment_batch(
+    batch_id: uuid.UUID,
+    body: BatchApprove,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(APPROVE),
+):
+    await pc.limit(redis, actor, "action", (10, 60), closed=True)
+    return await payroll_increments.approve_batch(session, redis, actor, batch_id, body)
+
+
+@admin_router.post("/increments/batches/{batch_id}/reject")
+async def reject_increment_batch(
+    batch_id: uuid.UUID,
+    body: BatchReject,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(APPROVE),
+):
+    await pc.limit(redis, actor, "action", (10, 60), closed=True)
+    return await payroll_increments.reject_batch(session, actor, batch_id, body)
+
+
+@admin_router.post("/increments/batches/{batch_id}/cancel")
+async def cancel_increment_batch(
+    batch_id: uuid.UUID,
+    body: ReasonIn,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "write", (60, 60), closed=True)
+    return await payroll_increments.cancel_batch(session, actor, batch_id, body.reason)
+
+
+# ============================================================================================ plan 16 4a: increments
+@admin_router.get("/increments")
+async def list_increments(
+    status: Literal["draft", "submitted", "approved", "rejected", "cancelled"] | None = None,
+    user_id: uuid.UUID | None = None,
+    batch_id: uuid.UUID | None = None,
+    effective_from: str | None = Query(None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
+    page: PageParams = Depends(),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "admin_read", (120, 60))
+    return await payroll_increments.list_increments(
+        session, actor, status=status, user_id=user_id, batch_id=batch_id, effective_from=effective_from, page=page
+    )
+
+
+@admin_router.get("/increments/{increment_id}")
+async def get_increment(
+    increment_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "admin_read", (120, 60))
+    return await payroll_increments.get_increment(session, actor, increment_id)
+
+
+@admin_router.post("/employees/{user_id}/increments", status_code=201)
+async def create_increment(
+    user_id: uuid.UUID,
+    body: IncrementCreate,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "write", (60, 60), closed=True)
+    return await payroll_increments.create_increment(session, actor, user_id, body)
+
+
+@admin_router.put("/increments/{increment_id}")
+async def update_increment(
+    increment_id: uuid.UUID,
+    body: IncrementUpdate,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "write", (60, 60), closed=True)
+    return await payroll_increments.update_increment(session, actor, increment_id, body)
+
+
+@admin_router.post("/increments/{increment_id}/submit")
+async def submit_increment(
+    increment_id: uuid.UUID,
+    body: VersionIn,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "write", (60, 60), closed=True)
+    return await payroll_increments.submit_increment(session, redis, actor, increment_id, body)
+
+
+@admin_router.post("/increments/{increment_id}/withdraw")
+async def withdraw_increment(
+    increment_id: uuid.UUID,
+    body: VersionIn,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "write", (60, 60), closed=True)
+    return await payroll_increments.withdraw_increment(session, actor, increment_id, body)
+
+
+@admin_router.post("/increments/{increment_id}/approve")
+async def approve_increment(
+    increment_id: uuid.UUID,
+    body: IncrementApprove,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(APPROVE),
+):
+    await pc.limit(redis, actor, "action", (10, 60), closed=True)
+    return await payroll_increments.approve_increment(session, redis, actor, increment_id, body)
+
+
+@admin_router.post("/increments/{increment_id}/reject")
+async def reject_increment(
+    increment_id: uuid.UUID,
+    body: IncrementReject,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(APPROVE),
+):
+    await pc.limit(redis, actor, "action", (10, 60), closed=True)
+    return await payroll_increments.reject_increment(session, actor, increment_id, body)
+
+
+@admin_router.post("/increments/{increment_id}/cancel")
+async def cancel_increment(
+    increment_id: uuid.UUID,
+    body: ReasonIn,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "write", (60, 60), closed=True)
+    return await payroll_increments.cancel_increment(session, actor, increment_id, body.reason)
+
+
+@admin_router.get("/employees/{user_id}/salary-history")
+async def salary_history(
+    user_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "admin_read", (120, 60))
+    return await payroll_increments.salary_history(session, actor, user_id)

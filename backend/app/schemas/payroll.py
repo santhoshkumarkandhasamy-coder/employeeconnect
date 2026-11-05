@@ -94,8 +94,9 @@ class FixedDeductionIn(_Strict):
         return v
 
 
-class StructureIn(_Strict):
-    effective_from: dt.date
+class StructureBody(_Strict):
+    """A structure without its effective date (also the `structure` of an increment)."""
+
     basic: Money
     hra: Money = Decimal("0.00")
     allowances: list[AllowanceIn] = Field(default_factory=list, max_length=15)
@@ -107,13 +108,17 @@ class StructureIn(_Strict):
     pt_applicable: bool = True
 
     @model_validator(mode="after")
-    def _checks(self) -> StructureIn:
+    def _checks(self) -> StructureBody:
         if self.basic <= 0:
             raise ValueError("basic must be greater than 0")
         codes = [a.code for a in self.allowances] + [d.code for d in self.fixed_deductions]
         if len(set(codes)) != len(codes):
             raise ValueError("allowance and deduction codes must be unique")
         return self
+
+
+class StructureIn(StructureBody):
+    effective_from: dt.date
 
 
 _FORMATS = {
@@ -532,4 +537,139 @@ class OvertimeBulk(_Strict):
             raise ValueError("comment is required when rejecting")
         if len(set(self.ids)) != len(self.ids):
             raise ValueError("ids must be unique")
+        return self
+
+
+# ============================================================================================ plan 16 work package 4a
+IncrementMethod = Literal["proportional", "split_from_gross"]
+_INCREMENT_FIELDS = {
+    "percent": {"kind", "effective_from", "percent", "method", "reason"},
+    "amount": {"kind", "effective_from", "monthly_gross", "method", "reason"},
+    "structure": {"kind", "effective_from", "structure", "replaces_structure_id", "reason"},
+    "remove": {"kind", "replaces_structure_id", "reason"},
+}
+_INCREMENT_REQUIRED = {
+    "percent": {"effective_from", "percent", "method", "reason"},
+    "amount": {"effective_from", "monthly_gross", "method", "reason"},
+    "structure": {"effective_from", "structure", "reason"},
+    "remove": {"replaces_structure_id", "reason"},
+}
+
+
+class IncrementCreate(_Strict):
+    """One body, four shapes (`kind`): fields that do not belong to the kind are refused (422)."""
+
+    kind: Literal["percent", "amount", "structure", "remove"]
+    effective_from: dt.date | None = None
+    percent: Money | None = None
+    monthly_gross: Money | None = None
+    method: IncrementMethod | None = None
+    structure: StructureBody | None = None
+    replaces_structure_id: uuid.UUID | None = None
+    reason: str
+
+    _r = field_validator("reason")(_reason)
+
+    @model_validator(mode="after")
+    def _shape(self) -> IncrementCreate:
+        sent = self.model_fields_set - {"expected_version"}
+        extra = sent - _INCREMENT_FIELDS[self.kind]
+        if extra:
+            raise ValueError(f"not allowed for kind {self.kind}: {', '.join(sorted(extra))}")
+        for name in _INCREMENT_REQUIRED[self.kind]:
+            if getattr(self, name) is None:
+                raise ValueError(f"{name} is required for kind {self.kind}")
+        return self
+
+
+class IncrementUpdate(IncrementCreate):
+    expected_version: int = Field(ge=1)
+
+
+class VersionIn(_Strict):
+    expected_version: int = Field(ge=1)
+
+
+class IncrementApprove(_Strict):
+    expected_version: int = Field(ge=1)
+    comment: str | None = None
+    current_password: SecretStr = Field(min_length=1, max_length=128)
+
+    @field_validator("comment")
+    @classmethod
+    def _c(cls, v: str | None) -> str | None:
+        return _reason(v) if v is not None else None
+
+
+class IncrementReject(_Strict):
+    expected_version: int = Field(ge=1)
+    comment: str
+
+    _c = field_validator("comment")(_reason)
+
+
+class EmptyIn(_Strict):
+    """`{}` (a body is required, nothing else is accepted)."""
+
+
+class BatchApprove(_Strict):
+    comment: str | None = None
+    current_password: SecretStr = Field(min_length=1, max_length=128)
+
+    @field_validator("comment")
+    @classmethod
+    def _c(cls, v: str | None) -> str | None:
+        return _reason(v) if v is not None else None
+
+
+class BatchReject(_Strict):
+    comment: str
+
+    _c = field_validator("comment")(_reason)
+
+
+class BulkScope(_Strict):
+    department_ids: list[uuid.UUID] | None = Field(default=None, max_length=100)
+    user_ids: list[uuid.UUID] | None = Field(default=None, max_length=500)
+    exclude_user_ids: list[uuid.UUID] = Field(default_factory=list, max_length=500)
+
+
+class BulkOverride(_Strict):
+    user_id: uuid.UUID
+    percent: Money
+
+
+class BulkIncrementCreate(_Strict):
+    effective_from: dt.date
+    percent: Money
+    method: IncrementMethod
+    reason: str
+    scope: BulkScope = Field(default_factory=BulkScope)
+    overrides: list[BulkOverride] = Field(default_factory=list, max_length=500)
+
+    _r = field_validator("reason")(_reason)
+
+    @model_validator(mode="after")
+    def _unique_overrides(self) -> BulkIncrementCreate:
+        ids = [o.user_id for o in self.overrides]
+        if len(set(ids)) != len(ids):
+            raise ValueError("overrides must name each employee once")
+        return self
+
+
+class ArrearsBulkItem(_Strict):
+    id: uuid.UUID
+    expected_version: int = Field(ge=1)
+
+
+class ArrearsBulkAccept(_Strict):
+    items: list[ArrearsBulkItem] = Field(min_length=1, max_length=200)
+    period: PeriodStr
+    current_password: SecretStr = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def _unique(self) -> ArrearsBulkAccept:
+        ids = [i.id for i in self.items]
+        if len(set(ids)) != len(ids):
+            raise ValueError("items must be unique")
         return self

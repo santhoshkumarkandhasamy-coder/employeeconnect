@@ -45,7 +45,18 @@ from app.core import security  # noqa: E402
 from app.core.db import get_session  # noqa: E402
 from app.core.redis import get_redis  # noqa: E402
 from app.main import create_app  # noqa: E402
-from app.models import Base, Company, Department, EmployeeProfile, Permission, Role, RolePermission, Shift, User  # noqa: E402
+from app.models import (  # noqa: E402
+    Base,
+    Company,
+    Department,
+    EmployeeProfile,
+    Permission,
+    Role,
+    RolePermission,
+    Setting,
+    Shift,
+    User,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 TABLES = [
@@ -75,6 +86,8 @@ TABLES = [
     "announcement_departments",
     "announcement_reads",
     "food_enrollments",
+    "salary_increment_batches",
+    "salary_increments",
     "salary_structures",
     "employee_payroll_details",
     "payroll_runs",
@@ -148,6 +161,10 @@ def _adapt_metadata_for_sqlite() -> None:
     ot_flags.type = JSON()
     ot_flags.server_default = None
     ot_flags.default = ColumnDefault(list)
+    inc_warn = Base.metadata.tables["salary_increments"].c.warnings  # text[] in Postgres
+    inc_warn.type = JSON()
+    inc_warn.server_default = None
+    inc_warn.default = ColumnDefault(list)
     wd = Base.metadata.tables["shifts"].c.working_days
     wd.type = JSON()
     wd.server_default = None
@@ -192,8 +209,13 @@ async def sessionmaker_(engine):
 
 
 @pytest_asyncio.fixture
-async def seeded(sessionmaker_):
-    """Roles + the real permission catalogue/mapping from database/seed.py, one user per role."""
+async def seeded(sessionmaker_, request):
+    """Roles + the real permission catalogue/mapping from database/seed.py, one user per role.
+
+    Plan 16 F2: `payroll.structure_changes_need_approval` defaults to TRUE, which closes the direct structure endpoints for
+    every structure after the first. The phase 1-3 suites predate that rule and add several structures directly, so they
+    run with the switch OFF (the documented 'today's behaviour'); tests of the rule itself use `@pytest.mark.approval_on`.
+    """
     seed = _load_seed_module()
     async with sessionmaker_() as s:
         roles = {}
@@ -211,6 +233,8 @@ async def seeded(sessionmaker_):
             for role_name in holders:
                 s.add(RolePermission(role_id=roles[role_name].id, permission_id=perms[code].id))
         s.add(Company(id=1))  # singleton created by migration 0017; the seat lock needs it
+        if request.node.get_closest_marker("approval_on") is None:
+            s.add(Setting(key="payroll.structure_changes_need_approval", value=False))
         dept = Department(name="General", code="GEN")
         shift = Shift(
             name="General Shift",

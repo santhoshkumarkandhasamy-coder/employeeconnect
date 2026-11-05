@@ -42,9 +42,13 @@ class SalaryStructure(TimestampMixin, Base):
         UniqueConstraint("user_id", "effective_from", name="uq_salary_structures_user_effective"),
         CheckConstraint("extract(day from effective_from) = 1", name="ck_salary_structures_first_of_month"),
         CheckConstraint("effective_from BETWEEN DATE '2000-01-01' AND DATE '2200-12-31'", name="ck_salary_structures_year"),
+        CheckConstraint("source IN ('manual','increment','import')", name="ck_salary_structures_source"),
+        CheckConstraint("(source = 'increment') = (increment_id IS NOT NULL)", name="ck_salary_structures_increment"),
         Index("ix_salary_structures_user_effective", "user_id", text("effective_from DESC")),
         Index("ix_salary_structures_created_by", "created_by"),
         Index("ix_salary_structures_updated_by", "updated_by"),
+        Index("ix_salary_structures_increment_id", "increment_id"),
+        Index("ix_salary_structures_import_batch_id", "import_batch_id"),
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
@@ -55,7 +59,127 @@ class SalaryStructure(TimestampMixin, Base):
     pf_on_full_basic: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     esi_applicable: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     pt_applicable: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    source: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'manual'"))  # migration 0024
+    # circular with salary_increments.structure_id: use_alter keeps create_all (test harness) able to order the two tables
+    increment_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("salary_increments.id", ondelete="RESTRICT", use_alter=True, name="fk_salary_structures_increment_id"),
+    )
+    import_batch_id: Mapped[uuid.UUID | None] = fk_uuid("salary_increment_batches.id", nullable=True)
     created_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+    updated_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+
+
+class SalaryIncrementBatch(Base):
+    """One bulk hike (`percent`) or one committed structure import (`import`). Migration 0024."""
+
+    __tablename__ = "salary_increment_batches"
+    __table_args__ = (
+        CheckConstraint("kind IN ('percent','import')", name="ck_salary_increment_batches_kind"),
+        CheckConstraint("method IS NULL OR method IN ('proportional','split_from_gross')", name="ck_salary_increment_batches_method"),
+        CheckConstraint("effective_from IS NULL OR extract(day from effective_from) = 1", name="ck_salary_increment_batches_effective_first"),
+        CheckConstraint(
+            "effective_from IS NULL OR effective_from BETWEEN DATE '2000-01-01' AND DATE '2200-12-31'",
+            name="ck_salary_increment_batches_effective_year",
+        ),
+        CheckConstraint("file_sha256 IS NULL OR file_sha256 ~ '^[0-9a-f]{64}$'", name="ck_salary_increment_batches_sha256"),
+        CheckConstraint("(kind = 'import') = (file_sha256 IS NOT NULL)", name="ck_salary_increment_batches_import_sha"),
+        CheckConstraint(
+            "kind <> 'percent' OR (effective_from IS NOT NULL AND percent_enc IS NOT NULL AND method IS NOT NULL)",
+            name="ck_salary_increment_batches_percent_fields",
+        ),
+        CheckConstraint("rows BETWEEN 1 AND 500", name="ck_salary_increment_batches_rows"),
+        CheckConstraint("(cancelled_at IS NULL) = (cancelled_by IS NULL)", name="ck_salary_increment_batches_cancelled"),
+        Index("uq_salary_increment_batches_import_sha", "file_sha256", unique=True, postgresql_where=text("kind = 'import'")),
+        Index("ix_salary_increment_batches_created", "kind", "created_at"),
+        Index("ix_salary_increment_batches_created_by", "created_by"),
+        Index("ix_salary_increment_batches_cancelled_by", "cancelled_by"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    effective_from: Mapped[dt.date | None] = mapped_column(Date)
+    percent: Mapped[str | None] = mapped_column("percent_enc", EncryptedString)
+    method: Mapped[str | None] = mapped_column(Text)
+    file_sha256: Mapped[str | None] = mapped_column(Text)
+    rows: Mapped[int] = mapped_column(Integer, nullable=False)
+    reason: Mapped[str] = mapped_column("reason_enc", EncryptedString, nullable=False)
+    created_by: Mapped[uuid.UUID] = fk_uuid("users.id")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    cancelled_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+
+
+class SalaryIncrement(TimestampMixin, Base):
+    """A proposed salary change (maker-checker). `proposed` = StructureIn without effective_from (NULL for `remove`).
+    Migration 0024; the DB repeats the maker-checker rule in ck_salary_increments_checker."""
+
+    __tablename__ = "salary_increments"
+    __table_args__ = (
+        CheckConstraint("kind IN ('percent','amount','structure','remove','import')", name="ck_salary_increments_kind"),
+        CheckConstraint("method IS NULL OR method IN ('proportional','split_from_gross')", name="ck_salary_increments_method"),
+        CheckConstraint("extract(day from effective_from) = 1", name="ck_salary_increments_effective_first"),
+        CheckConstraint("effective_from BETWEEN DATE '2000-01-01' AND DATE '2200-12-31'", name="ck_salary_increments_effective_year"),
+        CheckConstraint("status IN ('draft','submitted','approved','rejected','cancelled')", name="ck_salary_increments_status"),
+        CheckConstraint(
+            "warnings <@ ARRAY['BACKDATED','TDS_REVIEW','DECREASE','LARGE_CHANGE','ESI_THRESHOLD_CROSSED','PF_CEILING_CROSSED',"
+            "'NO_CHANGE']::text[]",
+            name="ck_salary_increments_warnings",
+        ),
+        CheckConstraint("(kind = 'remove') = (proposed_enc IS NULL)", name="ck_salary_increments_remove"),
+        CheckConstraint("kind <> 'percent' OR (percent_enc IS NOT NULL AND method IS NOT NULL)", name="ck_salary_increments_percent_fields"),
+        CheckConstraint("created_by <> user_id", name="ck_salary_increments_maker_not_employee"),
+        CheckConstraint("(submitted_by IS NULL) = (submitted_at IS NULL)", name="ck_salary_increments_submitted"),
+        CheckConstraint("(decided_by IS NULL) = (decided_at IS NULL)", name="ck_salary_increments_decided_pair"),
+        CheckConstraint("status NOT IN ('approved','rejected') OR decided_by IS NOT NULL", name="ck_salary_increments_decided_status"),
+        CheckConstraint("status NOT IN ('submitted','approved') OR submitted_by IS NOT NULL", name="ck_salary_increments_live_submitted"),
+        CheckConstraint("status <> 'rejected' OR decision_comment_enc IS NOT NULL", name="ck_salary_increments_rejected_comment"),
+        CheckConstraint(
+            "status <> 'approved' OR (decided_by IS NOT NULL AND decided_by <> user_id AND decided_by IS DISTINCT FROM created_by "
+            "AND decided_by IS DISTINCT FROM submitted_by)",
+            name="ck_salary_increments_checker",
+        ),
+        CheckConstraint("version >= 1", name="ck_salary_increments_version"),
+        Index(
+            "uq_salary_increments_live", "user_id", "effective_from", unique=True,
+            postgresql_where=text("status IN ('draft','submitted')"),
+        ),  # fmt: skip
+        Index("ix_salary_increments_status_created", "status", "created_at"),
+        Index("ix_salary_increments_batch_id", "batch_id"),
+        Index("ix_salary_increments_user_created", "user_id", "created_at"),
+        Index("ix_salary_increments_base_structure_id", "base_structure_id"),
+        Index("ix_salary_increments_replaces_structure_id", "replaces_structure_id"),
+        Index("ix_salary_increments_structure_id", "structure_id"),
+        Index("ix_salary_increments_submitted_by", "submitted_by"),
+        Index("ix_salary_increments_decided_by", "decided_by"),
+        Index("ix_salary_increments_created_by", "created_by"),
+        Index("ix_salary_increments_updated_by", "updated_by"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    user_id: Mapped[uuid.UUID] = fk_uuid("users.id")
+    batch_id: Mapped[uuid.UUID | None] = fk_uuid("salary_increment_batches.id", nullable=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    effective_from: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    method: Mapped[str | None] = mapped_column(Text)
+    percent: Mapped[str | None] = mapped_column("percent_enc", EncryptedString)
+    base_structure_id: Mapped[uuid.UUID | None] = fk_uuid("salary_structures.id", ondelete="SET NULL", nullable=True)
+    base_updated_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    replaces_structure_id: Mapped[uuid.UUID | None] = fk_uuid("salary_structures.id", ondelete="SET NULL", nullable=True)
+    proposed: Mapped[dict | None] = mapped_column("proposed_enc", EncryptedJSON)
+    old_gross: Mapped[str | None] = mapped_column("old_gross_enc", EncryptedString)
+    new_gross: Mapped[str | None] = mapped_column("new_gross_enc", EncryptedString)
+    warnings: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default=text("'{}'"))
+    reason: Mapped[str] = mapped_column("reason_enc", EncryptedString, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'draft'"))
+    submitted_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+    submitted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    decided_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+    decided_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    decision_comment: Mapped[str | None] = mapped_column("decision_comment_enc", EncryptedString)
+    structure_id: Mapped[uuid.UUID | None] = fk_uuid("salary_structures.id", ondelete="SET NULL", nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    created_by: Mapped[uuid.UUID] = fk_uuid("users.id")
     updated_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
 
 

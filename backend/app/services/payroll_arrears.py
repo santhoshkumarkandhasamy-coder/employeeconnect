@@ -27,7 +27,7 @@ from ..core.errors import AppError
 from ..core.pagination import PageParams, make_page
 from ..core.rbac import Principal
 from ..models import PayrollArrears, PayrollRun, Payslip, SalaryStructure
-from ..schemas.payroll import ArrearsAccept
+from ..schemas.payroll import ArrearsAccept, ArrearsBulkAccept
 from . import admin_security
 from . import payroll_calc as calc
 from . import payroll_common as pc
@@ -316,6 +316,69 @@ async def accept(
           after={"user_id": str(row.user_id), "period": pc.period_str(target), "run_status": run_status})  # fmt: skip
     await pc.commit(session)
     return await _one(session, arrears_id)
+
+
+async def bulk_accept(session: AsyncSession, redis: Redis, actor: Principal, body: ArrearsBulkAccept) -> dict[str, Any]:
+    """Plan 16 / contract 18.7: the 17.4 accept for up to 200 proposals in ONE transaction. One step-up, run row first, then the
+    employees, then the arrears rows (global lock order). A row that fails a check is skipped with its reason; the others go on."""
+    today = await runs._today(session)
+    target = comps.parse_target_period(body.period, today)
+    await admin_security.require_reauth(session, redis, actor, body.current_password, action="payroll.arrears.bulk_accept")
+    wanted = {i.id: i.expected_version for i in body.items}
+    peek = list((await session.execute(select(PayrollArrears).where(PayrollArrears.id.in_(list(wanted))))).scalars())
+    skipped: list[dict[str, str]] = []
+    found = {r.id: r for r in peek}
+    for rid in wanted:
+        if rid not in found:
+            skipped.append({"id": str(rid), "reason": "NOT_FOUND"})
+    await items_svc._lock_runs(session, [target])  # run row first (P7)
+    mine = [r for r in found.values() if r.user_id != actor.id]
+    for r in found.values():
+        if r.user_id == actor.id:
+            skipped.append({"id": str(r.id), "reason": "FORBIDDEN"})
+    await items_svc._lock_users(session, [r.user_id for r in mine])
+    q = (
+        select(PayrollArrears).where(PayrollArrears.id.in_([r.id for r in mine])).order_by(PayrollArrears.id)
+        .with_for_update().execution_options(populate_existing=True)
+    )  # fmt: skip
+    rows = list((await session.execute(q)).scalars()) if mine else []
+    counts = await comps.live_counts(session, list({r.user_id for r in rows}), target) if rows else {}
+    accepted = 0
+    for row in rows:
+        reason: str | None = None
+        if row.status in PAID_STATES:
+            reason = "ITEM_LOCKED"
+        elif row.status != "proposed":
+            reason = "NOT_PROPOSED"
+        elif row.version != wanted[row.id]:
+            reason = "ARREARS_STALE"
+        else:
+            try:
+                await items_svc._eligible_user(session, row.user_id, target)
+            except AppError:
+                reason = "NOT_ELIGIBLE"
+        if reason is None:
+            try:
+                await comps.check_target_period(session, [row.user_id], target)
+            except AppError:
+                reason = "PERIOD_LOCKED"
+        if reason is None:
+            try:
+                comps.check_caps(counts[row.user_id])
+            except AppError:
+                reason = "TOO_MANY_ITEMS"
+        if reason is not None:
+            skipped.append({"id": str(row.id), "reason": reason})
+            continue
+        row.status, row.period, row.updated_by, row.version = "pending", target, actor.id, row.version + 1
+        counts[row.user_id]["total"] += 1
+        accepted += 1
+        await pc.flush(session)
+        comps.add_event(session, item_type="arrears", item=row, action="accept", actor_id=actor.id)
+    audit(session, action="payroll.arrears.bulk_accept", actor=actor, entity_type=ENTITY, entity_id=None,
+          after={"period": pc.period_str(target), "accepted": accepted, "skipped": len(skipped)})  # fmt: skip
+    await pc.commit(session)
+    return {"accepted": accepted, "skipped": skipped}
 
 
 async def dismiss(session: AsyncSession, actor: Principal, arrears_id: uuid.UUID, reason: str) -> dict[str, Any]:

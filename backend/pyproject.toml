@@ -8,6 +8,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
 filterwarnings = ["ignore::DeprecationWarning"]
+markers = ["approval_on: run with payroll.structure_changes_need_approval ON (the production default, plan 16 F2)"]
 
 [tool.ruff]
 line-length = 130

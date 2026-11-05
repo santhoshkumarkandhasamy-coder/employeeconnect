@@ -1624,3 +1624,24 @@ Best effort, after commit.
 422: `INVALID_PERCENT`, `AFTER_EXIT`, `NO_CHANGE`, `LOAN_UNRESOLVED`, `TOO_MANY_ROWS`.
 Reused: `SECOND_PERSON_REQUIRED`, `STRUCTURE_EXISTS`, `STRUCTURE_IN_USE`, `STRUCTURE_MISSING` (422), `VERSION_CONFLICT`, `PERIOD_LOCKED`, `ITEM_LOCKED`, `TOO_MANY_ITEMS`, `INSUFFICIENT_BALANCE`, `NOT_ENCASHABLE`,
 `LOAN_NOT_ACTIVE`, `ARREARS_STALE`, `NOT_PROPOSED`, `IMPORT_*` (17.2), `FILE_TYPE_NOT_ALLOWED`, `FILE_TOO_LARGE`, `INVALID_PERIOD`, `INVALID_DATE`, `REAUTH_FAILED`, `FORBIDDEN`, `RATE_LIMITED`, `TEMPORARILY_UNAVAILABLE`.
+
+
+### 18.13 Implementation notes, work package 4a step 1 (increments, batches, arrears bulk accept, F2) - IMPLEMENTED
+Where the backend refines the text above (Flutter should follow these):
+- **Approve response** `arrears_proposed` is `true` when an arrears proposal exists after the approval, otherwise `null` (never `false`); it is `null` on every other read.
+- **Batch submit** `skipped[].reason` can also be `FORBIDDEN` (the caller is the employee of that row; the row stays `draft`). Rows of a batch that were cancelled are not reported.
+- **Batch approve** on a batch with no `submitted` row answers 200 `{ "approved":0, "failed":[], "arrears_proposed":0 }`. `failed[].reason` is the error code of the failed check (`INCREMENT_STALE`, `STRUCTURE_EXISTS`,
+  `LATER_STRUCTURE_EXISTS`, `STRUCTURE_IN_USE`, `AFTER_EXIT`, `SECOND_PERSON_REQUIRED`, `FORBIDDEN`). A caller who is the batch creator fails every row with `SECOND_PERSON_REQUIRED`.
+- **Batch reject** answers 403 `SECOND_PERSON_REQUIRED` for the batch creator or any row's creator / submitter; rows whose employee is the caller stay `submitted` (not counted in `rejected`).
+- **Batch cancel** sets `cancelled_at` only when no row is left that could not be cancelled (`not_cancelled` = 0); rows of the caller as employee count as not cancelled.
+- **Bulk hike** `scope`: `user_ids` given = exactly those employees (not eligible -> `NOT_ELIGIBLE`, no structure -> `NO_STRUCTURE`, the caller -> `SELF`); `user_ids` null = every active employee included in payroll WITH a structure
+  (others are silently not part of the scope). Unknown ids -> 404. `department_ids` and `user_ids` together intersect. Every `overrides[].user_id` must belong to the scope (else 422) and its percent is capped like the batch percent
+  (422 `INVALID_PERCENT`, `details[].field` = `overrides[i].percent`). When no employee qualifies the call is 422 `VALIDATION_ERROR` (no empty batch is created).
+- **Salary history / lists**: an increment of kind `remove` has `proposed: null`, `diff: []` and `change.new_gross/amount/percent: null`.
+- **Edit**: the month of a bulk row is fixed by its batch (422 `VALIDATION_ERROR`, field `effective_from`); `kind` cannot change (422, field `kind`).
+- **Remove / replace** do not apply the "at most `increment_backdate_months` back" rule (they correct an existing structure); the 12-months-ahead rule still applies to replace. A replace updates the structure row IN PLACE
+  (same id, `source` becomes `increment`), so draft payslips keep pointing at it; a remove deletes the row.
+- **Audit** rows of increments carry `user_id` as well (`after = { user_id, kind, effective_from, status, maker_id, checker_id, structure_id }`). The setting change audit of `payroll.structure_changes_need_approval` follows `payroll.settings.update`.
+- **F2 (18.1)** is evaluated BEFORE the in-use check: a first structure that a processed / published payslip uses can no longer be edited or deleted directly (409 `APPROVAL_REQUIRED`, was `STRUCTURE_IN_USE`); `STRUCTURE_IN_USE` stays
+  for the switch-off mode. Structure responses (13.4) and the employee list items are unchanged apart from `source` and `increment_id`.
+- **Not in step 1**: structure import (18.6), CTC calculator (18.2), gratuity (18.3) and everything marked [4b]. `kind: import` increments and `salary_increment_batches.kind = 'import'` exist in the schema for step 2.

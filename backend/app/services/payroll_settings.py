@@ -25,11 +25,13 @@ from ..core.rbac import Principal
 from ..core.text import clean_text
 from ..models import Setting
 from . import admin_security
-from .payroll_calc import money_str, parse_money
+from .payroll_calc import CODE_RE, RESERVED_CODES, money_str, parse_money
 
 PREFIX = "payroll."
 SECOND_PERSON_KEY = "payroll.publish_requires_second_person"
 SECOND_PERSON_PERMISSION = "role.assign"  # the maker-checker switch is an admin-level control, not a payroll.manage one
+APPROVAL_KEY = "payroll.structure_changes_need_approval"  # plan 16 F2: same control level as the second-person switch
+GUARDED_KEYS = (SECOND_PERSON_KEY, APPROVAL_KEY)  # change needs role.assign AND the caller's own password
 MAX_SLABS = 20
 MAX_CATEGORIES = 20
 _CATEGORY_CODE = re.compile(r"^[a-z][a-z0-9_]{1,19}$")
@@ -91,6 +93,18 @@ DEFAULTS: dict[str, Any] = {
     "payroll.overtime_max_hours_month": 50,
     "payroll.overtime_offday_full": True,
     "payroll.overtime_include_auto_closed": False,
+    # plan 16, work package 4a (increments, CTC calculator, gratuity accrual)
+    "payroll.structure_changes_need_approval": True,
+    "payroll.split_basic_pct": 50,
+    "payroll.split_hra_pct_of_basic": 40,
+    "payroll.split_allowance_code": "SPECIAL",
+    "payroll.split_allowance_name": "Special allowance",
+    "payroll.increment_max_pct": 50,
+    "payroll.increment_backdate_months": 12,
+    "payroll.ctc_include_gratuity": True,
+    "payroll.gratuity_min_years": 5,
+    "payroll.gratuity_cap": "2000000.00",
+    "payroll.gratuity_wage_basis": "basic",
 }
 
 _ENUMS = {
@@ -98,6 +112,7 @@ _ENUMS = {
     "payroll.pt_frequency": ("monthly", "half_yearly"),
     "payroll.rounding": ("rupee", "paise"),
     "payroll.encashment_basis": ("basic", "gross"),
+    "payroll.gratuity_wage_basis": ("basic", "basic_or_half_gross"),
 }
 _BOOLS = {
     "payroll.lop_absent_days",
@@ -109,6 +124,8 @@ _BOOLS = {
     "payroll.overtime_enabled",
     "payroll.overtime_offday_full",
     "payroll.overtime_include_auto_closed",
+    APPROVAL_KEY,
+    "payroll.ctc_include_gratuity",
 }
 _NUMBERS = {  # key -> (min, max), at most 2 decimals
     "payroll.pf_employee_rate_pct": (0, 20),
@@ -130,6 +147,11 @@ _INTS = {  # key -> (min, max), whole numbers
     "payroll.overtime_min_minutes": (0, 240),
     "payroll.overtime_rounding_minutes": (1, 60),
     "payroll.overtime_max_hours_month": (0, 300),
+    "payroll.split_basic_pct": (1, 100),
+    "payroll.split_hra_pct_of_basic": (0, 100),
+    "payroll.increment_max_pct": (1, 100),
+    "payroll.increment_backdate_months": (0, 24),
+    "payroll.gratuity_min_years": (0, 10),
 }
 _TEXTS = {"payroll.company_address": (0, 300), "payroll.payslip_footer": (0, 200)}
 
@@ -261,6 +283,27 @@ def validate(key: str, value: Any) -> Any:
         if len(v) > hi:
             raise _bad(key, f"at most {hi} characters")
         return v
+    if key == "payroll.split_allowance_code":
+        if not isinstance(value, str) or not CODE_RE.match(value):
+            raise _bad(key, "must match ^[A-Z][A-Z0-9_]{1,15}$")
+        if value in RESERVED_CODES:
+            raise _bad(key, "this code is reserved")
+        return value
+    if key == "payroll.split_allowance_name":
+        if not isinstance(value, str):
+            raise _bad(key, "must be text")
+        v = clean_text(value)
+        if not 1 <= len(v) <= 40:
+            raise _bad(key, "must be 1-40 characters")
+        return v
+    if key == "payroll.gratuity_cap":
+        try:
+            cap = parse_money(value)
+        except ValueError as exc:
+            raise _bad(key, str(exc)) from None
+        if cap <= 0:
+            raise _bad(key, "must be greater than 0")
+        return money_str(cap)
     if key == "payroll.pt_slabs":
         return _validate_slabs(key, value)
     if key == "payroll.reimbursement_categories":
@@ -297,12 +340,14 @@ async def update(
     redis: Redis,
     current_password: SecretStr | None = None,
 ) -> dict[str, Any]:
-    """Merge validated settings. Changing `payroll.publish_requires_second_person` (either direction) additionally needs the
-    `role.assign` permission AND the caller's own password (`current_password`); other keys do not."""
+    """Merge validated settings. Changing `payroll.publish_requires_second_person` or `payroll.structure_changes_need_approval`
+    (either direction) additionally needs the `role.assign` permission AND the caller's own password (`current_password`);
+    other keys do not. A change of the approval switch alerts the `role.assign` holders after the commit."""
     changes = {k: validate(k, v) for k, v in changes.items()}
-    if SECOND_PERSON_KEY in changes and changes[SECOND_PERSON_KEY] != await current_value(session, SECOND_PERSON_KEY):
+    guarded = [k for k in GUARDED_KEYS if k in changes and changes[k] != await current_value(session, k)]
+    if guarded:
         if not actor.has(SECOND_PERSON_PERMISSION):
-            raise AppError("FORBIDDEN", "You do not have permission to change the second-person publish rule")
+            raise AppError("FORBIDDEN", "You do not have permission to change this payroll control")
         await admin_security.require_reauth(session, redis, actor, current_password, action="payroll.settings.second_person")
     rows = {r.key: r for r in (await session.execute(select(Setting).where(Setting.key.in_(list(changes))))).scalars()}
     log_changes: list[dict[str, Any]] = []
@@ -331,4 +376,9 @@ async def update(
             session, action="payroll.settings.update", actor=actor, entity_type="payroll_settings", after={"changes": log_changes}
         )
     await session.commit()
+    if APPROVAL_KEY in guarded:  # best effort, after commit; names only, never the new value
+        await admin_security.notify_admins(
+            session, entity_id=actor.id, title="Payroll control changed",
+            body=f"{actor.user.full_name} ({actor.employee_id}) changed the salary approval rule.",
+        )  # fmt: skip
     return await read_all(session)

@@ -20,6 +20,7 @@ from ..schemas.payroll import DetailsIn, StructureIn
 from . import admin_security
 from . import attendance as att
 from . import payroll_common as pc
+from . import payroll_settings as pset
 from .payroll_calc import StructureData, money_str, structure_for
 
 DETAIL_FIELDS = (
@@ -111,6 +112,8 @@ def structure_out(s: SalaryStructure, *, effective_to: dt.date | None, in_use: b
         "created_at": pc.iso(s.created_at),
         "created_by": pc.user_out(creator),
         "updated_at": pc.iso(s.updated_at),
+        "source": s.source,
+        "increment_id": str(s.increment_id) if s.increment_id else None,
     }
 
 
@@ -155,9 +158,33 @@ async def _one_out(session: AsyncSession, s: SalaryStructure) -> dict[str, Any]:
     raise AppError("NOT_FOUND", "Structure not found")
 
 
+async def _approval_required(session: AsyncSession) -> bool:
+    return bool(await pset.current_value(session, pset.APPROVAL_KEY))
+
+
+def _needs_increment() -> AppError:
+    return AppError("APPROVAL_REQUIRED", "Use an increment: salary changes after the first structure need a second person's approval")
+
+
+async def _gate_existing(session: AsyncSession, s: SalaryStructure) -> None:
+    """Plan 16 F2. While `payroll.structure_changes_need_approval` is on, PUT / DELETE only reach the employee's ONLY structure,
+    and only while it is a manual one that no processed or published payslip uses; everything else goes through an increment."""
+    if not await _approval_required(session):
+        return
+    others = (
+        await session.execute(select(exists().where(SalaryStructure.user_id == s.user_id, SalaryStructure.id != s.id)))
+    ).scalar()
+    if others or s.source != "manual" or await _in_use(session, s.id):
+        raise _needs_increment()
+
+
 async def create_structure(session: AsyncSession, actor: Principal, user_id: uuid.UUID, body: StructureIn) -> dict[str, Any]:
     await get_user_or_404(session, user_id)
     await pc.forbid_self(session, actor, user_id, entity_type="salary_structure", entity_id=None)
+    if await _approval_required(session) and (
+        await session.execute(select(exists().where(SalaryStructure.user_id == user_id)))
+    ).scalar():
+        raise _needs_increment()  # only the FIRST structure of an employee is created directly (plan 16 F2)
     _check_effective(body.effective_from)
     taken = (
         await session.execute(
@@ -213,6 +240,7 @@ async def _structure_or_404(session: AsyncSession, structure_id: uuid.UUID) -> S
 async def update_structure(session: AsyncSession, actor: Principal, structure_id: uuid.UUID, body: StructureIn) -> dict[str, Any]:
     s = await _structure_or_404(session, structure_id)
     await pc.forbid_self(session, actor, s.user_id, entity_type="salary_structure", entity_id=s.id)
+    await _gate_existing(session, s)
     if await _in_use(session, s.id):
         raise AppError("STRUCTURE_IN_USE", "This structure is used by a processed or published payslip; add a new one instead")
     _check_effective(body.effective_from)
@@ -255,6 +283,7 @@ async def update_structure(session: AsyncSession, actor: Principal, structure_id
 async def delete_structure(session: AsyncSession, actor: Principal, structure_id: uuid.UUID) -> None:
     s = await _structure_or_404(session, structure_id)
     await pc.forbid_self(session, actor, s.user_id, entity_type="salary_structure", entity_id=s.id)
+    await _gate_existing(session, s)
     if await _in_use(session, s.id):
         raise AppError("STRUCTURE_IN_USE", "This structure is used by a processed or published payslip")
     if (await session.execute(select(exists().where(Payslip.structure_id == s.id)))).scalar():
