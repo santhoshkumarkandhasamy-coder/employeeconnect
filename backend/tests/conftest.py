@@ -88,6 +88,8 @@ TABLES = [
     "payroll_loan_installments",
     "payroll_arrears",
     "leave_encashments",
+    "reimbursement_claims",
+    "overtime_days",
     "duty_locations",
     "duty_location_assignments",
     "on_duty_requests",
@@ -142,6 +144,10 @@ def _adapt_metadata_for_sqlite() -> None:
     Base.metadata.tables["payslips"].c.warnings.type = JSON()  # text[] in Postgres
     Base.metadata.tables["payslips"].c.warnings.server_default = None
     Base.metadata.tables["payslips"].c.warnings.default = ColumnDefault(list)
+    ot_flags = Base.metadata.tables["overtime_days"].c.flags  # text[] in Postgres
+    ot_flags.type = JSON()
+    ot_flags.server_default = None
+    ot_flags.default = ColumnDefault(list)
     wd = Base.metadata.tables["shifts"].c.working_days
     wd.type = JSON()
     wd.server_default = None

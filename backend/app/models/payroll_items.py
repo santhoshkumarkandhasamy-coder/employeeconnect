@@ -25,7 +25,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..core.crypto import EncryptedJSON, EncryptedString
@@ -182,8 +182,7 @@ class PayrollLoan(TimestampMixin, Base):
 class PayrollLoanInstallment(TimestampMixin, Base):
     __tablename__ = "payroll_loan_installments"
     __table_args__ = (
-        UniqueConstraint("loan_id", "seq", name="uq_payroll_loan_installments_loan_seq"),
-        CheckConstraint("seq BETWEEN 1 AND 120", name="ck_payroll_loan_installments_seq"),
+        CheckConstraint("seq >= 1", name="ck_payroll_loan_installments_seq"),
         CheckConstraint("extract(day from period) = 1", name="ck_payroll_loan_installments_period_first"),
         CheckConstraint(f"period {PERIOD_BOUNDS}", name="ck_payroll_loan_installments_period_year"),
         CheckConstraint("kind IN ('emi','foreclosure')", name="ck_payroll_loan_installments_kind"),
@@ -199,6 +198,13 @@ class PayrollLoanInstallment(TimestampMixin, Base):
             unique=True,
             postgresql_where=text("status IN ('pending','processing','paid')"),
         ),  # fmt: skip
+        Index(
+            "uq_payroll_loan_installments_live_seq",
+            "loan_id",
+            "seq",
+            unique=True,
+            postgresql_where=text("status NOT IN ('cancelled','skipped')"),
+        ),  # fmt: skip  (migration 0023: numbers are unique among live installments only)
         Index("ix_payroll_loan_installments_user_period", "user_id", "period", "status"),
         Index("ix_payroll_loan_installments_payslip_id", "payslip_id"),
         Index("ix_payroll_loan_installments_created_by", "created_by"),
@@ -292,6 +298,121 @@ class LeaveEncashment(TimestampMixin, Base):
     source: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'request'"))
     reason: Mapped[str | None] = mapped_column("reason_enc", EncryptedString)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
+    payslip_id: Mapped[uuid.UUID | None] = fk_uuid("payslips.id", nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    created_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+    updated_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+
+
+class ReimbursementClaim(TimestampMixin, Base):
+    """Expense claim (migration 0023). Two-step approval: the reporting manager verifies (`manager_step`), HR approves the final
+    amount and the payout month. `approved` is the payable state of the component engine; `period` is the payout month."""
+
+    __tablename__ = "reimbursement_claims"
+    __table_args__ = (
+        CheckConstraint("category ~ '^[a-z][a-z0-9_]{1,19}$'", name="ck_reimbursement_claims_category"),
+        CheckConstraint(
+            "status IN ('submitted','verified','approved','processing','paid','rejected','cancelled')",
+            name="ck_reimbursement_claims_status",
+        ),
+        CheckConstraint("manager_step IN ('pending','done','skipped')", name="ck_reimbursement_claims_manager_step"),
+        CheckConstraint("period IS NULL OR extract(day from period) = 1", name="ck_reimbursement_claims_period_first"),
+        CheckConstraint(f"period IS NULL OR period {PERIOD_BOUNDS}", name="ck_reimbursement_claims_period_year"),
+        CheckConstraint(
+            "status NOT IN ('approved','processing','paid') OR (period IS NOT NULL AND approved_amount_enc IS NOT NULL)",
+            name="ck_reimbursement_claims_payable",
+        ),
+        CheckConstraint(PAYSLIP_RULE, name="ck_reimbursement_claims_payslip"),
+        CheckConstraint("(verifier_id IS NULL) = (verified_at IS NULL)", name="ck_reimbursement_claims_verified"),
+        CheckConstraint("(approver_id IS NULL) = (decided_at IS NULL)", name="ck_reimbursement_claims_decided"),
+        CheckConstraint("status <> 'rejected' OR decision_comment_enc IS NOT NULL", name="ck_reimbursement_claims_rejected"),
+        CheckConstraint("version >= 1", name="ck_reimbursement_claims_version"),
+        Index(
+            "uq_reimbursement_claims_live_bill",
+            "bill_file_id",
+            unique=True,
+            postgresql_where=text("bill_file_id IS NOT NULL AND status NOT IN ('rejected','cancelled')"),
+        ),  # fmt: skip
+        Index("ix_reimbursement_claims_user_status", "user_id", "status"),
+        Index("ix_reimbursement_claims_status_created", "status", "created_at"),
+        Index("ix_reimbursement_claims_user_period", "user_id", "period", "status"),
+        Index("ix_reimbursement_claims_verifier_id", "verifier_id"),
+        Index("ix_reimbursement_claims_approver_id", "approver_id"),
+        Index("ix_reimbursement_claims_payslip_id", "payslip_id"),
+        Index("ix_reimbursement_claims_created_by", "created_by"),
+        Index("ix_reimbursement_claims_updated_by", "updated_by"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    user_id: Mapped[uuid.UUID] = fk_uuid("users.id")
+    category: Mapped[str] = mapped_column(Text, nullable=False)
+    expense_date: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    amount: Mapped[str] = mapped_column("amount_enc", EncryptedString, nullable=False)  # claimed
+    approved_amount: Mapped[str | None] = mapped_column("approved_amount_enc", EncryptedString)
+    description: Mapped[str] = mapped_column("description_enc", EncryptedString, nullable=False)
+    bill_file_id: Mapped[uuid.UUID | None] = fk_uuid("files.id", nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'submitted'"))
+    manager_step: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
+    verifier_id: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+    verified_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    approver_id: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+    decided_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    decision_comment: Mapped[str | None] = mapped_column("decision_comment_enc", EncryptedString)
+    period: Mapped[dt.date | None] = mapped_column(Date)  # payout month, set on approve
+    payslip_id: Mapped[uuid.UUID | None] = fk_uuid("payslips.id", nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    created_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+    updated_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+
+    @property
+    def event_amount(self) -> str:
+        """The amount the money history records: what is payable once approved, else what was claimed."""
+        return self.approved_amount if self.approved_amount is not None else self.amount
+
+
+class OvertimeDay(TimestampMixin, Base):
+    """Overtime minutes of one employee-day derived from attendance and reviewed by HR (migration 0023). Minutes are not money
+    (plaintext); `approved` is the payable state of the component engine."""
+
+    __tablename__ = "overtime_days"
+    __table_args__ = (
+        UniqueConstraint("user_id", "work_date", name="uq_overtime_days_user_date"),
+        CheckConstraint("period = work_date - (extract(day from work_date)::integer - 1)", name="ck_overtime_days_period"),
+        CheckConstraint(f"period {PERIOD_BOUNDS}", name="ck_overtime_days_period_year"),
+        CheckConstraint("computed_minutes BETWEEN 0 AND 1440", name="ck_overtime_days_computed"),
+        CheckConstraint(
+            "approved_minutes IS NULL OR (approved_minutes BETWEEN 0 AND 1440 AND approved_minutes <= computed_minutes)",
+            name="ck_overtime_days_approved",
+        ),
+        CheckConstraint(
+            "flags <@ ARRAY['AUTO_CLOSED','SUSPICIOUS','OFF_DAY','ATTENDANCE_CHANGED']::text[]", name="ck_overtime_days_flags"
+        ),
+        CheckConstraint("status IN ('computed','approved','rejected','processing','paid')", name="ck_overtime_days_status"),
+        CheckConstraint("status IN ('computed','rejected') OR approved_minutes IS NOT NULL", name="ck_overtime_days_minutes_set"),
+        CheckConstraint(PAYSLIP_RULE, name="ck_overtime_days_payslip"),
+        CheckConstraint("(reviewer_id IS NULL) OR (reviewed_at IS NOT NULL)", name="ck_overtime_days_reviewed"),
+        CheckConstraint("version >= 1", name="ck_overtime_days_version"),
+        Index("ix_overtime_days_period_status", "period", "status"),
+        Index("ix_overtime_days_user_period", "user_id", "period", "status"),
+        Index("ix_overtime_days_attendance_id", "attendance_id"),
+        Index("ix_overtime_days_reviewer_id", "reviewer_id"),
+        Index("ix_overtime_days_payslip_id", "payslip_id"),
+        Index("ix_overtime_days_created_by", "created_by"),
+        Index("ix_overtime_days_updated_by", "updated_by"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    user_id: Mapped[uuid.UUID] = fk_uuid("users.id")
+    work_date: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    period: Mapped[dt.date] = mapped_column(Date, nullable=False)  # first of the month of work_date
+    attendance_id: Mapped[uuid.UUID | None] = fk_uuid("attendance.id", ondelete="SET NULL", nullable=True)
+    computed_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    approved_minutes: Mapped[int | None] = mapped_column(Integer)
+    flags: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default=text("'{}'"))
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'computed'"))
+    reviewer_id: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+    reviewed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    comment: Mapped[str | None] = mapped_column("comment_enc", EncryptedString)
     payslip_id: Mapped[uuid.UUID | None] = fk_uuid("payslips.id", nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     created_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)

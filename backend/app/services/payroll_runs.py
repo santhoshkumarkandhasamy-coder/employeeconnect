@@ -192,6 +192,44 @@ def pull_days(ps: Payslip, user: User, ctx: pdays.DayContext, cutoff: dt.date, c
     return True
 
 
+def _hours_label(minutes: int) -> str:
+    return f"{(Decimal(minutes) / Decimal(60)).quantize(Decimal('0.01')):f}".rstrip("0").rstrip(".")
+
+
+def _finalize_overtime(ps: Payslip, user: User, basic: Decimal, cfg: dict, warns: list[str]) -> None:
+    """The OVERTIME line is pulled with the approved MINUTES only; its amount is computed here from the structure the payslip
+    adopts, the employee's shift and the run settings (plan 15 P10), so it always matches the payslip. The line is dropped
+    (its sources then stay `approved`) when overtime is off, the employee has no shift or the amount is zero."""
+    lines = (ps.inputs or {}).get("components", [])
+    if not any(c["code"] == "OVERTIME" for c in lines):
+        return
+    shift_min = calc.shift_length_minutes(user.shift.start_time, user.shift.end_time) if user.shift is not None else 0
+    out: list[dict] = []
+    for c in lines:
+        if c["code"] != "OVERTIME":
+            out.append(c)
+            continue
+        if not cfg.get("overtime_enabled", False):
+            continue
+        total = int(c.get("minutes_total", c.get("minutes", 0)))
+        amount, paid, capped = calc.overtime_amount(
+            basic, shift_min, total,
+            month_days=int(cfg.get("overtime_month_days", 26)),
+            multiplier=Decimal(str(cfg.get("overtime_multiplier", 2))),
+            max_hours=int(cfg.get("overtime_max_hours_month", 50)),
+            mode=cfg.get("rounding", "rupee"),
+        )  # fmt: skip
+        if amount <= 0:
+            continue
+        if capped:
+            warns.append("OVERTIME_CAPPED")
+        out.append({**c, "label": f"Overtime ({_hours_label(paid)} h)", "amount": calc.money_str(amount),
+                    "minutes": paid, "minutes_total": total})  # fmt: skip
+    inputs = copy.deepcopy(ps.inputs)
+    inputs["components"] = out
+    ps.inputs = inputs
+
+
 def recompute(
     ps: Payslip,
     *,
@@ -241,6 +279,7 @@ def recompute(
     else:
         rules = calc.Rules.from_config(cfg)
         data = data_of(chosen)
+        _finalize_overtime(ps, user, data.basic, cfg, warns)
         eligible = calc.esi_eligible([(e, data_of(s)) for e, s in structs], period, user.join_date, rules.esi_wage_threshold)
         res = calc.calculate(
             data, rules, period, Decimal(ps.basis_days), Decimal(ps.paid_days), _pay_inputs(ps.inputs),

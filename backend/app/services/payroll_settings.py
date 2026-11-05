@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -30,6 +31,8 @@ PREFIX = "payroll."
 SECOND_PERSON_KEY = "payroll.publish_requires_second_person"
 SECOND_PERSON_PERMISSION = "role.assign"  # the maker-checker switch is an admin-level control, not a payroll.manage one
 MAX_SLABS = 20
+MAX_CATEGORIES = 20
+_CATEGORY_CODE = re.compile(r"^[a-z][a-z0-9_]{1,19}$")
 
 DEFAULTS: dict[str, Any] = {
     "payroll.pay_days_basis": "calendar",
@@ -66,6 +69,28 @@ DEFAULTS: dict[str, Any] = {
     "payroll.loan_max_active": 3,
     "payroll.encashment_basis": "basic",
     "payroll.encashment_divisor": 30,
+    # plan 15, work package 3b (reimbursements, overtime). Overtime is OFF by default.
+    "payroll.reimbursement_categories": [
+        {"code": c, "name": n, "max_amount": None, "bill_required": True}
+        for c, n in (
+            ("travel", "Travel"),
+            ("food", "Food"),
+            ("medical", "Medical"),
+            ("phone", "Phone"),
+            ("internet", "Internet"),
+            ("other", "Other"),
+        )
+    ],
+    "payroll.reimbursement_max_age_days": 60,
+    "payroll.reimbursement_max_claims_per_month": 30,
+    "payroll.overtime_enabled": False,
+    "payroll.overtime_multiplier": 2,
+    "payroll.overtime_month_days": 26,
+    "payroll.overtime_min_minutes": 30,
+    "payroll.overtime_rounding_minutes": 30,
+    "payroll.overtime_max_hours_month": 50,
+    "payroll.overtime_offday_full": True,
+    "payroll.overtime_include_auto_closed": False,
 }
 
 _ENUMS = {
@@ -81,6 +106,9 @@ _BOOLS = {
     "payroll.employer_share_from_employee",
     "payroll.mask_pan",
     "payroll.publish_requires_second_person",
+    "payroll.overtime_enabled",
+    "payroll.overtime_offday_full",
+    "payroll.overtime_include_auto_closed",
 }
 _NUMBERS = {  # key -> (min, max), at most 2 decimals
     "payroll.pf_employee_rate_pct": (0, 20),
@@ -89,12 +117,19 @@ _NUMBERS = {  # key -> (min, max), at most 2 decimals
     "payroll.esi_wage_threshold": (0, 1_000_000),
     "payroll.esi_employee_rate_pct": (0, 10),
     "payroll.esi_employer_rate_pct": (0, 10),
+    "payroll.overtime_multiplier": (1, 3),
 }
 _DAYS = {"payroll.cutoff_day", "payroll.process_day", "payroll.pay_day"}  # day of month, 1..31
 _INTS = {  # key -> (min, max), whole numbers
     "payroll.loan_max_tenure_months": (1, 120),
     "payroll.loan_max_active": (1, 10),
     "payroll.encashment_divisor": (1, 31),
+    "payroll.reimbursement_max_age_days": (1, 365),
+    "payroll.reimbursement_max_claims_per_month": (1, 200),
+    "payroll.overtime_month_days": (20, 31),
+    "payroll.overtime_min_minutes": (0, 240),
+    "payroll.overtime_rounding_minutes": (1, 60),
+    "payroll.overtime_max_hours_month": (0, 300),
 }
 _TEXTS = {"payroll.company_address": (0, 300), "payroll.payslip_footer": (0, 200)}
 
@@ -151,6 +186,37 @@ def _validate_slabs(key: str, value: Any) -> list[dict]:
     return out
 
 
+def _validate_categories(key: str, value: Any) -> list[dict]:
+    if not isinstance(value, list) or len(value) > MAX_CATEGORIES:
+        raise _bad(key, f"must be a list of at most {MAX_CATEGORIES} categories")
+    out: list[dict] = []
+    seen: set[str] = set()
+    for i, c in enumerate(value):
+        if not isinstance(c, dict) or set(c) != {"code", "name", "max_amount", "bill_required"}:
+            raise _bad(key, f"category {i + 1}: expected code, name, max_amount, bill_required")
+        code, name = c["code"], c["name"]
+        if not isinstance(code, str) or not _CATEGORY_CODE.match(code):
+            raise _bad(key, f"category {i + 1}: code must match ^[a-z][a-z0-9_]{{1,19}}$")
+        if code in seen:
+            raise _bad(key, f"category {i + 1}: duplicate code")
+        seen.add(code)
+        if not isinstance(name, str):
+            raise _bad(key, f"category {i + 1}: name must be text")
+        name = clean_text(name)
+        if not 1 <= len(name) <= 40:
+            raise _bad(key, f"category {i + 1}: name must be 1-40 characters")
+        if not isinstance(c["bill_required"], bool):
+            raise _bad(key, f"category {i + 1}: bill_required must be true or false")
+        mx = c["max_amount"]
+        if mx is not None:
+            try:
+                mx = money_str(parse_money(mx))
+            except ValueError as exc:
+                raise _bad(key, f"category {i + 1}: max_amount {exc}") from None
+        out.append({"code": code, "name": name, "max_amount": mx, "bill_required": c["bill_required"]})
+    return out
+
+
 def validate(key: str, value: Any) -> Any:
     """Returns the normalised value to store. Messages never contain the submitted value."""
     if key not in DEFAULTS:
@@ -197,6 +263,8 @@ def validate(key: str, value: Any) -> Any:
         return v
     if key == "payroll.pt_slabs":
         return _validate_slabs(key, value)
+    if key == "payroll.reimbursement_categories":
+        return _validate_categories(key, value)
     raise _bad(key, "setting is not editable")  # unreachable: every DEFAULTS key is covered above
 
 
@@ -211,7 +279,9 @@ async def snapshot(session: AsyncSession) -> dict[str, Any]:
 
 
 def _audit_value(key: str, v: Any) -> Any:
-    return json.dumps(v, separators=(",", ":")) if key == "payroll.pt_slabs" else v  # a string: not walked by the redactor
+    return (
+        json.dumps(v, separators=(",", ":")) if key in ("payroll.pt_slabs", "payroll.reimbursement_categories") else v
+    )  # a string: not walked by the redactor
 
 
 async def current_value(session: AsyncSession, key: str) -> Any:

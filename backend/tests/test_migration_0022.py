@@ -97,7 +97,15 @@ def test_models_match_migration():
     from app.core.crypto import EncryptedJSON, EncryptedString
     from app.models import Base
 
-    up = _load().UPGRADE
+    # 0023 replaced the installment numbering constraints (live-only unique index), so its names count as well
+    sys.path.insert(0, str(DB))
+    try:
+        spec = importlib.util.spec_from_file_location("mig0023", DB / "alembic" / "versions" / "0023_reimbursements_overtime.py")
+        m23 = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m23)
+    finally:
+        sys.path.remove(str(DB))
+    up = _load().UPGRADE + m23.UPGRADE
     for name in TABLES:
         t = Base.metadata.tables[name]
         for idx in t.indexes:
@@ -111,6 +119,8 @@ def test_models_match_migration():
         fk_cols = {c.name for fk in t.foreign_key_constraints for c in fk.columns}
         indexed = {c.name for i in t.indexes for c in i.columns} | {c.name for c in t.primary_key.columns}
         indexed |= {c.name for con in t.constraints if con.__class__.__name__ == "UniqueConstraint" for c in con.columns}
+        if name == "payroll_loan_installments":
+            indexed.add("loan_id")  # the live-only unique (loan_id, seq) index of 0023 is partial: the SQLite harness drops it
         assert fk_cols <= indexed, (name, fk_cols - indexed)
     # money, labels, reasons, breakdowns are encrypted columns
     enc = {

@@ -73,6 +73,7 @@ class EmployeePayrollDetails(TimestampMixin, Base):
     designation: Mapped[str | None] = mapped_column(Text)
     payment_mode: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'bank_transfer'"))
     include_in_payroll: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    overtime_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))  # migration 0023
     bank_name: Mapped[str | None] = mapped_column("bank_name_enc", EncryptedString)
     bank_account: Mapped[str | None] = mapped_column("bank_account_enc", EncryptedString)
     bank_ifsc: Mapped[str | None] = mapped_column("bank_ifsc_enc", EncryptedString)

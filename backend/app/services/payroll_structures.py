@@ -26,6 +26,7 @@ DETAIL_FIELDS = (
     "designation",
     "payment_mode",
     "include_in_payroll",
+    "overtime_eligible",
     "bank_name",
     "bank_account",
     "bank_ifsc",
@@ -286,6 +287,7 @@ def _details_out(user_id: uuid.UUID, d: EmployeePayrollDetails | None, *, reveal
         "designation": d.designation if d else None,
         "payment_mode": d.payment_mode if d else "bank_transfer",
         "include_in_payroll": d.include_in_payroll if d else True,
+        "overtime_eligible": d.overtime_eligible if d else False,
         "bank_name": d.bank_name if d else None,
         "bank_account": m(d.bank_account if d else None, pc.mask_tail),
         "bank_ifsc": d.bank_ifsc if d else None,
@@ -315,11 +317,14 @@ async def put_details(
 ) -> dict[str, Any]:
     await get_user_or_404(session, user_id)
     await pc.forbid_self(session, actor, user_id, entity_type="employee_payroll_details", entity_id=user_id)
-    await admin_security.require_reauth(session, redis, actor, body.current_password, action="payroll.details.update")
     sent = [f for f in DETAIL_FIELDS if f in body.model_fields_set]
+    if sent != ["overtime_eligible"]:  # the overtime switch alone needs no step-up (contract 17.1)
+        await admin_security.require_reauth(session, redis, actor, body.current_password, action="payroll.details.update")
     d = await session.get(EmployeePayrollDetails, user_id)
     if d is None:
-        d = EmployeePayrollDetails(user_id=user_id, payment_mode="bank_transfer", include_in_payroll=True)
+        d = EmployeePayrollDetails(
+            user_id=user_id, payment_mode="bank_transfer", include_in_payroll=True, overtime_eligible=False
+        )
         session.add(d)
     changed = []
     for f in sent:

@@ -31,7 +31,7 @@ ADMIN_CAPABLE = frozenset({"role.assign", "role.manage"})
 
 
 # Permissions every role holds for its own data: they do NOT make a role "elevated" (plain self-service stays plain).
-SELF_SERVICE_PERMISSIONS = frozenset({"payroll.view_own"})
+SELF_SERVICE_PERMISSIONS = frozenset({"payroll.view_own", "reimbursement.submit"})
 
 
 def is_admin_capable(permissions: frozenset[str] | set[str]) -> bool:

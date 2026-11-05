@@ -98,6 +98,25 @@ def parse_money(value: Any) -> Decimal:
     return q2(d)
 
 
+def shift_length_minutes(start: dt.time, end: dt.time) -> int:
+    """Minutes between shift start and end; an end at or before the start means an overnight shift."""
+    m = (end.hour * 60 + end.minute) - (start.hour * 60 + start.minute)
+    return m if m > 0 else m + 1440
+
+
+def overtime_amount(
+    basic: Decimal, shift_minutes: int, minutes: int, *, month_days: int, multiplier: Decimal, max_hours: int, mode: str
+) -> tuple[Decimal, int, bool]:
+    """Plan 15 P10: `hours x hourly x multiplier`, hourly = basic / month_days / shift hours. `minutes` are the approved minutes of
+    the month; `max_hours` > 0 caps them. Returns (amount, minutes paid after the cap, capped)."""
+    capped = max_hours > 0 and minutes > max_hours * 60
+    paid = max_hours * 60 if capped else minutes
+    if shift_minutes <= 0 or month_days <= 0 or paid <= 0:
+        return Decimal("0.00"), paid, capped
+    hourly = basic / Decimal(month_days) / (Decimal(shift_minutes) / Decimal(60))
+    return rnd(Decimal(paid) / Decimal(60) * hourly * multiplier, mode), paid, capped
+
+
 # ---------------------------------------------------------------------------------------------- amount in words
 _ONES = (
     "Zero One Two Three Four Five Six Seven Eight Nine Ten Eleven Twelve Thirteen Fourteen Fifteen Sixteen Seventeen "

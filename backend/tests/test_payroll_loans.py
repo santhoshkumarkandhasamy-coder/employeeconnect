@@ -296,6 +296,35 @@ async def test_skip_defers_one_installment_to_the_end(client, payroll, uid):
     assert r.status_code == 409 and err(r) == "LOAN_NOT_ACTIVE"
 
 
+async def test_skip_reschedule_and_foreclose_never_exhaust_installment_numbers(client, payroll, uid):
+    """Migration 0023: numbers are unique among LIVE installments only, so a loan can be skipped / rescheduled any number of times."""
+    hr = payroll["hr"]
+    loan = await mk_loan(client, hr, uid["employee"], principal="30000.00", emi="10000.00")
+    cur = loan
+    for _ in range(
+        22
+    ):  # about 4 numbers per round used up the old table-wide numbering; the drift stays inside the 12 month horizon
+        first = next(i for i in cur["installments"] if i["status"] == "pending")
+        cur = await act(client, hr, cur, "skip", installment_id=first["id"])
+        cur = await act(
+            client,
+            hr,
+            cur,
+            "reschedule",
+            emi="10000.00",
+            from_period=min(i["period"] for i in cur["installments"] if i["status"] == "pending"),
+        )
+    live = [i["seq"] for i in cur["installments"] if i["status"] in ("pending", "processing", "paid")]
+    assert live == [1, 2, 3]  # numbers are reused, not exhausted
+    assert max(i["seq"] for i in cur["installments"]) <= 4 and len(cur["installments"]) > 80
+    cur = await act(client, hr, cur, "foreclose", mode="payroll", period="2025-12")
+    assert [i["kind"] for i in cur["installments"] if i["status"] == "pending"] == ["foreclosure"]
+    assert max(i["seq"] for i in cur["installments"] if i["status"] == "pending") == 1
+    # tenure is limited on the LIVE installments (create), not on the numbers ever used
+    await set_setting(client, payroll["admin"], loan_max_tenure_months=2)
+    await mk_loan(client, hr, uid["manager"], principal="30000.00", emi="10000.00", expect=422)
+
+
 async def test_skipping_the_last_installment_moves_it_one_month_on(client, payroll, uid):
     hr = payroll["hr"]
     loan = await mk_loan(client, hr, uid["employee"], principal="10000.00", emi="10000.00")

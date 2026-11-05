@@ -73,7 +73,7 @@ class User(TimestampMixin, Base):
 class File(CreatedMixin, Base):
     __tablename__ = "files"
     __table_args__ = (
-        CheckConstraint("purpose IN ('selfie','leave_attachment','announcement_image','announcement_pdf','profile_photo','company_logo')",
+        CheckConstraint("purpose IN ('selfie','leave_attachment','announcement_image','announcement_pdf','profile_photo','company_logo','reimbursement_bill')",
                         name="ck_files_purpose"),
         CheckConstraint("size_bytes >= 0", name="ck_files_size_bytes"),
         Index("ix_files_owner_id", "owner_id"),

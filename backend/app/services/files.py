@@ -40,6 +40,7 @@ from ..models import (
     File,
     LeaveRequest,
     OnDutyVisit,
+    ReimbursementClaim,
     User,
 )
 
@@ -58,6 +59,7 @@ PURPOSES: dict[str, tuple[frozenset[str], int, bool, str | None]] = {
     "announcement_image": (frozenset(IMAGE_TYPES), 5, False, "announcement.manage"),
     "announcement_pdf": (frozenset({PDF}), 10, False, "announcement.manage"),
     "company_logo": (frozenset(IMAGE_TYPES), 2, False, "company.manage"),  # only via POST /admin/company/logo
+    "reimbursement_bill": (frozenset(IMAGE_TYPES | {PDF}), 10, True, "reimbursement.submit"),  # plan 15 3b
 }
 GENERIC_PURPOSES = frozenset(PURPOSES) - {"profile_photo", "company_logo"}  # accepted by POST /files
 MAX_IMAGE_SIDE = 2048
@@ -335,6 +337,24 @@ async def _leave_attachment_visible(session: AsyncSession, actor: Principal, f: 
     return (await session.execute(q)).first() is not None
 
 
+async def _bill_visible(session: AsyncSession, actor: Principal, f: File) -> bool:
+    """A reimbursement bill (plan 15, contract 17.6) is readable by `payroll.view_all` holders once a claim carries it, and by the
+    owner's CURRENT manager (request.view_team / approve_team) while that claim is still `submitted`. Everyone else: 404."""
+    claim = (
+        await session.execute(
+            select(ReimbursementClaim.user_id, ReimbursementClaim.status).where(ReimbursementClaim.bill_file_id == f.id).limit(1)
+        )
+    ).first()
+    if claim is None:
+        return False  # an upload nobody claimed yet is owner-only
+    if actor.has("payroll.view_all"):
+        return True
+    if claim.status == "submitted" and (actor.has("request.view_team") or actor.has("request.approve_team")):
+        owner = await session.get(User, claim.user_id)
+        return owner is not None and owner.manager_id == actor.id
+    return False
+
+
 @dataclass
 class Access:
     file: File
@@ -362,6 +382,8 @@ async def authorize(session: AsyncSession, actor: Principal, file_id: uuid.UUID)
         ok = await _announcement_visible(session, actor, f)
     elif f.purpose == "leave_attachment":
         ok = await _leave_attachment_visible(session, actor, f)
+    elif f.purpose == "reimbursement_bill":
+        ok = await _bill_visible(session, actor, f)
     elif f.purpose == "selfie":
         if actor.has("attendance.view_all"):
             ok = True
@@ -381,7 +403,7 @@ async def authorize(session: AsyncSession, actor: Principal, file_id: uuid.UUID)
         )
         await session.commit()
         raise AppError("NOT_FOUND", "File not found")  # 404, not 403: do not reveal that the id exists
-    return Access(f, f.purpose in ("selfie", "leave_attachment"))
+    return Access(f, f.purpose in ("selfie", "leave_attachment", "reimbursement_bill"))
 
 
 async def read(session: AsyncSession, actor: Principal, file_id: uuid.UUID) -> tuple[File, bytes]:
@@ -447,6 +469,7 @@ async def cleanup_orphans(session: AsyncSession, older_than_hours: int = 24, bat
         select(Announcement.id).where(or_(Announcement.image_file_id == File.id, Announcement.pdf_file_id == File.id)),
         select(EmployeeProfile.user_id).where(EmployeeProfile.photo_file_id == File.id),
         select(Company.id).where(Company.logo_file_id == File.id),
+        select(ReimbursementClaim.id).where(ReimbursementClaim.bill_file_id == File.id),  # bills are financial records
     ]
     q = select(File).where(File.created_at < cutoff, *[~r.exists() for r in refs]).limit(batch)
     removed = 0

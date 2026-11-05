@@ -1,11 +1,14 @@
 """Component engine (plan 15, contract 17.0 / 17.1): pay components reach a payslip as system lines inside the encrypted
 `payslips.inputs_enc` JSON, key `components`, next to the manual `adjustments`.
 
-Source rows (one-time items now; loan instalments, arrears and encashments in work package 3a step 2) share one lifecycle:
+Source rows (one-time items, loan instalments, arrears, encashments, reimbursement claims, overtime days) share one lifecycle:
 
     pending --process--> processing (payslip_id set) --publish--> paid          (reopen: processing -> pending)
 
-* pull   (P5): rows of the payslip's user with `period` = the run month and `status = 'pending'`, plus `paid` rows whose
+`pending` is each provider's `payable` status: `approved` for reimbursement claims and overtime days (they have review steps
+before it).
+
+* pull   (P5): rows of the payslip's user with `period` = the run month and `status = <payable>` ('pending'), plus `paid` rows whose
          `payslip_id` is the payslip this one supersedes (carried into a revision) and `processing` rows already attached to it.
          Period-exact: a row of a month that is published without a payslip for the user stays pending (flag PERIOD_CLOSED).
 * attach (P6): process moves the pulled rows to `processing`; publish moves them to `paid` and carries `paid` rows of the
@@ -62,6 +65,10 @@ class Provider:
     # position in the global lock order of P7 (lower locks first); PROVIDERS is sorted by it on every register, so the
     # import order of the provider modules can never change the lock order (L1)
     order: int = 0
+    # the status that means "payable, waiting for a payslip" (P4): `pending` for most tables, `approved` for claims and overtime
+    payable: str = "pending"
+    # claims and overtime days are many rows per payslip line: they do not count towards the per-month line caps
+    count_in_caps: bool = True
 
 
 def _money(x: str | Decimal) -> str:
@@ -86,7 +93,7 @@ PROVIDERS: list[Provider] = [Provider("one_time", PayrollOneTimeItem, _one_time_
 def ensure_providers() -> None:
     """Import the provider modules (they call `register` on import). Done lazily because they import the payroll services
     that import this module; every entry point below calls it first, so no process can run the engine without them."""
-    from . import payroll_arrears, payroll_encashment, payroll_loans  # noqa: F401
+    from . import payroll_arrears, payroll_encashment, payroll_loans, payroll_overtime, payroll_reimbursements  # noqa: F401
 
 
 def register(provider: Provider) -> None:
@@ -121,7 +128,7 @@ def add_event(
             status=item.status,
             period=period if period is not None else getattr(item, "period", None),
             prev_period=prev_period,
-            amount=amount if amount is not None else getattr(item, "amount", None),
+            amount=amount if amount is not None else getattr(item, "event_amount", getattr(item, "amount", None)),
             prev_amount=prev_amount,
             detail=detail,
             payslip_id=getattr(item, "payslip_id", None),
@@ -179,7 +186,7 @@ async def check_target_period(session: AsyncSession, user_ids: list[uuid.UUID], 
     return "published"
 
 
-async def row_states(session: AsyncSession, rows: list[Any]) -> dict[uuid.UUID, tuple[str, list[str]]]:
+async def row_states(session: AsyncSession, rows: list[Any], payable: str = "pending") -> dict[uuid.UUID, tuple[str, list[str]]]:
     """row.id -> (run_status, flags) for lists. `PERIOD_CLOSED`: a payable row whose month is published and whose employee has
     no open payslip in it (it will not be paid until HR moves it)."""
     periods = {r.period for r in rows if getattr(r, "period", None) is not None}
@@ -198,7 +205,7 @@ async def row_states(session: AsyncSession, rows: list[Any]) -> dict[uuid.UUID, 
         run = runs.get(r.period) if getattr(r, "period", None) is not None else None
         status = run.status if run else "none"
         flags: list[str] = []
-        if r.status == "pending" and run is not None and run.status == "published" and (run.id, r.user_id) not in open_pairs:
+        if r.status == payable and run is not None and run.status == "published" and (run.id, r.user_id) not in open_pairs:
             flags.append("PERIOD_CLOSED")
         out[r.id] = (status, flags)
     return out
@@ -212,6 +219,8 @@ async def live_counts(session: AsyncSession, user_ids: list[uuid.UUID], period: 
     if not user_ids:
         return out
     for prov in PROVIDERS:
+        if not prov.count_in_caps:
+            continue
         m = prov.model
         q = (
             select(m.user_id, func.count())
@@ -248,7 +257,7 @@ async def pull_for(session: AsyncSession, payslips: list[Payslip], period: dt.da
     warnings: dict[uuid.UUID, list[str]] = {u: [] for u in by_user}
     for prov in PROVIDERS:
         m = prov.model
-        cond = [m.status == "pending"]
+        cond = [m.status == prov.payable]
         if sup_ids:
             cond.append(and_(m.status == "paid", m.payslip_id.in_(sup_ids)))
         if own_ids:
@@ -317,7 +326,7 @@ async def attach_processing(session: AsyncSession, payslips: list[Payslip], acto
             row = rows.get(rid)
             if row is None or row.user_id != p.user_id:
                 raise _changed()
-            if row.status == "pending":
+            if row.status == prov.payable:
                 row.status, row.payslip_id, row.updated_by, row.version = "processing", p.id, actor_id, row.version + 1
                 add_event(session, item_type=prov.type, item=row, action="process", actor_id=actor_id)
             elif row.status == "processing" and row.payslip_id == p.id:
@@ -337,7 +346,7 @@ async def release_processing(session: AsyncSession, payslip_ids: list[uuid.UUID]
         m = prov.model
         q = select(m).where(m.payslip_id.in_(payslip_ids), m.status == "processing").order_by(m.id).with_for_update()
         for row in (await session.execute(q)).scalars():
-            row.status, row.payslip_id, row.updated_by, row.version = "pending", None, actor_id, row.version + 1
+            row.status, row.payslip_id, row.updated_by, row.version = prov.payable, None, actor_id, row.version + 1
             add_event(session, item_type=prov.type, item=row, action="reopen", actor_id=actor_id)
 
 

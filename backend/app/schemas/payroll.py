@@ -132,6 +132,7 @@ class DetailsIn(_Strict):
     designation: str | None = Field(default=None, max_length=60)
     payment_mode: Literal["bank_transfer", "cheque", "cash"] | None = None
     include_in_payroll: bool | None = None
+    overtime_eligible: bool | None = None  # plan 15 3b; the only key that needs no current_password when sent alone
     bank_name: str | None = Field(default=None, max_length=60)
     bank_account: str | None = Field(default=None, max_length=40)
     bank_ifsc: str | None = Field(default=None, max_length=20)
@@ -157,7 +158,7 @@ class DetailsIn(_Strict):
             if not rx.match(v):
                 raise ValueError(f"{name} has an invalid format")
             setattr(self, name, v)
-        for name in ("payment_mode", "include_in_payroll"):
+        for name in ("payment_mode", "include_in_payroll", "overtime_eligible"):
             if name in self.model_fields_set and getattr(self, name) is None:
                 raise ValueError(f"{name} cannot be cleared")
         return self
@@ -437,3 +438,97 @@ class OptionalReasonIn(_Strict):
     @classmethod
     def _opt(cls, v: str | None) -> str | None:
         return _reason(v) if v is not None else None
+
+
+# ============================================================================================ plan 15 work package 3b
+def _opt_comment(v: str | None) -> str | None:
+    return _reason(v) if v is not None else None
+
+
+class ClaimCreate(_Strict):
+    category: str = Field(pattern=r"^[a-z][a-z0-9_]{1,19}$")
+    expense_date: dt.date
+    amount: Money
+    description: str
+    bill_file_id: uuid.UUID | None = None
+
+    @field_validator("amount")
+    @classmethod
+    def _amt(cls, v: Decimal) -> Decimal:
+        if v <= 0:
+            raise ValueError("must be greater than 0")
+        return v
+
+    @field_validator("description")
+    @classmethod
+    def _desc(cls, v: str) -> str:
+        v = clean_text(v)
+        if not 3 <= len(v) <= 300:
+            raise ValueError("must be 3-300 characters")
+        return v
+
+
+class ClaimVerify(_Strict):
+    comment: str | None = None
+    _c = field_validator("comment")(_opt_comment)
+
+
+class ClaimApprove(_Strict):
+    approved_amount: Money
+    period: PeriodStr
+    comment: str | None = None
+    expected_version: int = Field(ge=1)
+
+    _c = field_validator("comment")(_opt_comment)
+
+    @field_validator("approved_amount")
+    @classmethod
+    def _amt(cls, v: Decimal) -> Decimal:
+        if v <= 0:
+            raise ValueError("must be greater than 0")
+        return v
+
+
+class ClaimReject(_Strict):
+    comment: str
+
+    _c = field_validator("comment")(_reason)
+
+
+class ClaimPayout(_Strict):
+    period: PeriodStr
+    expected_version: int = Field(ge=1)
+
+
+class OvertimeUpdate(_Strict):
+    status: Literal["approved", "rejected"]
+    approved_minutes: int | None = Field(default=None, ge=0, le=1440)
+    comment: str | None = None
+    expected_version: int = Field(ge=1)
+
+    _c = field_validator("comment")(_opt_comment)
+
+    @model_validator(mode="after")
+    def _by_status(self) -> OvertimeUpdate:
+        if self.status == "rejected":
+            if self.comment is None:
+                raise ValueError("comment is required when rejecting")
+            if self.approved_minutes is not None:
+                raise ValueError("approved_minutes only applies to status approved")
+        return self
+
+
+class OvertimeBulk(_Strict):
+    ids: list[uuid.UUID] = Field(min_length=1, max_length=200)
+    action: Literal["approve", "reject"]
+    comment: str | None = None
+
+    _c = field_validator("comment")(_opt_comment)
+
+    @model_validator(mode="after")
+    def _by_action(self) -> OvertimeBulk:
+        if self.action == "reject" and self.comment is None:
+            raise ValueError("comment is required when rejecting")
+        if len(set(self.ids)) != len(self.ids):
+            raise ValueError("ids must be unique")
+        return self

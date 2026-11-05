@@ -53,7 +53,7 @@ Index `(user_id, period, status)`, `(period, status)`, `(batch_id)`.
 
 **`payroll_loan_installments`**: `loan_id FK RESTRICT`, `user_id` (denormalised for the pull query), `seq smallint CHECK BETWEEN 1 AND 120`, `period`, `amount_enc`,
 `kind CHECK IN ('emi','foreclosure')`, `status CHECK IN ('pending','processing','paid','skipped','cancelled')`, `payslip_id`, `version`.
-`UNIQUE (loan_id, seq)`; partial unique `(loan_id, period) WHERE status IN ('pending','processing','paid')` (one live installment per loan per month). Index `(user_id, period, status)`.
+`UNIQUE (loan_id, seq)` (3b/0023 replaces it with a partial unique index over live installments and relaxes the `seq` check to `>= 1`); partial unique `(loan_id, period) WHERE status IN ('pending','processing','paid')` (one live installment per loan per month). Index `(user_id, period, status)`.
 
 **`payroll_arrears`**: `period NULL` (target month, set on accept), `from_period`, `to_period` (published months covered), `trigger_structure_id FK salary_structures NULL ON DELETE SET NULL`,
 `code CHECK IN ('ARREARS','OTHER_DEDUCTION')`, `amount_enc`, `breakdown_enc` (JSON per month: `{period, paid_structure_id, new_structure_id, paid_earnings, new_earnings, already_paid_arrears, diff, basic_diff}`),
@@ -181,9 +181,9 @@ For overtime the "pending" state is `approved` (P4 table in 17.0). `employee_pay
 - Rate limits fail closed on writes (section 17.0).
 - Known limitations (3a security review): (L6) the append-only and `paid`-immutability guarantees of the payroll tables rest on triggers and REVOKEs for `app_user`;
   the migration role and the application role are still the same database server account family, so a compromised migration credential could bypass them. Defence in depth
-  (a separate, non-owner DB role for the API with no DDL right) is deliberately not built now. (L7) `payroll_loan_installments.seq` is unique per loan over all rows and
-  limited to 1..120 by migration 0022, so a loan that is skipped / rescheduled very often can run out of numbers (clear 422, close and re-issue the loan); lifting it needs a
-  migration (live-only unique index or a renumbering column) and was left for 3b.
+  (a separate, non-owner DB role for the API with no DDL right) is deliberately not built now. (L7) FIXED in migration 0023: `payroll_loan_installments.seq` was unique per loan over all rows and limited to 1..120, so a loan skipped /
+  rescheduled very often could run out of numbers. Numbers are now unique among LIVE installments only (partial unique index, check `seq >= 1`) and a new
+  installment takes `max(live seq) + 1`; the 'close and re-issue' workaround is removed.
 
 ## 6. Test plan
 - **Unit (pure)**: calc with `components` (OVERTIME ESI wage, LEAVE_ENCASH not, PT on new gross), `overtime_amount`, overtime minute derivation (working day, off day, half-day leave,

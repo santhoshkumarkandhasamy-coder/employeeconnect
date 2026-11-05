@@ -36,6 +36,8 @@ from ..schemas.payroll import (
     OneTimeItemCreate,
     OneTimeItemUpdate,
     OptionalReasonIn,
+    OvertimeBulk,
+    OvertimeUpdate,
     PayrollSettingsIn,
     PayslipUpdate,
     PublishIn,
@@ -52,6 +54,7 @@ from ..services import (
     payroll_encashment,
     payroll_items,
     payroll_loans,
+    payroll_overtime,
     payroll_register,
     payroll_reports,
     payroll_settings,
@@ -976,3 +979,63 @@ async def cancel_encashment(
 ):
     await pc.limit(redis, actor, "write", (60, 60), closed=True)
     return await payroll_encashment.cancel(session, actor, enc_id, body.reason if body else None)
+
+
+# ============================================================================================ plan 15: overtime (3b)
+@admin_router.post("/overtime/compute")
+async def compute_overtime(
+    period: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "action", (10, 60), closed=True)
+    return await payroll_overtime.compute(session, actor, period)
+
+
+@admin_router.get("/overtime")
+async def list_overtime(
+    period: str | None = Query(None, pattern=r"^\d{4}-\d{2}$"),
+    user_id: uuid.UUID | None = None,
+    status: Literal["computed", "approved", "rejected", "processing", "paid"] | None = None,
+    page: PageParams = Depends(),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "admin_read", (120, 60))
+    return await payroll_overtime.list_days(session, actor, period=period, user_id=user_id, status=status, page=page)
+
+
+@admin_router.post("/overtime/bulk")
+async def bulk_overtime(
+    body: OvertimeBulk,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "write", (60, 60), closed=True)
+    return await payroll_overtime.bulk(session, actor, body)
+
+
+@admin_router.put("/overtime/{day_id}")
+async def update_overtime(
+    day_id: uuid.UUID,
+    body: OvertimeUpdate,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "write", (60, 60), closed=True)
+    return await payroll_overtime.update_day(session, actor, day_id, body)
+
+
+@me_router.get("/overtime")
+async def my_overtime(
+    period: str | None = Query(None, pattern=r"^\d{4}-\d{2}$"),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_OWN),
+):
+    await pc.limit(redis, actor, "own_list", (60, 60))
+    return await payroll_overtime.my_overtime(session, actor, period)

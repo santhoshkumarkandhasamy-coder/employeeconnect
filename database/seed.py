@@ -74,6 +74,7 @@ PERMISSIONS: dict[str, tuple[str, set[str]]] = {
     "payroll.view_all": ("View payroll (read-only): runs, structures, payslips", {ADMIN, HR}),
     "payroll.manage": ("Manage payroll: settings, structures, details, runs, drafts", {ADMIN, HR}),
     "payroll.publish": ("Publish payroll runs and payslips", {ADMIN, HR}),
+    "reimbursement.submit": ("Submit own reimbursement claims and upload bills", {ADMIN, HR, MANAGER, EMPLOYEE}),
     "duty_location.manage": ("Manage on-duty locations and assignments", {ADMIN, HR}),
 }
 

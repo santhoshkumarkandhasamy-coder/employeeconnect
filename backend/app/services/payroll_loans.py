@@ -44,7 +44,6 @@ log = logging.getLogger("app.payroll")
 ENTITY = "payroll_loan"
 LIVE = ("pending", "processing", "paid")
 MIN_PRINCIPAL, MAX_PRINCIPAL = Decimal("1.00"), Decimal("1000000.00")
-MAX_SEQ = 120
 ZERO = Decimal("0.00")
 INST = PayrollLoanInstallment
 
@@ -97,14 +96,14 @@ async def _lock_loan(session: AsyncSession, loan_id: uuid.UUID) -> tuple[Payroll
         raise AppError("NOT_FOUND", "Loan not found")
     q = select(INST).where(INST.loan_id == loan_id).order_by(INST.id).with_for_update().execution_options(populate_existing=True)
     insts = list((await session.execute(q)).scalars())
-    insts.sort(key=lambda i: i.seq)
+    insts.sort(key=lambda i: (i.seq, i.period, str(i.id)))  # numbers repeat only between a live and a skipped / cancelled row
     return loan, insts
 
 
 async def _insts_by_loan(session: AsyncSession, loan_ids: list[uuid.UUID]) -> dict[uuid.UUID, list[INST]]:
     out: dict[uuid.UUID, list[INST]] = {i: [] for i in loan_ids}
     if loan_ids:
-        q = select(INST).where(INST.loan_id.in_(loan_ids)).order_by(INST.loan_id, INST.seq)
+        q = select(INST).where(INST.loan_id.in_(loan_ids)).order_by(INST.loan_id, INST.seq, INST.period, INST.id)
         for i in (await session.execute(q)).scalars():
             out[i.loan_id].append(i)
     return out
@@ -263,13 +262,13 @@ async def _next_reference(session: AsyncSession) -> str:
     return f"L-{n:04d}"
 
 
+def _next_seq(insts: list[INST]) -> int:
+    """Installment numbers are unique among LIVE installments only (migration 0023): a new one follows the highest live number,
+    so skipped and cancelled installments never use up numbers. Call after the statuses of the dropped rows were changed."""
+    return max((i.seq for i in insts if i.status in LIVE), default=0) + 1
+
+
 def _new_inst(loan: PayrollLoan, actor_id: uuid.UUID, seq: int, period: dt.date, amount: Decimal, kind: str = "emi") -> INST:
-    if seq > MAX_SEQ:
-        # the table (migration 0022, frozen) numbers EVERY installment of a loan ever created, cancelled and deferred ones
-        # included, 1..120 and unique; the tenure limit is enforced on live installments by create / reschedule
-        raise AppError("VALIDATION_ERROR", f"This loan has used all {MAX_SEQ} installment numbers (cancelled and deferred "
-                       "installments count); close it and start a new loan",
-                       details=[{"field": "emi", "message": "installment numbers exhausted"}])  # fmt: skip
     return INST(
         loan_id=loan.id, user_id=loan.user_id, seq=seq, period=period, amount=calc.money_str(amount), kind=kind,
         status="pending", version=1, created_by=actor_id, updated_by=actor_id,
@@ -325,8 +324,8 @@ async def create_loan(session: AsyncSession, redis: Redis, actor: Principal, bod
         raise _bad("emi", "must be greater than 0 and at most the principal")
     max_tenure = await _setting_int(session, "payroll.loan_max_tenure_months")
     n = installment_count(principal, emi)
-    if n > max_tenure or n > MAX_SEQ:
-        raise _bad("emi", f"the loan would take {n} months; at most {min(max_tenure, MAX_SEQ)} are allowed")
+    if n > max_tenure:
+        raise _bad("emi", f"the loan would take {n} months; at most {max_tenure} are allowed")
     user = await items_svc._eligible_user(session, body.user_id, start)
     run_status = await comps.check_target_period(session, [user.id], start, lock=True)  # run row first (P7)
     # serialise concurrent creates for one employee so the active-loan limit cannot be overshot (id only: no joined loads)
@@ -396,7 +395,7 @@ async def skip(session: AsyncSession, actor: Principal, loan_id: uuid.UUID, body
     )
     await pc.flush(session)
     comps.check_caps((await comps.live_counts(session, [loan.user_id], new_period))[loan.user_id])
-    new = _new_inst(loan, actor.id, max(i.seq for i in insts) + 1, new_period, _d(inst.amount))
+    new = _new_inst(loan, actor.id, _next_seq(insts), new_period, _d(inst.amount))
     session.add(new)
     await pc.flush(session)
     comps.add_event(session, item_type="loan_installment", item=new, action="create", actor_id=actor.id,
@@ -447,7 +446,7 @@ async def reschedule(
         _cancel_inst(session, i, actor.id, "reschedule", {"reason": body.reason})
     await pc.flush(session)
     comps.check_caps((await comps.live_counts(session, [loan.user_id], frm))[loan.user_id])
-    seq0 = max(i.seq for i in insts)
+    seq0 = _next_seq(insts) - 1
     rows = [_new_inst(loan, actor.id, seq0 + k, per, amt) for k, (per, amt) in enumerate(make_schedule(remaining, emi, frm), 1)]
     session.add_all(rows)
     loan.emi, loan.version, loan.updated_by = calc.money_str(emi), loan.version + 1, actor.id
@@ -493,7 +492,7 @@ async def foreclose(
     loan.version, loan.updated_by = loan.version + 1, actor.id
     if body.mode == "payroll":
         comps.check_caps((await comps.live_counts(session, [loan.user_id], period))[loan.user_id])
-        new = _new_inst(loan, actor.id, max(i.seq for i in insts) + 1, period, outstanding, kind="foreclosure")
+        new = _new_inst(loan, actor.id, _next_seq(insts), period, outstanding, kind="foreclosure")
         session.add(new)
         await pc.flush(session)
         comps.add_event(session, item_type="loan_installment", item=new, action="create", actor_id=actor.id,

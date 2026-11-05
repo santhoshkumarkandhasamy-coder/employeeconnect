@@ -423,7 +423,14 @@ def test_providers_are_in_the_lock_order_whatever_the_import_order():
     from app.services import payroll_components as comps
 
     comps.ensure_providers()
-    assert [p.type for p in comps.PROVIDERS] == ["one_time", "loan_installment", "arrears", "encashment"]
+    assert [p.type for p in comps.PROVIDERS] == [
+        "one_time",
+        "loan_installment",
+        "arrears",
+        "encashment",
+        "reimbursement",
+        "overtime",
+    ]
     assert [p.order for p in comps.PROVIDERS] == sorted(p.order for p in comps.PROVIDERS)
     saved = list(comps.PROVIDERS)
     try:
@@ -432,7 +439,7 @@ def test_providers_are_in_the_lock_order_whatever_the_import_order():
         assert [p.type for p in comps.PROVIDERS][0] == "zz_test"  # a new source is placed by its order, not appended
         comps.PROVIDERS[:] = saved
         comps.PROVIDERS.reverse()
-        comps.register(comps.Provider("zz_test2", PayrollArrears, lambda rows: [], order=50))
+        comps.register(comps.Provider("zz_test2", PayrollArrears, lambda rows: [], order=70))
         assert [p.type for p in comps.PROVIDERS][-1] == "zz_test2"
     finally:
         comps.PROVIDERS[:] = saved
@@ -464,18 +471,24 @@ def test_encashment_amount_is_capped_at_the_money_ceiling():
     assert e.value.code == "VALIDATION_ERROR"
 
 
-def test_loan_installment_numbers_exhausted_is_a_clear_422():
+def test_loan_installment_numbers_follow_the_live_installments():
+    """Migration 0023: numbers are unique among LIVE installments only, so skipped / cancelled rows never use them up."""
     import datetime as dt
     import uuid
 
-    from app.core.errors import AppError
     from app.services import payroll_loans as loans
 
     loan = type("L", (), {"id": uuid.uuid4(), "user_id": uuid.uuid4()})()
-    assert loans._new_inst(loan, uuid.uuid4(), 120, dt.date(2025, 7, 1), D("1")).seq == 120
-    with pytest.raises(AppError) as e:
-        loans._new_inst(loan, uuid.uuid4(), 121, dt.date(2025, 7, 1), D("1"))
-    assert e.value.code == "VALIDATION_ERROR" and "installment numbers" in str(e.value.details)
+
+    def inst(seq, status):
+        return type("I", (), {"seq": seq, "status": status})()
+
+    assert loans._next_seq([]) == 1
+    rows = [inst(1, "paid"), inst(2, "skipped"), inst(3, "cancelled"), inst(2, "pending")]
+    assert loans._next_seq(rows) == 3  # 3 is cancelled and 2 is live
+    rows = [inst(n, "cancelled") for n in range(1, 400)] + [inst(4, "pending")]
+    assert loans._next_seq(rows) == 5
+    assert loans._new_inst(loan, uuid.uuid4(), 500, dt.date(2025, 7, 1), D("1")).seq == 500  # no 120 ceiling any more
 
 
 async def test_list_and_quote_reads_are_audited_with_counts_only(client, payroll, uid, db):
