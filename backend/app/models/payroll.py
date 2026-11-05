@@ -170,3 +170,32 @@ class Payslip(TimestampMixin, Base):
     superseded_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     created_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
     updated_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+
+
+class StatutoryChallan(TimestampMixin, Base):
+    """Paid / unpaid tracking of one statutory due (migration 0020). Amount and bank reference are encrypted."""
+    __tablename__ = "statutory_challans"
+    __table_args__ = (
+        UniqueConstraint("type", "period", name="uq_statutory_challans_type_period"),
+        CheckConstraint("type IN ('pf','esi','pt','tds')", name="ck_statutory_challans_type"),
+        CheckConstraint("status IN ('unpaid','paid')", name="ck_statutory_challans_status"),
+        CheckConstraint("extract(day from period) = 1", name="ck_statutory_challans_period_first"),
+        CheckConstraint("period BETWEEN DATE '2000-01-01' AND DATE '2200-12-31'", name="ck_statutory_challans_period_year"),
+        CheckConstraint(
+            "(status = 'paid' AND paid_on IS NOT NULL) OR (status = 'unpaid' AND paid_on IS NULL AND reference_enc IS NULL)",
+            name="ck_statutory_challans_paid",
+        ),
+        Index("ix_statutory_challans_period", "period"),
+        Index("ix_statutory_challans_created_by", "created_by"),
+        Index("ix_statutory_challans_updated_by", "updated_by"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    type: Mapped[str] = mapped_column(Text, nullable=False)
+    period: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    amount: Mapped[str] = mapped_column("amount_enc", EncryptedString, nullable=False)
+    paid_on: Mapped[dt.date | None] = mapped_column(Date)
+    reference: Mapped[str | None] = mapped_column("reference_enc", EncryptedString)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'unpaid'"))
+    created_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+    updated_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)

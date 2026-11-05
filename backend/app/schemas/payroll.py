@@ -223,3 +223,25 @@ class PayslipUpdate(_Strict):
         if (self.lop_override is not None and not reason) or (reason is not None and not 3 <= len(reason) <= 200):
             raise ValueError("lop_override_reason of 3-200 characters is required with lop_override")
         return self
+
+
+class ChallanIn(_Strict):
+    """Mark one statutory due paid or unpaid (plan 14 phase 2). `current_password` (step-up) is always required."""
+
+    type: Literal["pf", "esi", "pt", "tds"]
+    period: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+    status: Literal["paid", "unpaid"]
+    paid_on: dt.date | None = None
+    reference: str | None = Field(default=None, min_length=1, max_length=60, pattern=r"^[A-Za-z0-9 ._/\-]+$")
+    amount: str | None = Field(default=None, max_length=14)
+    current_password: SecretStr = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def _check(self) -> ChallanIn:
+        if self.status == "paid" and self.paid_on is None:
+            raise ValueError("paid_on is required when status is paid")
+        if self.status == "unpaid" and (self.paid_on is not None or self.reference is not None or self.amount is not None):
+            raise ValueError("paid_on, reference and amount only apply to status paid")
+        if self.amount is not None:
+            _money(self.amount)
+        return self

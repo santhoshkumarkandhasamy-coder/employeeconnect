@@ -1447,5 +1447,39 @@ INSERT INTO settings (key, value) VALUES ('on_duty.request_max_advance_days', '6
 
 UPDATE alembic_version SET version_num='0019' WHERE alembic_version.version_num = '0018';
 
+-- Running upgrade 0019 -> 0020
+
+CREATE TABLE statutory_challans (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  type text NOT NULL,
+  period date NOT NULL,
+  amount_enc bytea NOT NULL,
+  paid_on date,
+  reference_enc bytea,
+  status text NOT NULL DEFAULT 'unpaid',
+  created_by uuid REFERENCES users(id) ON DELETE RESTRICT,
+  updated_by uuid REFERENCES users(id) ON DELETE RESTRICT,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT uq_statutory_challans_type_period UNIQUE (type, period),
+  CONSTRAINT ck_statutory_challans_type CHECK (type IN ('pf','esi','pt','tds')),
+  CONSTRAINT ck_statutory_challans_status CHECK (status IN ('unpaid','paid')),
+  CONSTRAINT ck_statutory_challans_period_first CHECK (extract(day from period) = 1),
+  CONSTRAINT ck_statutory_challans_period_year CHECK (period BETWEEN DATE '2000-01-01' AND DATE '2200-12-31'),
+  CONSTRAINT ck_statutory_challans_paid CHECK (
+    (status = 'paid' AND paid_on IS NOT NULL) OR (status = 'unpaid' AND paid_on IS NULL AND reference_enc IS NULL)
+  )
+);
+
+CREATE INDEX ix_statutory_challans_period ON statutory_challans (period);
+
+CREATE INDEX ix_statutory_challans_created_by ON statutory_challans (created_by);
+
+CREATE INDEX ix_statutory_challans_updated_by ON statutory_challans (updated_by);
+
+CREATE TRIGGER trg_statutory_challans_updated_at BEFORE UPDATE ON statutory_challans FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+UPDATE alembic_version SET version_num='0020' WHERE alembic_version.version_num = '0019';
+
 COMMIT;
 

@@ -22,6 +22,7 @@ from ..core.rbac import Principal, require_permission
 from ..core.redis import get_redis
 from ..models import Payslip
 from ..schemas.payroll import (
+    ChallanIn,
     DetailsIn,
     PayrollSettingsIn,
     PayslipUpdate,
@@ -31,7 +32,16 @@ from ..schemas.payroll import (
     RunCreate,
     StructureIn,
 )
-from ..services import admin_security, payroll_register, payroll_reports, payroll_settings, payroll_structures, payslip_pdf, xlsx
+from ..services import (
+    admin_security,
+    payroll_register,
+    payroll_reports,
+    payroll_settings,
+    payroll_statutory,
+    payroll_structures,
+    payslip_pdf,
+    xlsx,
+)
 from ..services import payroll_common as pc
 from ..services import payroll_runs as runs
 
@@ -505,3 +515,72 @@ async def extra_report(
         headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
         background=BackgroundTask(built.close),
     )
+
+
+# ============================================================================================ phase 2: statutory
+_NOSTORE = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+
+
+@admin_router.get("/statutory/dues")
+async def statutory_dues(
+    period: str | None = Query(None, pattern=r"^\d{4}-\d{2}$"),
+    months: int = Query(1, ge=1, le=payroll_statutory.MAX_MONTHS),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "statutory", (30, 60))
+    out = await payroll_statutory.dues(session, period, months)
+    audit(session, action="payroll.statutory.dues_view", actor=actor, entity_type="statutory_challan",
+          after={"period": period, "months": months})  # fmt: skip
+    await pc.commit(session)
+    return out
+
+
+@admin_router.post("/statutory/{kind}")
+async def statutory_file(
+    kind: Literal["pf_ecr", "esi", "pt"],
+    period: str | None = Query(None, pattern=r"^\d{4}-\d{2}$"),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    """PF ECR (.txt), ESI contribution (.xlsx), PT summary (.xlsx). 409 STATUTORY_BLOCKERS when an employee lacks UAN / ESI IP."""
+    await pc.limit(redis, actor, "report", (10, 60), closed=True)
+    if kind == "pf_ecr":
+        data, name, rows, meta = await payroll_statutory.pf_ecr(session, period)
+        audit(session, action="payroll.statutory.export", actor=actor, entity_type="statutory_challan",
+              after={"kind": kind, "period": meta["period"], "rows": rows})  # fmt: skip
+        await pc.commit(session)
+        return Response(content=data, media_type="text/plain; charset=us-ascii",
+                        headers={**_NOSTORE, "Content-Disposition": f'attachment; filename="{name}"'})  # fmt: skip
+    built, name, rows, meta = await (payroll_statutory.esi_contribution if kind == "esi" else payroll_statutory.pt_summary)(
+        session, period
+    )
+    try:
+        audit(session, action="payroll.statutory.export", actor=actor, entity_type="statutory_challan",
+              after={"kind": kind, "period": meta["period"], "rows": rows})  # fmt: skip
+        await pc.commit(session)
+    except BaseException:
+        built.close()
+        raise
+    return StreamingResponse(
+        xlsx.iter_file(built),
+        media_type=xlsx.XLSX_MIME,
+        headers={**_NOSTORE, "Content-Disposition": f'attachment; filename="{name}"'},
+        background=BackgroundTask(built.close),
+    )
+
+
+@admin_router.put("/statutory/challans")
+async def put_challan(
+    body: ChallanIn,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "write", (60, 60), closed=True)
+    return await payroll_statutory.set_challan(
+        session, redis, actor, type_=body.type, raw_period=body.period, status=body.status, paid_on=body.paid_on,
+        reference=body.reference, amount=body.amount, password=body.current_password,
+    )  # fmt: skip

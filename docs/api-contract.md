@@ -1000,7 +1000,7 @@ Audit actions: `payroll.payslip.process|reopen|publish|delete|revise`.
 - **Database locks (review 10, H1/L6):** migration 0018 allows `*_enc`-only updates of payslips and structures when the transaction has `SET LOCAL app.key_rotation = 'on'` (set only by `python -m scripts.rotate_keys`), so key rotation works on published/superseded rows. A published -> superseded change without a published successor in the same transaction fails at commit.
 - **Rate limit keys** (per user): `payroll:own_list` 60/min, `own_detail` 30/min + 200/day (detail and pdf share it), `admin_read` 120/min, `write` 60/min (fail closed), `action` 10/min (fail closed), `register` 5/min (fail closed), `reveal` 30/min + 200/day (fail closed).
 
-## 15. Payroll phase 2 (plan 14) - IMPLEMENTED: phase 1
+## 15. Payroll phase 2 (plan 14) - IMPLEMENTED: phase 1 (statutory: section 16)
 
 ### 15.1 Dashboard, variance, reports (permission `payroll.view_all`; read-only)
 | Method | Path | Notes |
@@ -1011,3 +1011,23 @@ Audit actions: `payroll.payslip.process|reopen|publish|delete|revise`.
 
 ### 15.2 New settings (`/admin/payroll/settings`, integers 1..31)
 `payroll.cutoff_day` (25), `payroll.process_day` (28, in the period month), `payroll.pay_day` (1, in the following month).
+
+## 16. Payroll statutory (plan 14 phase 2) - IMPLEMENTED (backend, migration 0020)
+
+All endpoints are under `/api/admin/payroll/statutory`. Only PUBLISHED runs are used (one published copy per employee). A month without a run is 404 `NOT_FOUND`; a run that is not published is 409 `RUN_NOT_PUBLISHED` (the dues list shows `run_status` and no items instead). Money in responses is a 2-decimal string. Money, UAN, ESI IP and PAN are never written to the audit log or application logs.
+
+**The EPFO ECR and ESIC column layouts below follow the formats known when this was written. The user must verify them against the current EPFO / ESIC portals before filing.**
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| GET | /statutory/dues?period=YYYY-MM&months=1..12 | `payroll.view_all` | `period` is the LAST month listed (default current), `months` default 1. `{months:[{period, run_status\|null, items:[{type pf\|esi\|pt\|tds, amount, employees, status paid\|unpaid, paid_on, reference, paid_amount, mismatch}], blockers[]}]}`. PF due = employee + employer share, ESI due = employee + employer share, PT and TDS = sum of deductions. `mismatch` = challan amount differs from the computed due. Audit `payroll.statutory.dues_view`. |
+| POST | /statutory/pf_ecr?period= | `payroll.view_all` | PF ECR text file (`text/plain`, `\r\n` lines, fields joined by `#~#`, no header): UAN, member name, gross wages, EPF wages, EPS wages, EDLI wages, EPF contribution (employee), EPS contribution, EPF-EPS difference (employer), NCP days, refund of advances. Whole rupees. EPF wages = basic capped at `payroll.pf_wage_ceiling` (full basic when the structure says so); EPS / EDLI wages = EPF wages capped at 15,000; EPS = 8.33% of EPS wages; difference = employer share - EPS; NCP days = ceil(basis days - paid days); refund = 0. Only employees with PF > 0. |
+| POST | /statutory/esi?period= | `payroll.view_all` | .xlsx, sheets `ESI Contribution` (IP Number, IP Name, No of Days, Total Monthly Wages, Reason Code for 0 wages, Last Working Day) and `Reconciliation` (wages, employee, employer share). Only employees with ESI > 0. |
+| POST | /statutory/pt?period= | `payroll.view_all` | .xlsx, sheets `PT by Employee` (id, name, department, gross, slab, PT) and `PT by Slab` (slab, PT, employees, total). Slab is matched on the PT amount against the run's `pt_slabs` snapshot (TN half-yearly slabs apply to the 6-month gross). No identifiers needed. |
+| PUT | /statutory/challans | `payroll.manage` | Body `{type, period:"YYYY-MM", status:"paid"\|"unpaid", paid_on?, reference?, amount?, current_password}`. `current_password` (step-up) always required. `paid`: `paid_on` required (not before the period start, not in the future), `reference` 1-60 chars `[A-Za-z0-9 ._/-]`, `amount` defaults to the computed due; 409 `CHALLAN_ALREADY_PAID` if already paid. `unpaid`: no other fields; clears paid_on and reference; 409 `CHALLAN_NOT_PAID` if not paid. Returns `{type, period, status, paid_on, reference}`. Audit `payroll.statutory.challan_paid` / `challan_unpaid` (type, period, status only). |
+
+File endpoints: audit `payroll.statutory.export` (kind, period, row count), `Cache-Control: no-store`, rate limit `payroll:report` 10/min (fail closed). Dues: `payroll:statutory` 30/min. Challan write: `payroll:write` 60/min (fail closed) plus the step-up limit.
+
+**Blockers.** Employees with a PF amount but no valid UAN (12 digits), an ESI amount but no valid ESI IP number (10-17 digits), or a TDS amount but no valid PAN are never skipped silently. `dues` lists them in `blockers: [{employee_id, name, missing:[{field: UAN\|ESI_IP\|PAN, reason: missing\|invalid}]}]`; PF ECR and ESI file requests are refused with 409 `STATUTORY_BLOCKERS` (`details[]` = `{field: employee_id, message}`) until fixed. Identifier values are never returned. PT files have no blockers.
+
+Errors: `RUN_NOT_PUBLISHED` 409, `STATUTORY_BLOCKERS` 409, `CHALLAN_ALREADY_PAID` 409, `CHALLAN_NOT_PAID` 409, `INVALID_DATE` 422, `REAUTH_FAILED` 403.
