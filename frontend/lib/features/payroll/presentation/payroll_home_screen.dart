@@ -8,8 +8,9 @@ import 'dashboard_tab.dart';
 import 'employees_tab.dart';
 import 'payroll_settings_tab.dart';
 import 'runs_tab.dart';
+import 'statutory_tab.dart';
 
-/// HR / Admin payroll area: Dashboard | Runs | Employees | Settings. Shown with
+/// HR / Admin payroll area: Dashboard | Runs | Employees | Statutory | Settings. Shown with
 /// `payroll.view_all`; write actions need `payroll.manage` / `payroll.publish`
 /// (the server enforces all of it again). FLAG_SECURE is on for every payroll
 /// admin screen.
@@ -22,21 +23,30 @@ class PayrollHomeScreen extends ConsumerWidget {
     if (!canOpenPayroll(perms)) return const NoPermissionScreen(title: 'Payroll');
     return SecureScreen(
       child: DefaultTabController(
-        length: 4,
+        length: 5,
         child: Scaffold(
           appBar: AppBar(
             title: const Text('Payroll'),
             bottom: const TabBar(
+              isScrollable: true,
+              tabAlignment: TabAlignment.start,
               tabs: [
                 Tab(text: 'Dashboard'),
                 Tab(text: 'Runs'),
                 Tab(text: 'Employees'),
+                Tab(text: 'Statutory'),
                 Tab(text: 'Settings'),
               ],
             ),
           ),
           body: const TabBarView(
-            children: [PayrollDashboardTab(), RunsTab(), PayrollEmployeesTab(), PayrollSettingsTab()],
+            children: [
+              PayrollDashboardTab(),
+              RunsTab(),
+              PayrollEmployeesTab(),
+              StatutoryTab(),
+              PayrollSettingsTab(),
+            ],
           ),
         ),
       ),

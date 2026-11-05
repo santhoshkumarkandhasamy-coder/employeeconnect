@@ -130,6 +130,54 @@ class FakeRepo extends PayrollRepository {
     return PayrollFile(Uint8List(0), 'payroll-$kind-$period.xlsx');
   }
 
+  // statutory
+  List<StatutoryMonth> duesList = [];
+  ApiException? duesError;
+  ApiException? fileError;
+  ApiException? challanError;
+  int challanWrongPasswords = 0;
+  final List<String> statutoryFileCalls = [];
+  final List<Map<String, Object?>> challanCalls = [];
+
+  @override
+  Future<List<StatutoryMonth>> statutoryDues(String period, {int months = 1}) async {
+    if (duesError != null) throw duesError!;
+    return duesList;
+  }
+
+  @override
+  Future<PayrollFile> statutoryFile(String kind, String period) async {
+    statutoryFileCalls.add('$kind:$period');
+    if (fileError != null) throw fileError!;
+    return PayrollFile(Uint8List.fromList([1]), 'statutory-$kind-$period.xlsx');
+  }
+
+  @override
+  Future<void> setChallan({
+    required String type,
+    required String period,
+    required bool paid,
+    required String currentPassword,
+    String? paidOn,
+    String? reference,
+    String? amount,
+  }) async {
+    challanCalls.add({
+      'type': type,
+      'period': period,
+      'paid': paid,
+      'paid_on': paidOn,
+      'reference': reference,
+      'amount': amount,
+      'pw': currentPassword,
+    });
+    if (challanWrongPasswords > 0) {
+      challanWrongPasswords--;
+      throw const ApiException(code: 'REAUTH_FAILED', message: 'no', status: 403);
+    }
+    if (challanError != null) throw challanError!;
+  }
+
   // data
   List<PayslipListItem> mine = [];
   Payslip? myDetail;
@@ -172,8 +220,8 @@ class FakeRepo extends PayrollRepository {
     'trend': [
       {'period': '2026-11', 'employees': 2, 'gross': '100000.00', 'net': '80000.00', 'employer_cost': '104000.00'},
     ],
-    'joiners': [],
-    'leavers': [],
+    'joiners': <Object?>[],
+    'leavers': <Object?>[],
     'calendar': {
       'cutoff_day': 25,
       'process_by': '2026-11-28',
@@ -181,7 +229,7 @@ class FakeRepo extends PayrollRepository {
       'alerts': ['RUN_NOT_CREATED'],
     },
   };
-  Map<String, dynamic> varianceJson = {'period': '2026-11', 'previous': '2026-10', 'items': []};
+  Map<String, dynamic> varianceJson = {'period': '2026-11', 'previous': '2026-10', 'items': <Object?>[]};
   final List<String> reportCalls = [];
   List<PayrollEmployee> employeeList = [];
 

@@ -87,3 +87,8 @@ final payrollDashboardProvider = FutureProvider.autoDispose.family<Map<String, d
 final payrollVarianceProvider = FutureProvider.autoDispose.family<Map<String, dynamic>, String>(
   (ref, period) => ref.watch(payrollRepositoryProvider).variance(period),
 );
+
+/// Statutory dues for one month (contract section 16). In memory only.
+final statutoryDuesProvider = FutureProvider.autoDispose.family<List<StatutoryMonth>, String>(
+  (ref, period) => ref.watch(payrollRepositoryProvider).statutoryDues(period),
+);

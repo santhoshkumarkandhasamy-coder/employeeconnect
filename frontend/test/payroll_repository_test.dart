@@ -346,6 +346,117 @@ void main() {
     });
   });
 
+  group('statutory (contract section 16)', () {
+    test('dues query and parsing; blockers carry no identifier values', () async {
+      final (repo, a) = _repo((c) => _Reply(200, samples['statutory_dues']));
+      final months = await repo.statutoryDues('2026-10');
+      expect(a.calls.single.method, 'GET');
+      expect(a.calls.single.path, '/admin/payroll/statutory/dues');
+      expect(a.calls.single.query, {'period': '2026-10', 'months': 1});
+      final m = months.single;
+      expect(m.isPublished, isTrue);
+      expect(m.items.map((i) => i.type), ['pf', 'esi', 'pt', 'tds']);
+      expect(m.items.first.paid, isTrue);
+      expect(m.items.first.reference, 'TRRN123/45');
+      expect(m.items[1].paid, isFalse);
+      expect(m.items[1].paidOn, isNull);
+      expect(m.items.last.mismatch, isTrue);
+      expect(m.blockers.single.name, 'Asha Rao');
+      expect(m.blockers.single.missing.map((x) => '${x.field}:${x.reason}'), ['UAN:missing', 'PAN:invalid']);
+    });
+
+    test('an unpublished month has a status and no items', () async {
+      final (repo, _) = _repo((c) => _Reply(200, samples['statutory_dues_unpublished']));
+      final m = (await repo.statutoryDues('2026-11')).single;
+      expect(m.isPublished, isFalse);
+      expect(m.runStatus, 'draft');
+      expect(m.items, isEmpty);
+    });
+
+    test('paid challan body carries all fields and the password', () async {
+      final (repo, a) = _repo((c) => _Reply(200, samples['statutory_challan_put']));
+      await repo.setChallan(
+        type: 'pf',
+        period: '2026-10',
+        paid: true,
+        paidOn: '2026-11-05',
+        reference: 'TRRN123/45',
+        amount: '21600.00',
+        currentPassword: 'pw',
+      );
+      expect(a.calls.single.method, 'PUT');
+      expect(a.calls.single.path, '/admin/payroll/statutory/challans');
+      expect(a.calls.single.body, {
+        'type': 'pf',
+        'period': '2026-10',
+        'status': 'paid',
+        'paid_on': '2026-11-05',
+        'reference': 'TRRN123/45',
+        'amount': '21600.00',
+        'current_password': 'pw',
+      });
+    });
+
+    test('unpaid challan body has no paid fields; an empty amount is left out', () async {
+      final (repo, a) = _repo((c) => _Reply(200, samples['statutory_challan_put']));
+      await repo.setChallan(
+        type: 'esi',
+        period: '2026-10',
+        paid: false,
+        paidOn: 'x',
+        reference: 'y',
+        amount: '5',
+        currentPassword: 'pw',
+      );
+      expect(a.calls.single.body, {
+        'type': 'esi',
+        'period': '2026-10',
+        'status': 'unpaid',
+        'current_password': 'pw',
+      });
+      await repo.setChallan(
+        type: 'esi',
+        period: '2026-10',
+        paid: true,
+        paidOn: '2026-11-01',
+        reference: 'r',
+        amount: '',
+        currentPassword: 'pw',
+      );
+      expect((a.calls.last.body! as Map).containsKey('amount'), isFalse);
+    });
+
+    test('file downloads use POST with the period and sensible names', () async {
+      final a = _FileAdapter(200, [1, 2]);
+      final repo = PayrollRepository(Dio(BaseOptions(baseUrl: 'http://x/api'))..httpClientAdapter = a);
+      final f = await repo.statutoryFile('pf_ecr', '2026-10');
+      expect(f.filename, 'pf-ecr-2026-10.txt');
+      expect(a.lastPath, '/admin/payroll/statutory/pf_ecr?period=2026-10');
+      expect((await repo.statutoryFile('esi', '2026-10')).filename, 'statutory-esi-2026-10.xlsx');
+    });
+
+    test('captured errors map to readable messages', () async {
+      final errs = samples['statutory_err'] as Map<String, dynamic>;
+      final want = {'blockers': 'UAN', 'not_published': 'Publish', 'already_paid': 'already marked'};
+      for (final k in errs.keys) {
+        final s = errs[k] as List<dynamic>;
+        final (repo, _) = _repo((c) => _Reply(s[0] as int, s[1]));
+        final e = await _thrown(() => repo.statutoryDues('2026-10'));
+        expect(e.status, 409);
+        expect(payrollErrorMessage(e), contains(want[k]!), reason: k);
+      }
+    });
+
+    test('a 409 STATUTORY_BLOCKERS on a file request keeps its code', () async {
+      final s = (samples['statutory_err'] as Map<String, dynamic>)['blockers'] as List<dynamic>;
+      final a = _FileAdapter(409, utf8.encode(jsonEncode(s[1])));
+      final repo = PayrollRepository(Dio(BaseOptions(baseUrl: 'http://x/api'))..httpClientAdapter = a);
+      final e = await _thrown(() => repo.statutoryFile('esi', '2026-10'));
+      expect(e.code, 'STATUTORY_BLOCKERS');
+      expect(e.details.single.field, 'c0a8-1');
+    });
+  });
+
   test('register body: password only when bank details are included', () async {
     final a = _FileAdapter(200, [1, 2, 3], headers: {
       'content-disposition': ['attachment; filename="payroll-register-2025-06.xlsx"'],
@@ -365,6 +476,7 @@ class _FileAdapter implements HttpClientAdapter {
   final List<int> bytes;
   final Map<String, List<String>> headers;
   String? lastBody;
+  String? lastPath;
 
   @override
   Future<ResponseBody> fetch(
@@ -372,6 +484,7 @@ class _FileAdapter implements HttpClientAdapter {
     Stream<Uint8List>? requestStream,
     Future<void>? cancelFuture,
   ) async {
+    lastPath = options.path;
     final d = options.data;
     lastBody = d is String ? d : (d == null ? null : jsonEncode(d));
     return ResponseBody.fromBytes(

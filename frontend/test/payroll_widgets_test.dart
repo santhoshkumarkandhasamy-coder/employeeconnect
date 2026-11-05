@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:employee_connect/core/api/api_exception.dart';
 import 'package:employee_connect/core/security/screen_protect.dart';
 import 'package:employee_connect/features/admin/domain/admin_models.dart' show EmployeeRef;
@@ -13,6 +16,7 @@ import 'package:employee_connect/features/payroll/presentation/payslips_screen.d
 import 'package:employee_connect/features/payroll/presentation/pt_slab_editor.dart';
 import 'package:employee_connect/features/payroll/presentation/run_review_screen.dart';
 import 'package:employee_connect/features/payroll/presentation/runs_tab.dart';
+import 'package:employee_connect/features/payroll/presentation/statutory_tab.dart';
 import 'package:employee_connect/features/payroll/presentation/structure_form_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -238,6 +242,152 @@ void main() {
       await tester.pumpAndSettle();
       expect(repo.calls, contains('createRun:2026-09:null'));
       expect(find.text('Payroll run'), findsNothing); // moved on to the review screen
+    });
+  });
+
+  group('statutory', () {
+    late Map<String, dynamic> samples;
+    setUpAll(() {
+      samples = jsonDecode(File('test/fixtures/payroll_contract_samples.json').readAsStringSync())
+          as Map<String, dynamic>;
+    });
+
+    List<StatutoryMonth> dues([String key = 'statutory_dues']) =>
+        StatutoryMonth.parseList(samples[key] as Map<String, dynamic>);
+
+    testWidgets('home screen has a Statutory tab', (tester) async {
+      await pumpPayroll(tester, const PayrollHomeScreen(), repo: FakeRepo()..duesList = dues(), perms: _view);
+      await tester.tap(find.text('Statutory'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('due-pf')), findsOneWidget);
+    });
+
+    testWidgets('shows dues with status, mismatch and blockers without identifier values',
+        (tester) async {
+      final repo = FakeRepo()..duesList = dues();
+      await pumpPayroll(tester, const Scaffold(body: StatutoryTab()), repo: repo, perms: _view);
+      expect(find.text('October 2026'), findsOneWidget);
+      for (final t in ['pf', 'esi', 'pt', 'tds']) {
+        expect(find.byKey(ValueKey('due-$t')), findsOneWidget);
+      }
+      expect(find.text('Paid'), findsNWidgets(2));
+      expect(find.text('Unpaid'), findsNWidgets(2));
+      expect(find.textContaining('differs from the amount due'), findsOneWidget);
+      expect(find.textContaining('TRRN123/45'), findsOneWidget);
+      expect(find.text('Asha Rao  -  c0a8-1'), findsOneWidget);
+      expect(find.text('UAN missing, PAN invalid'), findsOneWidget);
+      // view_all only: no payment buttons
+      expect(find.byKey(const ValueKey('mark-paid-esi')), findsNothing);
+      expect(find.byKey(const ValueKey('mark-unpaid-pf')), findsNothing);
+    });
+
+    testWidgets('an unpublished run shows a notice and no files', (tester) async {
+      final repo = FakeRepo()..duesList = dues('statutory_dues_unpublished');
+      await pumpPayroll(tester, const Scaffold(body: StatutoryTab()), repo: repo, perms: _view);
+      expect(find.byKey(const ValueKey('stat-not-published')), findsOneWidget);
+      expect(find.byKey(const ValueKey('stat-dl-pf_ecr')), findsNothing);
+    });
+
+    testWidgets('404 shows the empty state; other errors offer a retry', (tester) async {
+      final repo = FakeRepo()..duesError = const ApiException(code: 'NOT_FOUND', message: 'x', status: 404);
+      await pumpPayroll(tester, const Scaffold(body: StatutoryTab()), repo: repo, perms: _view);
+      expect(find.text('No payroll run for this month.'), findsOneWidget);
+      final r2 = FakeRepo()
+        ..duesError = const ApiException(code: 'SERVICE_UNAVAILABLE', message: '', status: 502);
+      await pumpPayroll(tester, const Scaffold(body: StatutoryTab()), repo: r2, perms: _view);
+      expect(find.text('Try again'), findsOneWidget);
+    });
+
+    testWidgets('downloads hand the file to the delivery', (tester) async {
+      final repo = FakeRepo()..duesList = dues();
+      final delivery = FakeDelivery();
+      await pumpPayroll(tester, const Scaffold(body: StatutoryTab()), repo: repo, perms: _view, delivery: delivery);
+      await _tapKey(tester, 'stat-dl-pf_ecr');
+      await _tapKey(tester, 'stat-dl-pt');
+      expect(repo.statutoryFileCalls, ['pf_ecr:2026-10', 'pt:2026-10']);
+      expect(delivery.files, hasLength(2));
+    });
+
+    testWidgets('STATUTORY_BLOCKERS and RUN_NOT_PUBLISHED show readable messages', (tester) async {
+      final repo = FakeRepo()
+        ..duesList = dues()
+        ..fileError = const ApiException(code: 'STATUTORY_BLOCKERS', message: 'x', status: 409);
+      final delivery = FakeDelivery();
+      await pumpPayroll(tester, const Scaffold(body: StatutoryTab()), repo: repo, perms: _view, delivery: delivery);
+      await _tapKey(tester, 'stat-dl-esi');
+      expect(find.textContaining('missing a valid UAN'), findsOneWidget);
+      expect(delivery.files, isEmpty);
+      repo.fileError = const ApiException(code: 'RUN_NOT_PUBLISHED', message: 'x', status: 409);
+      await _tapKey(tester, 'stat-dl-pf_ecr');
+      expect(find.textContaining('Publish this month'), findsOneWidget);
+    });
+
+    testWidgets('mark paid validates the form, asks for the password and retries a wrong one',
+        (tester) async {
+      final repo = FakeRepo()
+        ..duesList = dues()
+        ..challanWrongPasswords = 1;
+      await pumpPayroll(tester, const Scaffold(body: StatutoryTab()), repo: repo, perms: _manage);
+      await _tapKey(tester, 'mark-paid-esi');
+      await tester.tap(find.byKey(const ValueKey('paid-continue')));
+      await tester.pumpAndSettle();
+      expect(find.text('Reference is required'), findsOneWidget);
+      await tester.enterText(find.byKey(const ValueKey('paid-reference')), 'bad*ref');
+      await tester.enterText(find.byKey(const ValueKey('paid-date')), '2026-12-01');
+      await tester.tap(find.byKey(const ValueKey('paid-continue')));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Letters, numbers'), findsOneWidget);
+      expect(find.text('Not in the future'), findsOneWidget);
+      await tester.enterText(find.byKey(const ValueKey('paid-reference')), 'CH/77-1');
+      await tester.enterText(find.byKey(const ValueKey('paid-date')), '2026-10-20');
+      await tester.tap(find.byKey(const ValueKey('paid-continue')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const ValueKey('reauth-password')), 'wrong');
+      await tester.tap(find.text('Confirm'));
+      await tester.pumpAndSettle();
+      expect(find.text('That password is not correct.'), findsOneWidget);
+      await tester.enterText(find.byKey(const ValueKey('reauth-password')), 'right');
+      await tester.tap(find.text('Confirm'));
+      await tester.pumpAndSettle();
+      expect(repo.challanCalls.map((c) => c['pw']), ['wrong', 'right']);
+      expect(repo.challanCalls.last, {
+        'type': 'esi',
+        'period': '2026-10',
+        'paid': true,
+        'paid_on': '2026-10-20',
+        'reference': 'CH/77-1',
+        'amount': null,
+        'pw': 'right',
+      });
+      expect(find.textContaining('marked as paid'), findsOneWidget);
+    });
+
+    testWidgets('mark unpaid confirms, then needs the password', (tester) async {
+      final repo = FakeRepo()..duesList = dues();
+      await pumpPayroll(tester, const Scaffold(body: StatutoryTab()), repo: repo, perms: _manage);
+      await _tapKey(tester, 'mark-unpaid-pf');
+      await tester.tap(find.byKey(const ValueKey('unpaid-confirm')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const ValueKey('reauth-password')), 'pw');
+      await tester.tap(find.text('Confirm'));
+      await tester.pumpAndSettle();
+      expect(repo.challanCalls.single['paid'], isFalse);
+      expect(repo.challanCalls.single['type'], 'pf');
+    });
+
+    testWidgets('CHALLAN_ALREADY_PAID is explained', (tester) async {
+      final repo = FakeRepo()
+        ..duesList = dues()
+        ..challanError = const ApiException(code: 'CHALLAN_ALREADY_PAID', message: 'x', status: 409);
+      await pumpPayroll(tester, const Scaffold(body: StatutoryTab()), repo: repo, perms: _manage);
+      await _tapKey(tester, 'mark-paid-pt');
+      await tester.enterText(find.byKey(const ValueKey('paid-reference')), 'R1');
+      await tester.tap(find.byKey(const ValueKey('paid-continue')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const ValueKey('reauth-password')), 'pw');
+      await tester.tap(find.text('Confirm'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('already marked as paid'), findsOneWidget);
     });
   });
 

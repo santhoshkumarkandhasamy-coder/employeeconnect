@@ -1801,5 +1801,128 @@
     }
    }
   ]
+ },
+ "statutory_dues": {
+  "months": [
+   {
+    "period": "2026-10",
+    "run_status": "published",
+    "items": [
+     {
+      "type": "pf",
+      "amount": "21600.00",
+      "employees": 6,
+      "status": "paid",
+      "paid_on": "2026-11-05",
+      "reference": "TRRN123/45",
+      "paid_amount": "21600.00",
+      "mismatch": false
+     },
+     {
+      "type": "esi",
+      "amount": "1424.00",
+      "employees": 2,
+      "status": "unpaid",
+      "paid_on": null,
+      "reference": null,
+      "paid_amount": null,
+      "mismatch": false
+     },
+     {
+      "type": "pt",
+      "amount": "1250.00",
+      "employees": 5,
+      "status": "unpaid",
+      "paid_on": null,
+      "reference": null,
+      "paid_amount": null,
+      "mismatch": false
+     },
+     {
+      "type": "tds",
+      "amount": "3200.00",
+      "employees": 1,
+      "status": "paid",
+      "paid_on": "2026-11-06",
+      "reference": "CHL 77",
+      "paid_amount": "3000.00",
+      "mismatch": true
+     }
+    ],
+    "blockers": [
+     {
+      "employee_id": "c0a8-1",
+      "name": "Asha Rao",
+      "missing": [
+       {
+        "field": "UAN",
+        "reason": "missing"
+       },
+       {
+        "field": "PAN",
+        "reason": "invalid"
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ "statutory_dues_unpublished": {
+  "months": [
+   {
+    "period": "2026-11",
+    "run_status": "draft",
+    "items": [],
+    "blockers": []
+   }
+  ]
+ },
+ "statutory_challan_put": {
+  "type": "pf",
+  "period": "2026-10",
+  "status": "paid",
+  "paid_on": "2026-11-05",
+  "reference": "TRRN123/45"
+ },
+ "statutory_err": {
+  "blockers": [
+   409,
+   {
+    "error": {
+     "code": "STATUTORY_BLOCKERS",
+     "message": "Fix identifiers",
+     "details": [
+      {
+       "field": "c0a8-1",
+       "message": "UAN missing"
+      }
+     ],
+     "request_id": "a1"
+    }
+   }
+  ],
+  "not_published": [
+   409,
+   {
+    "error": {
+     "code": "RUN_NOT_PUBLISHED",
+     "message": "Run not published",
+     "details": [],
+     "request_id": "a2"
+    }
+   }
+  ],
+  "already_paid": [
+   409,
+   {
+    "error": {
+     "code": "CHALLAN_ALREADY_PAID",
+     "message": "Already paid",
+     "details": [],
+     "request_id": "a3"
+    }
+   }
+  ]
  }
 }

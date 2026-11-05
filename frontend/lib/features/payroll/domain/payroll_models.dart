@@ -827,6 +827,101 @@ class PtSlab {
   static List<PtSlab> parseList(Object? v) => [for (final e in _list(v)) PtSlab.fromJson(e)];
 }
 
+// ---- statutory (contract section 16) --------------------------------------------------------
+
+/// One statutory due (PF / ESI / PT / TDS) for a month.
+class StatutoryDueItem {
+  const StatutoryDueItem({
+    required this.type,
+    required this.amount,
+    required this.employees,
+    required this.paid,
+    this.paidOn,
+    this.reference,
+    this.paidAmount,
+    this.mismatch = false,
+  });
+
+  factory StatutoryDueItem.fromJson(Map<String, dynamic> j) => StatutoryDueItem(
+        type: _s(j['type']),
+        amount: _s(j['amount']).isEmpty ? '0.00' : _s(j['amount']),
+        employees: _i(j['employees']),
+        paid: j['status'] == 'paid',
+        paidOn: _opt(j['paid_on']),
+        reference: _opt(j['reference']),
+        paidAmount: _opt(j['paid_amount']),
+        mismatch: j['mismatch'] == true,
+      );
+
+  final String type;
+  final String amount;
+  final int employees;
+  final bool paid;
+  final String? paidOn;
+  final String? reference;
+  final String? paidAmount;
+  final bool mismatch;
+}
+
+/// An employee whose identifier blocks a PF / ESI file. Never holds a value.
+class StatutoryBlocker {
+  const StatutoryBlocker({required this.employeeId, required this.name, required this.missing});
+
+  factory StatutoryBlocker.fromJson(Map<String, dynamic> j) => StatutoryBlocker(
+        employeeId: _s(j['employee_id']),
+        name: _s(j['name']),
+        missing: [
+          for (final m in _list(j['missing']))
+            (field: _s(m['field']), reason: _s(m['reason'])),
+        ],
+      );
+
+  final String employeeId;
+  final String name;
+  final List<({String field, String reason})> missing;
+}
+
+class StatutoryMonth {
+  const StatutoryMonth({
+    required this.period,
+    required this.runStatus,
+    required this.items,
+    required this.blockers,
+  });
+
+  factory StatutoryMonth.fromJson(Map<String, dynamic> j) => StatutoryMonth(
+        period: _s(j['period']),
+        runStatus: _opt(j['run_status']),
+        items: [for (final e in _list(j['items'])) StatutoryDueItem.fromJson(e)],
+        blockers: [for (final e in _list(j['blockers'])) StatutoryBlocker.fromJson(e)],
+      );
+
+  static List<StatutoryMonth> parseList(Map<String, dynamic> j) =>
+      [for (final e in _list(j['months'])) StatutoryMonth.fromJson(e)];
+
+  final String period;
+  final String? runStatus;
+  final List<StatutoryDueItem> items;
+  final List<StatutoryBlocker> blockers;
+
+  bool get isPublished => runStatus == 'published';
+}
+
+const Map<String, String> statutoryTypeLabels = {
+  'pf': 'Provident Fund (PF)',
+  'esi': 'ESI',
+  'pt': 'Professional Tax (PT)',
+  'tds': 'Income Tax (TDS)',
+};
+
+/// `UAN` -> readable name for the blockers list.
+String statutoryFieldLabel(String field) => switch (field) {
+      'UAN' => 'UAN',
+      'ESI_IP' => 'ESI IP number',
+      'PAN' => 'PAN',
+      _ => field,
+    };
+
 // ---- errors -------------------------------------------------------------------------------
 
 const Map<String, String> payrollWarningLabels = {
@@ -870,6 +965,17 @@ String payrollErrorMessage(ApiException e) {
       return lines.isEmpty
           ? 'Some payslips have errors, so payroll cannot be processed.'
           : 'Payroll cannot be processed yet:\n${lines.join('\n')}';
+    case 'RUN_NOT_PUBLISHED':
+      return "Publish this month's payroll run first. Statutory files use published payslips only.";
+    case 'STATUTORY_BLOCKERS':
+      return 'Some employees are missing a valid UAN, ESI IP number or PAN. '
+          'Fix them (see Blockers) and try again.';
+    case 'CHALLAN_ALREADY_PAID':
+      return 'This payment is already marked as paid. Reload to see it.';
+    case 'CHALLAN_NOT_PAID':
+      return 'This payment is not marked as paid. Reload to see it.';
+    case 'INVALID_DATE':
+      return 'Choose a paid date that is not before the month starts and not in the future.';
     case 'NOTHING_TO_PUBLISH':
       return 'There is nothing to publish. Process the payroll first.';
     case 'STRUCTURE_EXISTS':

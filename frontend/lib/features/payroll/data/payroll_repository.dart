@@ -238,6 +238,46 @@ class PayrollRepository {
         body: {if (currentPassword != null) 'current_password': currentPassword},
       );
 
+  // ---- statutory (plan 14 phase 2, contract section 16) ---------------------------
+
+  static const _st = '$_a/statutory';
+
+  Future<List<StatutoryMonth>> statutoryDues(String period, {int months = 1}) async =>
+      StatutoryMonth.parseList(
+        await _json('GET', '$_st/dues', query: {'period': period, 'months': months}),
+      );
+
+  /// [kind]: pf_ecr (text) | esi | pt (workbooks). Needs `payroll.view_all`.
+  /// 409 STATUTORY_BLOCKERS / RUN_NOT_PUBLISHED surface as [ApiException].
+  Future<PayrollFile> statutoryFile(String kind, String period) => _file(
+        'POST',
+        '$_st/$kind?period=$period',
+        fallbackName: kind == 'pf_ecr' ? 'pf-ecr-$period.txt' : 'statutory-$kind-$period.xlsx',
+        ext: kind == 'pf_ecr' ? '.txt' : '.xlsx',
+        body: const <String, Object?>{},
+      );
+
+  /// Marks a challan paid / unpaid. [currentPassword] is always required.
+  Future<void> setChallan({
+    required String type,
+    required String period,
+    required bool paid,
+    required String currentPassword,
+    String? paidOn,
+    String? reference,
+    String? amount,
+  }) async {
+    await _json('PUT', '$_st/challans', body: {
+      'type': type,
+      'period': period,
+      'status': paid ? 'paid' : 'unpaid',
+      if (paid) 'paid_on': paidOn,
+      if (paid) 'reference': reference,
+      if (paid && amount != null && amount.isNotEmpty) 'amount': amount,
+      'current_password': currentPassword,
+    },);
+  }
+
   // ---- admin payslips -------------------------------------------------------------
 
   Future<Payslip> payslip(String id) async =>
