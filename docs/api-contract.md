@@ -1698,3 +1698,344 @@ Where the backend refines 18.0, 18.1 [4b] and 18.8 to 18.12 (Flutter should foll
   - **Maker guard (L1)**: `submit` and `withdraw` are 403 `SECOND_PERSON_REQUIRED` for the person who last decided the record. **Approve (L5)**: 409 `PERIOD_LOCKED` when the settlement month's run is `processed` (reopen it first); the net check (L4) uses the run's
     settings snapshot and the manual TDS / PT / adjustments of the open payslip; the item cap (L6) counts moved arrears and claims. **Revoke (L2, L3)**: every cancelled row must carry this F&F's id and the employee (else 409 `CONFLICT`, database triggers repeat it);
     the regenerated loan schedule starts at the first month that accepts a new row (published months without an open revision for the employee are skipped).
+
+## 19. Payroll controls and delivery: publish maker-checker, bank payment file, investment declarations / Form 16, TDS engine (plan 17 = plan 14 phase 5) - PROPOSED
+
+Plan: `docs/plans/17-payroll-phase5.md`. Sections 13.0, 17.0 and 18.0 conventions apply (money strings, `period` = `YYYY-MM`, labels 1-40 / reasons and comments 3-200 chars cleaned, unknown fields 422,
+self rule 403 `FORBIDDEN` audited `payroll.denied`, admin unknown ids 404, employee routes 404 for anything not their own, audited probe). `fy` = financial year `YYYY-YY` (`"2026-27"` = 1 Apr 2026 .. 31 Mar 2027).
+Money, PAN, bank accounts, IFSC, landlord / lender PAN, bank references, file names, labels, reasons and comments are never written to audit rows, logs, push payloads or error messages.
+**[5a]** = work package 5a (migration 0026), **[5b]** = 5b (0027), **[5c]** = 5c (0028).
+
+### 19.0 Common
+**Permissions.** Reads `payroll.view_all`; maker actions `payroll.manage`; publish checker `payroll.publish`; payment batch, tax rules and Form 16 checker `payroll.approve`; employee tax self-service `payroll.view_own`.
+**Maker-checker.** As 18.14: the checker is not the employee (403 `FORBIDDEN`), nor the creator, last editor, submitter or anybody in the append-only `contributors` / `makers` list (403 `SECOND_PERSON_REQUIRED`). The database repeats it with CHECK constraints. Decision audits carry `maker_id` (requester / submitter) and `checker_id`.
+**Step-up** (`current_password`; 422 `VALIDATION_ERROR` when missing, 403 `REAUTH_FAILED`; verified before any state check; 5/min + 20/day per admin for approve endpoints, fail closed): publish request approve, payment batch approve, bank file download, payment confirm,
+bank account create, rules verify, declaration on behalf, Form 16 commit / publish / withdraw, 24Q and computation statement exports, declarations xlsx with identifiers, and changing `payroll.bank_file_requires_second_person`, `payroll.form16_requires_second_person`, `payroll.tds_engine_enabled` (these also need `role.assign`, like 13.3, and send an `admin_alert` push).
+**Rate limits** (per user, Redis; writes fail closed -> 503 `TEMPORARILY_UNAVAILABLE`): reads `payroll:admin_read` 120/min; creates / edits / submit / withdraw / cancel `payroll:write` 60/min; approve / reject / verify / publish / remind `payroll:action` 10/min;
+bank file `payroll:bank_file` 10/min + 30/day; Form 16 upload `payroll:import` 10/min + 50/day (shared with 17.2); 24Q / statements `payroll:statutory_file` 10/min + 30/day; employee tax reads `payroll:own_list` 60/min; employee declaration / proof writes `tax:write` 30/min + 200/day; employee Form 16 download `payroll:own_detail` (shared with payslips).
+**Money caps.** Monthly amounts 0.01..10000000.00; annual tax amounts 0.01..120000000.00; bank line <= the payslip net; batch totals are computed, never accepted. Over the cap -> 422 `VALIDATION_ERROR` (`details.field` = the field).
+**Money history.** Every create / edit / state change appends to `payroll_item_events` (`item_type` `publish_request`, `payment_batch`, `tax_rules`, `tax_declaration`, `tax_proof`, `form16`); not exposed.
+
+### 19.1 Changes to existing sections
+- **13.5 / 13.6 publish [5a]**: while maker-checker applies to the run (run snapshot OR current `payroll.publish_requires_second_person`), `POST /runs/{id}/publish` and `POST /payslips/{id}/publish` answer 409 `PUBLISH_REQUEST_REQUIRED`; publishing happens through 19.2. Unchanged when it does not apply.
+- **13.5 Run** gains `"publish_request": { "id","status","requested_by":UserSummary,"requested_at","stale_reason" } | null` (latest request). **13.6 AdminPayslip** gains the same for scope `payslip`.
+- **13.5 / 13.6 [5a]**: run create, refresh, process, reopen and payslip PUT / process / reopen / revise add the actor to `contributors` (not exposed). Reopen, refresh and payslip-level process / reopen mark open publish requests of that run `stale`.
+- **13.2 [5a]**: `GET /payslips/{id}` and `/pdf` for the owner set `first_viewed_at` / `first_downloaded_at` in `payslip_deliveries` (no response change).
+- **13.4 details [5a]**: a change of `bank_name`, `bank_account`, `bank_ifsc` or `payment_mode` sets `bank_changed_by` / `bank_changed_at` (read-only `"bank_changed_at":"ts"|null` added to the details object).
+- **13.6 AdminPayslip [5c]** gains `"tds_computation": TdsComputation | null` (19.9); **PUT** gains `"tds_override_reason"` (3-200, required when `tds` is sent while the run's engine mode is `apply`, else 422). Warnings gain `TDS_OVERRIDDEN`, `TDS_CAPPED_NET`, `TDS_EXCESS`, `TAX_RULES_NOT_VERIFIED`, `NO_PAN_206AA`, `PERQUISITE_REVIEW`, `LEAVE_ENCASH_REVIEW`, `RULES_CHANGED`.
+- **13.5 Run.config [5c]** snapshot gains `tds_engine_enabled`, `tds_engine_mode`, `tax_rules: { "fy","id","version" } | null`.
+- **16 challans [5c]**: `PUT /statutory/challans` with `type: "tds"` and `status: "paid"` also takes `bsr_code` (`^\d{7}$`), `challan_serial` (`^\d{1,5}$`) and `deposited_on` (date, not future); all three are REQUIRED for TDS from 5c on (422). Response adds `"bsr_code":"XXX4567"` (masked), `"challan_serial"`, `"deposited_on"`. Encrypted; never audited.
+- **15.1 dashboard [5a]** alerts gain `PUBLISH_PENDING_APPROVAL`, `PAYMENT_NOT_EXPORTED` (published run, pay date passed, eligible lines not in an exported batch), `PAYMENT_FAILED_LINES`; **[5b]** `TAX_RULES_NOT_VERIFIED` (current FY), `PROOFS_PENDING`.
+- **`POST /files` [5b]** accepts `purpose=tax_proof` (`payroll.view_own`; jpeg / png / pdf <= 5 MB) and `purpose=form16` (internal only: created by 19.8 upload, not accepted from `POST /files`).
+- **Section 11 push** types: `payslip_reminder`, `form16_available`, `tax_proof_decision`, `tax_declaration_changed`, `tax_window`; `payroll_approval` kinds gain `publish`, `payment_batch`, `tax_rules`, `form16` (19.12).
+
+### 19.2 Publish requests (maker-checker for publish) [5a]
+| Method | Path | Perm |
+|---|---|---|
+| GET | /admin/payroll/runs/{id}/publish-check | `payroll.view_all` |
+| GET | /admin/payroll/payslips/{id}/publish-check | `payroll.view_all` |
+| POST | /admin/payroll/runs/{id}/publish-requests | `payroll.manage` (run `processed`) |
+| POST | /admin/payroll/payslips/{id}/publish-requests | `payroll.manage` (payslip `processed`, run `published`) |
+| GET | /admin/payroll/publish-requests?status=&run_id=&page=&page_size= | `payroll.view_all` (audit `payroll.publish_request.list`, `after={count}`) |
+| GET | /admin/payroll/publish-requests/{id} | `payroll.view_all` (audit `payroll.publish_request.view`) |
+| POST | /admin/payroll/publish-requests/{id}/withdraw | `payroll.manage` (submitted) |
+| POST | /admin/payroll/publish-requests/{id}/approve | `payroll.publish` + step-up (submitted) |
+| POST | /admin/payroll/publish-requests/{id}/reject | `payroll.publish` (submitted) |
+
+**publish-check** -> 200
+```json
+{ "maker_checker":true,"can_request":false,"can_publish_directly":false,"can_approve":false,
+  "open_request":{ "id":"uuid","status":"submitted" }|null,
+  "me":{ "reasons":["EDITED_PAYSLIP","CREATED_COMPONENT"] },
+  "makers":[ { "user":UserSummary,"reasons":["PROCESSED_RUN"] } ],
+  "publishable":{ "payslips":46,"held":2 } }
+```
+Reasons: `PROCESSED_RUN`, `EDITED_PAYSLIP`, `CREATED_COMPONENT`, `CREATED_STRUCTURE`, `FNF_MAKER`, `REQUESTED`, `OWN_PAYSLIP` (scope payslip only). `can_publish_directly` is true only when maker-checker does not apply.
+**create** `{ "comment":null|"..." }` -> 201 PublishRequest. **withdraw** `{ "expected_version":1 }` -> 200. **reject** `{ "expected_version":1,"comment":"required" }` -> 200.
+**approve** `{ "expected_version":1,"comment":null,"current_password":"..." }` -> 200 `{ "request":PublishRequest,"run":Run }` (scope payslip: `"payslip":AdminPayslip` instead of `run`). The publish (13.5 / 13.6 internals, pushes, F&F settle, arrears resync) runs in the same transaction.
+**PublishRequest**:
+```json
+{ "id":"uuid","scope":"run|payslip","run":{ "id":"uuid","period":"2026-10","status":"processed" },
+  "payslip":{ "id":"uuid","user":UserSummary,"revision":2 }|null,
+  "status":"submitted|approved|rejected|withdrawn|stale","stale_reason":null|"RUN_REOPENED|RUN_REFRESHED|PAYSLIP_CHANGED|EXPIRED",
+  "snapshot":{ "payslips":46,"held":2,"warnings":5,"processed_at":"ts",
+               "totals":{ "gross_earnings":"1850000.00","total_deductions":"160000.00","net_pay":"1690000.00","employer_cost":"0.00" } },
+  "comment":null,"requested_by":UserSummary,"requested_at":"ts","expires_at":"ts",
+  "makers":[ UserSummary ]|null,"decided_by":UserSummary|null,"decided_at":"ts|null","decision_comment":null,"version":1 }
+```
+`makers` is filled at approve / reject (the set computed under locks). List items omit `snapshot.totals` and `makers`.
+Approve check order: step-up; scope payslip and the caller is the employee (403 `FORBIDDEN`); caller in the maker set (requester, run / payslip contributors, actors of the components' money history, F&F makers for F&F rows, creators / editors of `manual` / `import` structures used) (403 `SECOND_PERSON_REQUIRED`);
+`submitted` (409 `NOT_SUBMITTED`); `expected_version` (409 `VERSION_CONFLICT`); expired (409 `PUBLISH_STALE`, request becomes `stale`); run / payslip still `processed` and the set of processed non-held payslips, their versions and result MACs equal the snapshot (409 `PUBLISH_STALE`, request becomes `stale`);
+then the publish errors (409 `COMPONENTS_CHANGED`, `FNF_NOT_INCLUDED`: everything rolls back, the request stays `submitted`).
+Errors (all): 409 `MAKER_CHECKER_OFF`, `PUBLISH_REQUEST_EXISTS`, `PUBLISH_REQUEST_REQUIRED` (13.5 / 13.6), `PUBLISH_STALE`, `NOT_SUBMITTED`, `VERSION_CONFLICT`, `PAYROLL_LOCKED`, `NOTHING_TO_PUBLISH`, `COMPONENTS_CHANGED`, `FNF_NOT_INCLUDED`; 403 `FORBIDDEN`, `SECOND_PERSON_REQUIRED`, `REAUTH_FAILED`; 429.
+Audit `payroll.publish_request.create|withdraw|approve|reject|expire|stale` (`after={scope, run_id, period, payslips, status, stale_reason, maker_id, checker_id, self_included}`); the publish itself keeps `payroll.run.publish` / `payroll.payslip.publish` with `after.request_id`.
+
+### 19.3 Payslip delivery (push only) [5a]
+| Method | Path | Perm |
+|---|---|---|
+| GET | /admin/payroll/runs/{id}/delivery?state=viewed\|not_viewed\|no_device&q=&page=&page_size= | `payroll.view_all` (audit `payroll.delivery.view`, `after={count}`) |
+| POST | /admin/payroll/runs/{id}/delivery/remind | `payroll.manage` |
+
+**delivery** -> `{ "counts":{ "published":46,"pushed":44,"viewed":30,"downloaded":12,"no_device":2 },"items":[ { "user":UserSummary,"payslip_id":"uuid","revision":1,"pushed_at":"ts|null","push_count":1,
+"reminders":0,"first_viewed_at":"ts|null","first_downloaded_at":"ts|null","has_device":true } ],"page":1,"page_size":50,"total":46 }`.
+**remind** `{ "user_ids":["uuid"]|null }` (null = every not-viewed employee with a device; <= 500) -> 200 `{ "sent":14,"skipped":[ { "user_id":"uuid","reason":"VIEWED|NO_DEVICE|TOO_SOON|LIMIT_REACHED|NOT_PUBLISHED" } ] }`.
+Max one reminder per payslip per 24 h and 3 in total. Run must be published (409 `PAYROLL_LOCKED` otherwise). Push `payslip_reminder`. Audit `payroll.delivery.remind` (`after={run_id, sent, skipped}`).
+
+### 19.4 Company bank (debit) accounts [5a]
+| Method | Path | Perm |
+|---|---|---|
+| GET | /admin/payroll/bank-accounts | `payroll.view_all` |
+| POST | /admin/payroll/bank-accounts | `payroll.manage` + step-up |
+| PUT | /admin/payroll/bank-accounts/{id} | `payroll.manage` |
+
+**BankAccount** `{ "id","label":"HDFC salary account","bank_name":"HDFC Bank","account":"XXXXXX4321","ifsc":"HDFC0001234","is_default":true,"active":true,"created_at","created_by":UserSummary }` (account always masked).
+**POST** `{ "label","bank_name","account":"^\\d{9,18}$","ifsc":"^[A-Z]{4}0[A-Z0-9]{6}$","is_default":false,"current_password" }` -> 201; `admin_alert` push to `role.assign` holders. **PUT** `{ "label"?, "is_default"?, "active"? }` -> 200 (account / IFSC cannot change: 422; create a new account).
+Deactivating an account used by a `draft` / `submitted` / `approved` batch -> 409 `IN_USE`. Audit `payroll.bank_account.create|update` (id, label changes as field names only).
+
+### 19.5 Payment batches and the bank file [5a]
+| Method | Path | Perm |
+|---|---|---|
+| POST | /admin/payroll/runs/{id}/payment-batches | `payroll.manage` (run `published`) |
+| GET | /admin/payroll/payment-batches?run_id=&status=&page=&page_size= | `payroll.view_all` (audit `payroll.payment_batch.list`, `after={count}`) |
+| GET | /admin/payroll/payment-batches/{id} | `payroll.view_all` (audit `payroll.payment_batch.view`) |
+| PUT | /admin/payroll/payment-batches/{id} | `payroll.manage` (draft) |
+| POST | /admin/payroll/payment-batches/{id}/submit | `payroll.manage` (draft) |
+| POST | /admin/payroll/payment-batches/{id}/withdraw | `payroll.manage` (submitted -> draft) |
+| POST | /admin/payroll/payment-batches/{id}/approve | `payroll.approve` + step-up (submitted) |
+| POST | /admin/payroll/payment-batches/{id}/reject | `payroll.approve` (submitted -> draft) |
+| POST | /admin/payroll/payment-batches/{id}/cancel | `payroll.manage` (draft / submitted / approved, before export) |
+| POST | /admin/payroll/payment-batches/{id}/file | `payroll.manage` + step-up (approved / exported / closed) |
+| POST | /admin/payroll/payment-batches/{id}/confirm | `payroll.manage` + step-up (exported) |
+
+**create** `{ "debit_account_id":"uuid"|null (null = default),"value_date":"2026-10-31","user_ids":["uuid"]|null }` -> 201 PaymentBatch (`draft`). `value_date` today..today + 30 (422 `INVALID_DATE`). <= 1000 lines (422 `TOO_MANY_ROWS`). No line at all -> 422 `NOTHING_TO_PAY` (with `blockers` in `details`).
+**PaymentBatch**:
+```json
+{ "id":"uuid","reference":"PAY-2026-10-01","run":{ "id":"uuid","period":"2026-10" },"status":"draft|submitted|approved|exported|closed|cancelled",
+  "debit_account":{ "id":"uuid","label":"HDFC salary account","account":"XXXXXX4321" },"value_date":"2026-10-31","format":"generic_neft_csv",
+  "counts":{ "lines":44,"excluded":1,"exported":0,"paid":0,"failed":0 },"total":"1650000.00",
+  "lines":[ { "id":"uuid","seq":1,"user":UserSummary,"payslip":{ "id":"uuid","revision":1 },"amount":"35300.00",
+              "beneficiary_name":"A B","account":"XXXXXX1234","ifsc":"HDFC0001234","account_source":"snapshot|current",
+              "current":{ "account":"XXXXXX9876","ifsc":"ICIC0000456" }|null,
+              "flags":["BANK_DETAILS_CHANGED","RECENT_BANK_CHANGE","REVISION_DELTA","NO_PAN"],"status":"pending|excluded|exported|paid|failed",
+              "reference":"XXXX7788"|null,"paid_on":"2026-10-31"|null,"version":1 } ],
+  "blockers":[ { "user":UserSummary,"payslip_id":"uuid","reason":"NO_BANK_DETAILS|INVALID_ACCOUNT|INVALID_IFSC|NAME|NOT_BANK_TRANSFER|HELD|ZERO_NET|ALREADY_PAID|IN_OTHER_BATCH|RECOVERY" } ],
+  "file_sha256":"<64 hex>"|null,"exported_at":"ts|null","exported_by":UserSummary|null,
+  "created_by":UserSummary,"created_at":"ts","submitted_by":UserSummary|null,"submitted_at":"ts|null","decided_by":UserSummary|null,"decided_at":"ts|null","decision_comment":null,"version":1 }
+```
+`current` is set only for `BANK_DETAILS_CHANGED` lines. `amount` = live net, or for a revision the live net minus the paid lines of the earlier copies (`REVISION_DELTA`). List items omit `lines` and `blockers`. Accounts are always masked; the unmasked values exist only in the file.
+**PUT** `{ "expected_version":1, "value_date"?, "debit_account_id"?, "exclude_line_ids"?:["uuid"], "include_line_ids"?:["uuid"], "account_sources"?:[ { "line_id":"uuid","source":"current" } ] }` -> 200 (lines `excluded` stay in the batch, not in the file; `source` only on `BANK_DETAILS_CHANGED` lines, else 422).
+**submit** / **withdraw** `{ "expected_version" }` -> 200 (submit freezes lines and stores the lines MAC; a submit with no `pending` line -> 422 `NOTHING_TO_PAY`).
+**approve** `{ "expected_version":2,"comment":null,"current_password":"..." }` -> 200 PaymentBatch (`approved`). Order: step-up; a line pays the caller (403 `FORBIDDEN`, whole batch); caller is a party, or changed the bank details of a line employee within `payroll.bank_change_alert_days` (403 `SECOND_PERSON_REQUIRED`);
+`submitted` (409 `NOT_SUBMITTED`); `expected_version` (409 `VERSION_CONFLICT`); every pending line re-derived from the live payslip and the current details equals the frozen line and MAC (409 `BATCH_STALE`, `details[]` = `{field:"lines[i]", message: PAYSLIP_SUPERSEDED|HELD|AMOUNT_CHANGED|BANK_DETAILS_CHANGED}`).
+**reject** `{ "expected_version","comment":"required" }` -> 200 (`draft`). **cancel** `{ "reason" }` -> 200 (lines `excluded`, slot freed).
+**file** `{ "current_password" }` -> `text/csv; charset=us-ascii`, `Content-Disposition: attachment; filename="bank-PAY-2026-10-01.csv"`, `Cache-Control: no-store`, `nosniff`. First call: batch `exported`, lines `exported`, `file_sha256` stored; later calls return the identical bytes. After each download an `admin_alert` push to `role.assign` holders. Not allowed for `draft` / `submitted` / `cancelled` (409 `NOT_APPROVED`).
+**File format `generic_neft_csv`** (CRLF, comma, header row, no quotes needed because every field is bank-safe):
+`Sr No,Payment Type,Debit Account No,Beneficiary Name,Beneficiary Account No,IFSC,Amount,Value Date,Narration,Reference`
+- `Sr No` = line seq; `Payment Type` = `payroll.bank_payment_type` (`NEFT`); `Beneficiary Name` = upper-cased, characters outside `A-Z 0-9 . space` removed, spaces collapsed, max 35 (empty -> blocker `NAME`); `Amount` = `35300.00`; `Value Date` = `DD/MM/YYYY`;
+  `Narration` = `SALARY OCT 2026` (`SALARY REV OCT 2026` for a delta); `Reference` = `PAY-2026-10-01-0001`. Excluded lines are not written. The user must verify the layout with the bank (plan 17 Q-L11).
+**confirm** `{ "paid_on":"2026-10-31","lines":[ { "line_id":"uuid","status":"paid|failed","reference":"UTR1234" } ] | null,"all_paid":true|false,"reference":null|"BATCH-REF","current_password" }` -> 200 PaymentBatch.
+`all_paid: true` marks every `exported` line paid (shared optional reference). `reference` 1-40 `[A-Za-z0-9 ._/-]`, encrypted, shown masked. `paid_on` not in the future, not before `exported_at` date. The batch becomes `closed` when no line is `exported`. Failed lines free their payslip for a new batch.
+Errors (all): 409 `PAYROLL_LOCKED` (run not published), `NOT_DRAFT`, `NOT_SUBMITTED`, `NOT_APPROVED`, `VERSION_CONFLICT`, `BATCH_STALE`, `IN_USE`, `CONFLICT` (a payslip is already in a live line: partial unique); 422 `NOTHING_TO_PAY`, `TOO_MANY_ROWS`, `INVALID_DATE`, `VALIDATION_ERROR`; 403 `FORBIDDEN`, `SECOND_PERSON_REQUIRED`, `REAUTH_FAILED`; 429; 503.
+Audit `payroll.payment_batch.create|update|submit|withdraw|approve|reject|cancel|export|download|confirm` (`after={run_id, period, reference, lines, excluded, status, flags_count, maker_id, checker_id, file_sha256 (export only), paid, failed}`; never amounts, accounts, IFSC, names or references).
+
+### 19.6 Tax year rules [5b]
+| Method | Path | Perm |
+|---|---|---|
+| GET | /admin/payroll/tax/years | `payroll.view_all` |
+| GET | /admin/payroll/tax/years/{fy}/rules | `payroll.view_all` (all versions, newest first) |
+| POST | /admin/payroll/tax/years/{fy}/rules | `payroll.manage` (new draft = copy of the latest version) |
+| GET | /admin/payroll/tax/rules/{id} | `payroll.view_all` |
+| PUT | /admin/payroll/tax/rules/{id} | `payroll.manage` (draft) |
+| POST | /admin/payroll/tax/rules/{id}/submit | `payroll.manage` (draft) |
+| POST | /admin/payroll/tax/rules/{id}/withdraw | `payroll.manage` (submitted -> draft) |
+| POST | /admin/payroll/tax/rules/{id}/verify | `payroll.approve` + step-up (submitted) |
+| POST | /admin/payroll/tax/rules/{id}/reject | `payroll.approve` (submitted -> draft) |
+| PUT | /admin/payroll/tax/years/{fy}/windows | `payroll.manage` |
+
+**years** -> `{ "items":[ { "fy":"2026-27","verified_version":null|2,"open_version":{ "id","version":1,"status":"draft" }|null,"windows":Windows,"current":true } ] }` (FYs with a rules row, plus the current FY).
+**Windows** `{ "declaration_opens_on":"2026-04-01","declaration_closes_on":"2026-06-30","proof_opens_on":"2027-01-01","proof_closes_on":"2027-02-28" }` (inside the FY, opens <= closes; 422 `INVALID_DATE`). Window changes are audited `payroll.tax_rules.windows` (dates) and send `tax_window` pushes when a window opens.
+**TaxRules** (object; plain JSON, not secret):
+```json
+{ "id":"uuid","fy":"2026-27","version":1,"status":"draft|submitted|verified|superseded","rules_sha256":"<64 hex>","note":"UNVERIFIED seed copied from FY 2025-26 ...",
+  "rules":{
+    "labels":{ "act":"Income-tax Act, 2025","tds_section":"Section 192","form16":"Form 16","return":"Form 24Q" },
+    "default_regime":"new",
+    "regimes":{
+      "new":{ "slabs":[ { "from":"0.00","to":"400000.00","rate_pct":"0" },{ "from":"400000.00","to":"800000.00","rate_pct":"5" },{ "from":"800000.00","to":"1200000.00","rate_pct":"10" },
+                        { "from":"1200000.00","to":"1600000.00","rate_pct":"15" },{ "from":"1600000.00","to":"2000000.00","rate_pct":"20" },{ "from":"2000000.00","to":"2400000.00","rate_pct":"25" },
+                        { "from":"2400000.00","to":null,"rate_pct":"30" } ],
+              "standard_deduction":"75000.00","rebate":{ "income_limit":"1200000.00","max":"60000.00","marginal_relief":true },
+              "surcharge":[ { "above":"5000000.00","rate_pct":"10" },{ "above":"10000000.00","rate_pct":"15" },{ "above":"20000000.00","rate_pct":"25" } ],"surcharge_marginal_relief":true,
+              "pt_deductible":false,"hra_exemption":false,"allowed_sections":[] },
+      "old":{ "slabs":[ { "from":"0.00","to":"250000.00","rate_pct":"0" },{ "from":"250000.00","to":"500000.00","rate_pct":"5" },{ "from":"500000.00","to":"1000000.00","rate_pct":"20" },{ "from":"1000000.00","to":null,"rate_pct":"30" } ],
+              "standard_deduction":"50000.00","rebate":{ "income_limit":"500000.00","max":"12500.00","marginal_relief":false },
+              "surcharge":[ { "above":"5000000.00","rate_pct":"10" },{ "above":"10000000.00","rate_pct":"15" },{ "above":"20000000.00","rate_pct":"25" },{ "above":"50000000.00","rate_pct":"37" } ],"surcharge_marginal_relief":true,
+              "pt_deductible":true,"hra_exemption":true,"allowed_sections":["80C","80CCC","80CCD1","80CCD1B","80D_SELF","80D_PARENTS","80E","80G","80TTA","24B","HRA"] } },
+    "cess_pct":"4","no_pan_min_rate_pct":"20","round_income_to":10,"round_tax_to":10,"loan_perquisite_threshold":"20000.00",
+    "sections":[ { "code":"80C","name":"Section 80C (PF, PPF, ELSS, life insurance, tuition fees, home loan principal)","limit":null,"group":"80C_GROUP","proof_required":true,"fields":["description"] },
+                 { "code":"80CCD1B","name":"NPS (additional)","limit":"50000.00","group":null,"proof_required":true,"fields":["description"] },
+                 { "code":"80D_SELF","name":"Health insurance - self and family","limit":"25000.00","senior_limit":"50000.00","group":null,"proof_required":true,"fields":["description","senior"] },
+                 { "code":"24B","name":"Home loan interest (self-occupied)","limit":"200000.00","group":null,"proof_required":true,"fields":["lender_name","lender_pan"] },
+                 { "code":"HRA","name":"House rent","limit":null,"group":null,"proof_required":true,"fields":["monthly_rent","from_month","to_month","landlord_name","landlord_pan","city","metro"],"landlord_pan_above":"100000.00" },
+                 { "code":"PREV_EMPLOYER","name":"Previous employer this year (Form 12B)","limit":null,"group":null,"proof_required":true,"fields":["income","tds","pt","pf"] },
+                 { "code":"OTHER_INCOME","name":"Other income","limit":null,"group":null,"proof_required":false,"fields":["description"] } ],
+    "group_limits":[ { "group":"80C_GROUP","limit":"150000.00" } ],
+    "hra":{ "metro_pct":"50","non_metro_pct":"40","rent_minus_basic_pct":"10","metro_cities":["Delhi","Mumbai","Kolkata","Chennai"] },
+    "component_treatment":{ "default":"taxable","REIMBURSEMENT":"exempt","LEAVE_ENCASH":"taxable" } },
+  "attestation":null|"Verified against ... on ...","created_by":UserSummary,"last_edited_by":UserSummary,"submitted_by":UserSummary|null,"submitted_at":"ts|null",
+  "verified_by":UserSummary|null,"verified_at":"ts|null","version_row":3 }
+```
+(The values above are the UNVERIFIED seed of plan 17 Q-L1, shown only as the shape; the code contains no tax constant.) Validation: slabs contiguous from `0.00`, ascending, exactly one open-ended last slab; `rate_pct` 0..50 (2 decimals); money within caps;
+`sections` <= 40, codes `^[A-Z0-9_]{2,16}$`, unique; `allowed_sections` / `group` reference existing codes / groups; `component_treatment` keys are payslip codes, values `taxable|exempt`. Any error -> 422 with `details.field` as a JSON path (`rules.regimes.new.slabs[2].to`).
+**POST** `{}` -> 201 (409 `DRAFT_EXISTS` when a draft / submitted version exists). **PUT** `{ "version_row":3,"rules":{...},"note":"..." }` -> 200 (whole `rules` replaced). **submit** / **withdraw** `{ "version_row" }` -> 200.
+**verify** `{ "version_row":4,"rules_sha256":"<64 hex of the reviewed rules>","attestation":"I verified these rules against <source> on <date>" (20-500),"current_password" }` -> 200: the previous verified version becomes `superseded` in the same transaction; runs adopt it at their next refresh. 409 `RULES_CHANGED` when the sha differs.
+**reject** `{ "version_row","comment":"required" }` -> 200.
+Errors: 409 `DRAFT_EXISTS`, `NOT_DRAFT`, `NOT_SUBMITTED`, `VERSION_CONFLICT`, `RULES_CHANGED`; 422 `VALIDATION_ERROR`, `INVALID_DATE`; 403 `SECOND_PERSON_REQUIRED`, `REAUTH_FAILED`.
+Audit `payroll.tax_rules.create|update|submit|withdraw|verify|reject|windows` (`after={fy, version, status, rules_sha256, maker_id, checker_id}`; rules are not secret but values are not copied into audit rows).
+
+### 19.7 Investment declarations and proofs [5b]
+Employee (`payroll.view_own`; the FY must have a verified rules version, else 409 `TAX_RULES_NOT_VERIFIED`):
+| Method | Path | Notes |
+|---|---|---|
+| GET | /me/tax/years | `{ "items":[ { "fy","windows":Windows,"verified":true,"current":true } ] }` |
+| GET | /me/tax/declaration?fy= | default current FY; creates nothing |
+| PUT | /me/tax/declaration | draft save |
+| POST | /me/tax/declaration/submit | freezes the draft as the submitted version |
+| POST | /me/tax/proofs | needs a submitted item |
+| GET | /me/tax/proofs?fy= | own proofs |
+| POST | /me/tax/proofs/{id}/cancel | `submitted` only |
+
+**Declaration** (employee and admin; admin adds `user`, `entered_by`, `unlocked_until`):
+```json
+{ "id":"uuid"|null,"fy":"2026-27","rules_version":2,"windows":Windows,"can_edit":true,"edit_reason":"DECLARATION_WINDOW|PROOF_WINDOW|UNLOCKED|CLOSED",
+  "draft":{ "regime":"old|new"|null,
+            "items":[ { "id":"i-1","section":"80C","amount":"150000.00","details":{ "description":"PPF" },"flags":[] },
+                      { "id":"i-2","section":"HRA","amount":"240000.00","details":{ "monthly_rent":"20000.00","from_month":"2026-04","to_month":"2027-03","landlord_name":"R K","landlord_pan":"XXXXX1234X","city":"Chennai","metro":true },"flags":[] } ] },
+  "submitted":{ "regime":"old","items":[ ... ],"version":3,"submitted_at":"ts" }|null,
+  "dirty":true,
+  "proofs":{ "submitted":1,"verified":2,"rejected":0 },
+  "version":5 }
+```
+`dirty` = the draft differs from the submitted version. PAN fields are masked in GET (the employee sees their own landlord / lender PAN masked too; admin reveal see below). `amount` = annual amount (HRA: computed annual rent, read-only from `monthly_rent` x months).
+**PUT** `{ "fy":"2026-27","expected_version":5,"regime":"old|new"|null,"items":[ { "id":"i-1"|null,"section":"80C","amount":"150000.00","details":{...} } ] }` (<= 40 items; `id` null = new, server assigns) -> 200.
+Rules: section must exist in the verified rules (422 `INVALID_SECTION`); `details` keys only those of the section's `fields` (422); PAN per 13.4 format; `landlord_pan` required when annual rent > `landlord_pan_above` (422 `LANDLORD_PAN_REQUIRED`); months inside the FY; sections not allowed by the regime are kept with flag `NOT_IN_REGIME`;
+regime change after `declaration_closes_on` (and no unlock) -> 409 `REGIME_LOCKED`; outside every window -> 409 `WINDOW_CLOSED` (proof window allows edits of items of sections with `proof_required` only, not the regime).
+**submit** `{ "fy","expected_version" }` -> 200 (copies draft to `submitted`, `submitted.version` + 1; identical -> 422 `NO_CHANGE`).
+**Proof** `{ "id","fy","item_id":"i-1","section":"80C","claimed":"150000.00","files":[ { "id":"uuid","url":"/api/files/<id>","content_type":"application/pdf" } ],"status":"submitted|verified|rejected|cancelled","verified":"120000.00"|null,"comment":null,"verified_at":"ts|null","version":1 }`.
+**POST /me/tax/proofs** `{ "fy","item_id","claimed":"150000.00","file_ids":["uuid"] (1..5, own unused `tax_proof` uploads) }` -> 201. `item_id` must be in the SUBMITTED version (422 `ITEM_NOT_SUBMITTED`); `claimed` <= the submitted item amount (422 `AMOUNT_ABOVE_LIMIT`); proof window or unlock (409 `WINDOW_CLOSED`); <= 10 live proofs per item.
+
+Admin:
+| Method | Path | Perm |
+|---|---|---|
+| GET | /admin/payroll/tax/declarations?fy=&status=none\|draft\|submitted&regime=&q=&page=&page_size= | `payroll.view_all` (audit `payroll.tax_declaration.list`, `after={count}`) |
+| GET | /admin/payroll/tax/declarations/{user_id}?fy=&reveal=false | `payroll.view_all` (audit `payroll.tax_declaration.view`, `after.revealed`; reveal = unmasked third-party PAN, `payroll:reveal` limits of 13.0) |
+| PUT | /admin/payroll/tax/declarations/{user_id} | `payroll.manage` + step-up (on behalf; not self) |
+| POST | /admin/payroll/tax/declarations/{user_id}/submit | `payroll.manage` + step-up (on behalf) |
+| POST | /admin/payroll/tax/declarations/{user_id}/unlock | `payroll.manage` (not self) |
+| GET | /admin/payroll/tax/proofs?fy=&status=&user_id=&page=&page_size= | `payroll.view_all` (audit `payroll.tax_proof.list`, `after={count}`) |
+| POST | /admin/payroll/tax/proofs/{id}/verify | `payroll.manage` (submitted) |
+| POST | /admin/payroll/tax/proofs/{id}/reject | `payroll.manage` (submitted) |
+| POST | /admin/payroll/tax/reports/declarations?fy= | `payroll.view_all` (+ step-up when `include_identifiers`) |
+
+List item `{ "user":UserSummary,"fy","status":"none|draft|submitted","regime":"old|new"|null,"submitted_at","dirty":false,"items":7,"proofs":{ "submitted":1,"verified":2,"rejected":0 },"flags":["NO_PAN"] }` (no money).
+On-behalf PUT / submit: body as the employee's plus `current_password`; sets `entered_by`; push `tax_declaration_changed` to the employee. **unlock** `{ "fy","until":"2026-07-15","reason" }` -> 200 (until <= FY end, >= today).
+**verify** `{ "expected_version":1,"verified":"120000.00","comment":null }` -> 200 Proof; `verified` 0.00..claimed (0.00 = nothing accepted, comment required); verifier not the employee (403 `FORBIDDEN`) and not the declaration's `entered_by` (403 `SECOND_PERSON_REQUIRED`).
+**reject** `{ "expected_version","comment":"required" }` -> 200. Push `tax_proof_decision`.
+**declarations xlsx** body `{ "include_identifiers":false,"current_password"? }`: sheet `Declarations` (employee, regime, section, declared, proof verified; identifiers masked unless `include_identifiers`), `no-store`. Audit `payroll.report.export` (`kind: tax_declarations`, rows, include_identifiers).
+Errors (all): 409 `TAX_RULES_NOT_VERIFIED`, `WINDOW_CLOSED`, `REGIME_LOCKED`, `VERSION_CONFLICT`, `NOT_PENDING`; 422 `INVALID_SECTION`, `LANDLORD_PAN_REQUIRED`, `ITEM_NOT_SUBMITTED`, `AMOUNT_ABOVE_LIMIT`, `NO_CHANGE`, `VALIDATION_ERROR`; 403 `FORBIDDEN`, `SECOND_PERSON_REQUIRED`, `REAUTH_FAILED`; 404.
+Audit `payroll.tax_declaration.save|submit|unlock|view|list|view_own`, `payroll.tax_proof.create|cancel|verify|reject` (`after={fy, user_id, version, items, regime, on_behalf, status}`; never amounts, details or PANs).
+Files: `GET /api/files/{id}` for a `tax_proof` file = owner, `payroll.view_all` holders once a proof references it (cross-user read audited `file.view_other`); anything else 404.
+
+### 19.8 Form 16 documents [5b]
+| Method | Path | Perm |
+|---|---|---|
+| POST | /admin/payroll/tax/form16/upload?fy=&kind=form16\|part_a\|part_b\|form12ba&dry_run=true\|false | `payroll.manage` (+ step-up when `dry_run=false`) |
+| GET | /admin/payroll/tax/form16?fy=&kind=&status=&q=&page=&page_size= | `payroll.view_all` (audit `payroll.form16.list`, `after={count}`) |
+| GET | /admin/payroll/tax/form16/{id}/file | `payroll.view_all` (audit `payroll.form16.download`) |
+| POST | /admin/payroll/tax/form16/publish | `payroll.approve` + step-up |
+| POST | /admin/payroll/tax/form16/{id}/withdraw | `payroll.manage` + step-up |
+| GET | /me/tax/form16 | `payroll.view_own` |
+| GET | /me/tax/form16/{id}/file | `payroll.view_own` (owner, `published`; audit `payroll.form16.view_own`) |
+
+**upload** multipart: `files` (1..20 PDFs, each <= 2 MB, total <= 40 MB; PDF checks of `POST /files`), for `dry_run=false` also `manifest_sha256` (from the dry run) and `current_password`. Matching uses the file NAME only: exactly one employee PAN (10 chars, case-insensitive) or one `Employee ID` token separated by `_`, `-`, space or `.`.
+Dry run -> 200 (stores nothing but the HMAC binding `actor | fy | kind | sorted file sha256 list`, Redis 15 min, fail closed):
+```json
+{ "fy":"2026-27","kind":"form16","manifest_sha256":"<64 hex>","files":4,
+  "matched":[ { "index":0,"user":UserSummary,"sha256":"<64 hex>","replaces_id":"uuid"|null } ],
+  "errors":[ { "index":2,"message":"UNMATCHED|AMBIGUOUS|DUPLICATE_EMPLOYEE|NOT_PDF|FILE_TOO_LARGE|DELETED_EMPLOYEE" } ] }
+```
+`index` = position in the multipart list (file names are never echoed, logged or stored). Commit -> 201 `{ "upload_batch_id":"uuid","created":3,"replaced":1 }` only without errors (else 422 `IMPORT_INVALID`); 409 `IMPORT_NOT_CHECKED`, `IMPORT_FILE_CHANGED`.
+Commit stores each PDF as a `form16` file (encrypted) and a document `uploaded`; a replaced live document becomes `withdrawn`. nginx: exact location for this path with a 42m body.
+**Form16Document** `{ "id","user":UserSummary,"fy","kind","status":"uploaded|published|withdrawn","sha256","uploaded_by":UserSummary,"uploaded_at","published_by":UserSummary|null,"published_at":"ts|null","withdrawn_at":"ts|null" }`.
+**publish** `{ "fy":"2026-27","documents":[ { "id":"uuid","sha256":"<64 hex>" } ] (1..500),"current_password" }` -> 200 `{ "published":3,"failed":[ { "id","reason":"NOT_UPLOADED|SHA_MISMATCH|SECOND_PERSON_REQUIRED|FORBIDDEN" } ] }` (one transaction; failed rows stay `uploaded`;
+`SECOND_PERSON_REQUIRED` when the caller uploaded it and `payroll.form16_requires_second_person` is on; `FORBIDDEN` for the caller's own document). Push `form16_available` per employee (coalesced).
+**withdraw** `{ "reason","current_password" }` -> 200 (published or uploaded; the employee no longer sees it).
+**/me/tax/form16** -> `{ "items":[ { "id","fy","kind","published_at" } ] }` (published only, newest FY first). **file** -> `application/pdf`, `filename="form16-EMP001-2026-27.pdf"` (`part-a`, `part-b`, `form12ba`), `no-store`, `nosniff`, CSP as 13.8; anything else 404 (audited `payroll.denied`).
+Audit `payroll.form16.dry_run|commit|publish|withdraw|download|view_own|list` (`after={fy, kind, files, created, replaced, published, failed}`; never file names or PANs).
+
+### 19.9 TDS engine [5c]
+| Method | Path | Perm |
+|---|---|---|
+| POST | /admin/payroll/tax/preview | `payroll.view_all` (pure; audit `payroll.tax.preview`, `after={user_id, fy}`) |
+| GET | /admin/payroll/tax/summary?fy=&q=&department_id=&flag=&page=&page_size= | `payroll.view_all` (audit `payroll.tax.summary`, `after={count}`) |
+| POST | /admin/payroll/tax/employees/{user_id}/statement?fy= | `payroll.view_all` + step-up, body `{ "current_password" }` (PDF; audit `payroll.tax.statement`) |
+| POST | /admin/payroll/tax/24q?fy=&quarter=1..4 | `payroll.view_all` + step-up (xlsx; audit `payroll.statutory.export` kind `24q`) |
+| GET | /me/tax/projection?fy= | `payroll.view_own` (audit `payroll.tax.view_own`) |
+
+All answer 409 `TDS_ENGINE_OFF` while `payroll.tds_engine_enabled` is false (permissions are checked first), and 409 `TAX_RULES_NOT_VERIFIED` when the FY has no verified rules.
+**TdsComputation** (AdminPayslip `tds_computation`, preview and summary detail; employee projection = the same without `steps` details of other income sources):
+```json
+{ "fy":"2026-27","mode":"suggest|apply","rules":{ "id":"uuid","version":2 },"regime":"new","regime_source":"declared|default",
+  "declaration_version":3|null,"proof_basis":"declared|verified","remaining_months":6,
+  "annual":{ "salary_paid":"240000.00","salary_this_month":"40000.00","salary_projected":"200000.00","previous_employer_income":"0.00","other_income":"0.00",
+             "exemptions":"0.00","standard_deduction":"75000.00","pt":"0.00","chapter_via":"0.00","taxable_income":"405000.00",
+             "tax_on_income":"250.00","rebate":"250.00","surcharge":"0.00","cess":"0.00","total_tax":"0.00" },
+  "tds_paid_so_far":"0.00","previous_employer_tds":"0.00","remaining_tax":"0.00","one_time_tax":"0.00",
+  "suggested":"0.00","applied":"0.00","override":{ "amount":"500.00","reason":"Employee request" }|null,
+  "flags":["REGIME_DEFAULT","NO_DECLARATION"],"computed_at":"ts" }
+```
+**preview** `{ "user_id":"uuid","fy":"2026-27"|null,"period":"2026-11"|null,"regime":"old|new"|null }` -> 200 `{ "computation":TdsComputation,"other_regime":{ "regime":"old","total_tax":"12500.00" } }` (writes nothing; `regime` overrides the declared one for comparison).
+**summary** -> paginated `{ "user":UserSummary,"regime","total_tax","tds_paid_so_far","remaining_tax","suggested_this_month","manual_this_month","flags" }` items + `"totals":{ "total_tax","tds_paid_so_far","remaining_tax" }` (whole filtered set).
+**/me/tax/projection** -> `{ "estimate":true,"computation":TdsComputation,"other_regime":{ "regime","total_tax" } }` (own only; based on the SUBMITTED declaration; the app labels it an estimate).
+**statement** PDF: company, employee (PAN masked), FY, regime, the `annual` figures, month-wise TDS deducted, declarations used, watermark `TAX COMPUTATION - NOT FORM 16`, `no-store`, `nosniff`, CSP.
+**24Q xlsx** sheets: `Deductees` (per month and employee: employee id, name, PAN, section label from rules, amount paid, TDS, date paid (pay date), date deducted, challan BSR / serial / date), `Salary Details` (quarter 4 only: per employee annual figures and regime), `Challans`, `Blockers` (`NO_PAN`, `CHALLAN_MISSING`, `RUN_NOT_PUBLISHED`). Published payslips only. Working data for the return utility, not a filing file.
+**Payslip behaviour**: the engine runs at run create / refresh / process / revise and payslip process (never at publish), stores one computation per payslip (frozen once processed), and in `apply` mode sets the TDS line to `applied` (= `suggested` unless `override`). `suggest` mode: TDS line = manual value, `suggested` shown beside it.
+Engine enabled but rules not verified for the payslip's FY: warning `TAX_RULES_NOT_VERIFIED`, manual TDS used.
+Errors: 409 `TDS_ENGINE_OFF`, `TAX_RULES_NOT_VERIFIED`, `RUN_NOT_PUBLISHED` (24Q of a quarter with an unpublished month: listed as blocker instead when at least one month is published); 422 `INVALID_PERIOD`, `VALIDATION_ERROR`; 403 `REAUTH_FAILED`.
+
+### 19.10 New settings (`/admin/payroll/settings`, snapshotted into each run like the other `payroll.*` keys)
+| Key | Default | Range |
+|---|---|---|
+| `payroll.publish_request_ttl_hours` [5a] | 72 | 1..336 |
+| `payroll.bank_file_requires_second_person` [5a] | true | bool (change needs `role.assign` + step-up) |
+| `payroll.bank_file_format` [5a] | `"generic_neft_csv"` | `generic_neft_csv` |
+| `payroll.bank_payment_type` [5a] | `"NEFT"` | `NEFT` \| `RTGS` \| `IMPS` |
+| `payroll.bank_change_alert_days` [5a] | 30 | 0..90 |
+| `payroll.form16_requires_second_person` [5b] | true | bool (change needs `role.assign` + step-up) |
+| `payroll.tax_proof_max_files` [5b] | 5 | 1..10 |
+| `payroll.tds_engine_enabled` [5c] | false | bool (change needs `role.assign` + step-up; `admin_alert`) |
+| `payroll.tds_engine_mode` [5c] | `"suggest"` | `suggest` \| `apply` |
+| `payroll.tds_one_time_in_month` [5c] | true | bool |
+| `payroll.tds_proofs_from_month` [5c] | 1 | 1..12 (calendar month from which only verified proofs count; 1 = January) |
+| `payroll.tds_include_other_income` [5c] | false | bool |
+Declaration / proof windows are per FY (19.6 `windows`), not settings. Tax slabs, rates and limits are never settings: they live only in verified `tax_year_rules`.
+
+### 19.11 Audit redaction allow-list (new non-money keys)
+`scope`, `run_id`, `request_id`, `payslips`, `stale_reason`, `self_included`, `reference` (batch reference `PAY-...` only), `lines`, `excluded`, `paid`, `failed`, `flags_count`, `file_sha256`, `fy`, `version`, `rules_sha256`, `regime`, `items`, `on_behalf`, `kind`, `files`, `created`, `replaced`, `published`, `quarter`, `include_identifiers`, `maker_id`, `checker_id`.
+Never allow-listed: any amount, `account`, `ifsc`, `pan`, `landlord_pan`, `lender_pan`, bank `reference` of a line, file names, comments, reasons, attestation text.
+
+### 19.12 Push (section 11; data messages, never amounts, accounts or PANs)
+- `payroll_approval` kinds: `publish` (to `payroll.publish` holders outside the maker set, max 20, coalesced 10 min: "<maker name> asked to publish payroll for October 2026"; to the requester on approve / reject / stale), `payment_batch` (to `payroll.approve` holders: "<maker name> submitted payment batch PAY-2026-10-01"; to the maker on decision), `tax_rules` ("Tax rules FY 2026-27 v2 submitted for verification"), `form16` ("<n> Form 16 documents ready to publish").
+- `payslip_reminder` to the employee, id = payslip id, "Payslip available", body "Your payslip for October 2026 is waiting in the app."
+- `form16_available` to the employee, id = document id, "Form 16 available", body "Your Form 16 for FY 2026-27 is ready to download."
+- `tax_proof_decision` to the employee, id = proof id, "Investment proof verified" / "Investment proof rejected", body = section name.
+- `tax_declaration_changed` to the employee, id = declaration id, "Tax declaration updated", body "HR updated your FY 2026-27 declaration."
+- `tax_window` to every active employee with `payroll.view_own` and `include_in_payroll`, "Investment declaration open" / "Proof submission closes in 3 days", body = FY and date.
+- `admin_alert` to `role.assign` holders: bank file downloaded (batch reference, line count), debit account created (label), protected setting changed (key).
+Best effort, after commit.
+
+### 19.13 Error codes (new)
+409: `PUBLISH_REQUEST_REQUIRED`, `PUBLISH_REQUEST_EXISTS`, `PUBLISH_STALE`, `MAKER_CHECKER_OFF`, `BATCH_STALE`, `NOT_APPROVED`, `IN_USE`, `DRAFT_EXISTS`, `RULES_CHANGED`, `TAX_RULES_NOT_VERIFIED`, `WINDOW_CLOSED`, `REGIME_LOCKED`, `TDS_ENGINE_OFF`.
+422: `NOTHING_TO_PAY`, `INVALID_SECTION`, `LANDLORD_PAN_REQUIRED`, `ITEM_NOT_SUBMITTED`.
+Reused: `SECOND_PERSON_REQUIRED`, `FORBIDDEN`, `REAUTH_FAILED`, `NOT_SUBMITTED`, `NOT_DRAFT`, `NOT_PENDING`, `VERSION_CONFLICT`, `PAYROLL_LOCKED`, `NOTHING_TO_PUBLISH`, `COMPONENTS_CHANGED`, `FNF_NOT_INCLUDED`, `CONFLICT`, `TOO_MANY_ROWS`, `NO_CHANGE`, `AMOUNT_ABOVE_LIMIT`,
+`IMPORT_INVALID`, `IMPORT_NOT_CHECKED`, `IMPORT_FILE_CHANGED`, `INVALID_DATE`, `INVALID_PERIOD`, `RUN_NOT_PUBLISHED`, `VALIDATION_ERROR`, `RATE_LIMITED`, `TEMPORARILY_UNAVAILABLE`.
