@@ -671,6 +671,7 @@ Sent to device tokens only; no sensitive data in payload (no coordinates). Known
 first 100 characters of the body through FCM; once the app has a push receiver, `important`/`urgent` ones should carry only type, id and a generic title.
 Announcement push volume is limited server side (re-send cooldown, daily per-admin budget, high priority once per announcement; see section 7).
 PROPOSED (section 13): `payslip_published` (id = payslip id, generic title/body, never amounts).
+PROPOSED (section 17.7): `loan_created`, `reimbursement_submitted`, `reimbursement_decision` (never amounts).
 
 ---
 
@@ -797,7 +798,7 @@ New error codes: 409 `USER_LIMIT_REACHED`, 403 `LICENSE_EXPIRED`, 422 `LICENSE_I
 - Every money, bank and identity field is encrypted at rest. None of them is ever written to audit rows, logs, push payloads or error messages.
 - **Self rule:** no caller can change, revise, process or publish their OWN structure, payroll details or payslip -> 403 `FORBIDDEN`. Admin endpoints otherwise cover all employees (the s.9 privilege rules do not apply).
 - Admin payroll routes: unknown ids -> 404. Employee routes: anything that is not the caller's published/superseded payslip -> 404.
-- Codes: `^[A-Z][A-Z0-9_]{1,15}$`. Reserved codes (not usable for structure allowances/fixed deductions): `BASIC, HRA, PF, ESI, PT, TDS, LOP`, earnings adjustments `BONUS, ARREARS, INCENTIVE, REIMBURSEMENT, OTHER_EARNING`, deduction adjustments `ADVANCE_RECOVERY, LOAN_EMI, OTHER_DEDUCTION`.
+- Codes: `^[A-Z][A-Z0-9_]{1,15}$`. Reserved codes (not usable for structure allowances/fixed deductions): `BASIC, HRA, PF, ESI, PT, TDS, LOP`, earnings adjustments `BONUS, ARREARS, INCENTIVE, REIMBURSEMENT, OTHER_EARNING`, deduction adjustments `ADVANCE_RECOVERY, LOAN_EMI, OTHER_DEDUCTION`. PROPOSED (17.1): system-only `OVERTIME`, `LEAVE_ENCASH`, and read-only `inputs.components`.
 - Labels/names: 1-40 chars, cleaned (control chars and markup stripped). Unknown body fields -> 422 (`extra=forbid`).
 - Rate limits (per user, Redis; writes/exports fail closed -> 503 `TEMPORARILY_UNAVAILABLE`): employee payslip detail + PDF 30/min and 200/day; admin reads 120/min; draft writes 60/min; run/payslip actions 10/min; register 5/min; details `reveal` 30/min and 200/day; step-up 5/min (shared with s.9).
 - License `read_only` mode (12.6): `POST /admin/payroll/runs/{id}/register` is treated as a read (exempt), like export.
@@ -1031,3 +1032,251 @@ File endpoints: audit `payroll.statutory.export` (kind, period, row count), `Cac
 **Blockers.** Amounts come from the frozen payslip, but identifiers are read from the employee's CURRENT payroll details (`PUT /employees/{id}/details`), so correcting them clears a blocker immediately without re-running payroll. Employees with a PF amount but no valid UAN (12 digits) or no usable ECR name (`NAME`), an ESI amount but no valid ESI IP number (10-17 digits), or a TDS amount but no valid PAN are never skipped silently. `dues` lists them in `blockers: [{employee_id, name, missing:[{field: UAN\|ESI_IP\|PAN\|NAME, reason: missing\|invalid}]}]`; PF ECR and ESI file requests are refused with 409 `STATUTORY_BLOCKERS` (`details[]` = `{field: employee_id, message}`) until fixed. Identifier values are never returned. PT files have no blockers.
 
 Errors: `RUN_NOT_PUBLISHED` 409, `STATUTORY_BLOCKERS` 409, `CHALLAN_ALREADY_PAID` 409, `CHALLAN_NOT_PAID` 409, `INVALID_DATE` 422, `REAUTH_FAILED` 403.
+
+## 17. Payroll pay components (plan 15 = plan 14 phase 3) - PROPOSED (3a: migration 0022, 3b: migration 0023)
+
+Plan: `docs/plans/15-payroll-phase3.md`. Section 13.0 conventions apply (money strings, `period` = `YYYY-MM`, labels 1-40 / reasons 3-200 chars cleaned, unknown fields 422,
+self rule 403 `FORBIDDEN`, admin unknown ids 404, employee routes 404 for anything not their own). Money, labels, reasons, descriptions and comments are never written to audit rows,
+logs, push payloads or error messages. Sections marked **[3b]** ship with work package 3b.
+
+### 17.0 Common
+**Permissions.** Reads `payroll.view_all`; admin writes `payroll.manage`; employee loan/overtime views `payroll.view_own`; NEW `reimbursement.submit` (seeded to admin, hr, manager,
+employee by 0023) for own claims and bill upload; manager claim step = `request.approve_team` (direct reports) or `request.approve_all`, list with `request.view_team` / `view_all`.
+
+**Payable lifecycle** (`status` values that mean the same thing in every source table):
+| Table | before payable | payable ("pending") | in processed payslip | in published payslip | final, not paid |
+|---|---|---|---|---|---|
+| one-time items | - | `pending` | `processing` | `paid` | `cancelled` |
+| loan installments | - | `pending` | `processing` | `paid` | `skipped`, `cancelled` |
+| arrears | `proposed` | `pending` | `processing` | `paid` | `dismissed` |
+| encashments | - | `pending` | `processing` | `paid` | `cancelled` |
+| claims [3b] | `submitted`, `verified` | `approved` | `processing` | `paid` | `rejected`, `cancelled` |
+| overtime days [3b] | `computed` | `approved` | `processing` | `paid` | `rejected` |
+Only rows before `processing` can be edited / cancelled (else 409 `ITEM_LOCKED`). `processing` and `paid` rows carry `payslip_id`.
+
+**Target month rule** (every `period` / `start_period` in a request): no run yet, or a `draft` / `processed` run, or a `published` run in which the employee has an open draft revision.
+Else 409 `PERIOD_LOCKED`. More than 12 months after the current month -> 422 `INVALID_PERIOD`. Responses carry `run_status: "none|draft|processed|published"` so the UI can say
+"lands after the run is reopened" (processed) or "lands in the open revision" (published).
+
+**Flags in lists** (computed, not stored): `PERIOD_CLOSED` (payable row whose month is published and the employee has no open revision: it will not be paid until moved).
+
+**Rate limits** (per user, Redis; writes fail closed -> 503 `TEMPORARILY_UNAVAILABLE`): admin reads `payroll:admin_read` 120/min; admin writes `payroll:write` 60/min;
+loan actions, import commit, arrears accept / recalculate, encashment create, overtime compute `payroll:action` 10/min; import dry-run and template `payroll:import` 10/min + 50/day;
+employee reads `payroll:own_list` 60/min, loan detail `payroll:own_detail` (30/min + 200/day, shared with payslips); claim submit/cancel `claims:write` 10/min + 30/day;
+manager verify/reject `claims:decide` 60/min; step-up 5/min (shared, section 9).
+
+**Step-up** (`current_password`, 403 `REAUTH_FAILED`, 422 `VALIDATION_ERROR` when missing): loan create / reschedule / foreclose / cancel, import commit, arrears accept, encashment create.
+
+### 17.1 Changes to existing sections
+- **13.0 reserved codes** gain `OVERTIME` (earning, ESI wage) and `LEAVE_ENCASH` (earning, not an ESI wage). They are system-only: `PUT /admin/payroll/payslips/{id}` with either code in
+  `adjustments` -> 422. Structure allowances / fixed deductions cannot use them (422).
+- **13.6 AdminPayslip.inputs** gains read-only `components` (system lines pulled from section 17 sources; not accepted by PUT, sending it -> 422):
+  ```json
+  "components": [ { "code":"LOAN_EMI","label":"Loan L-0007 (3/12)","amount":"2500.00","sources":[{"type":"loan_installment","id":"uuid"}] },
+                  { "code":"REIMBURSEMENT","label":"Reimbursement - Travel","amount":"1840.00","sources":[{"type":"reimbursement","id":"uuid"},{"type":"reimbursement","id":"uuid"}] },
+                  { "code":"OVERTIME","label":"Overtime (6.5 h)","amount":"1625.00","minutes":390,"sources":[{"type":"overtime","id":"uuid"}] } ]
+  ```
+  `sources[].type`: `one_time | loan_installment | arrears | encashment | reimbursement | overtime`. The employee `Payslip` (13.2) is unchanged: these lines simply appear in
+  `earnings` / `deductions` like adjustments (`monthly: null`).
+- **13.5 / 13.6 behaviour**: run create, refresh, process, single payslip process and revise (re)pull `components`; `PUT` keeps them. Process moves the pulled rows to `processing`,
+  reopen back to the payable state, publish to `paid`. Publish answers 409 `COMPONENTS_CHANGED` if a pulled row is no longer in the expected state (reload, refresh, process again).
+- **13.7 warning codes** gain `OVERTIME_UNREVIEWED`, `OVERTIME_CAPPED`, `ARREARS_PROPOSED`, `MANUAL_COMPONENT_OVERLAP`. **15.1 variance** reasons gain `COMPONENTS`.
+- **Section 4** `GET /leave/balance` leave items and **section 9** admin leave balances gain `"encashed": 2.0`; `remaining = quota - used - pending - encashed`;
+  `QUOTA_BELOW_USED` compares with `used + pending + encashed`. **Section 9** leave types gain `encashable` (bool, default false), `encash_max_days_per_year` (number|null, 0.5 steps),
+  `encash_min_balance` (number, default 0).
+- **13.4 payroll details** gain `overtime_eligible` (bool, default false) [3b]; it needs no step-up when it is the only key sent.
+- **Section 11 push** types: `loan_created`, `reimbursement_submitted`, `reimbursement_decision` (17.7).
+- **`POST /files`** accepts `purpose=reimbursement_bill` [3b] (needs `reimbursement.submit`; jpeg/png/pdf <= 10 MB, encrypted at rest).
+
+### 17.2 One-time items (bonus, incentive, other earning / deduction) and bulk upload
+| Method | Path | Perm |
+|---|---|---|
+| GET | /admin/payroll/items?period=&user_id=&code=&status=&batch_id=&page=&page_size= | `payroll.view_all` |
+| POST | /admin/payroll/items | `payroll.manage` |
+| PUT | /admin/payroll/items/{id} | `payroll.manage` (pending only) |
+| POST | /admin/payroll/items/{id}/cancel | `payroll.manage` (pending only) |
+| GET | /admin/payroll/items/template | `payroll.manage` |
+| POST | /admin/payroll/items/import?dry_run=true\|false | `payroll.manage` (+ step-up when `dry_run=false`) |
+| GET | /admin/payroll/items/batches?period= | `payroll.view_all` |
+| POST | /admin/payroll/items/batches/{id}/cancel | `payroll.manage` |
+
+**OneTimeItem**:
+```json
+{ "id":"uuid","user":UserSummary,"period":"2026-11","code":"BONUS","label":"Diwali bonus","amount":"5000.00",
+  "status":"pending|processing|paid|cancelled","run_status":"draft","flags":[],"batch_id":"uuid"|null,"payslip_id":"uuid"|null,
+  "version":1,"created_at":"ts","created_by":UserSummary,"updated_at":"ts" }
+```
+**POST** `{ "user_id":"uuid","period":"2026-11","code":"BONUS|INCENTIVE|OTHER_EARNING|OTHER_DEDUCTION","label":"Diwali bonus","amount":"5000.00" }` -> 201 OneTimeItem.
+`amount` > 0 (a deduction uses `OTHER_DEDUCTION`). **PUT** `{ "expected_version":1, "period"?, "label"?, "amount"? }` -> 200. **cancel** `{ "reason":"Duplicate entry" }` -> 200.
+Errors: 409 `PERIOD_LOCKED`, `ITEM_LOCKED`, `VERSION_CONFLICT`, `TOO_MANY_ITEMS` (> 20 per employee-month); 403 `FORBIDDEN` (own); 422.
+**template** -> `.xlsx` with sheet `Items` (header `Employee ID | Code | Label | Amount`, one example row) and sheet `Codes`. `Cache-Control: no-store`.
+**import** multipart: `file` (xlsx <= 1 MB), `period` (`YYYY-MM`), and for `dry_run=false` also `file_sha256` (from the dry run) and `current_password`.
+Dry run -> 200 (nothing is written; audit `payroll.import.dry_run` with rows/errors counts):
+```json
+{ "period":"2026-11","file_sha256":"<64 hex>","rows":120,"valid":118,
+  "errors":[ { "row":14,"field":"employee_id","message":"UNKNOWN_EMPLOYEE" }, { "row":40,"field":"amount","message":"INVALID_AMOUNT" } ],
+  "by_code":[ { "code":"BONUS","count":110,"total":"550000.00" }, { "code":"OTHER_DEDUCTION","count":8,"total":"4000.00" } ],
+  "run_status":"draft" }
+```
+Row error messages: `UNKNOWN_EMPLOYEE`, `NOT_ELIGIBLE`, `SELF`, `INVALID_CODE`, `INVALID_LABEL`, `INVALID_AMOUNT`, `FORMULA_NOT_ALLOWED`, `TOO_MANY_ITEMS`, `DUPLICATE_ROW` (same employee+code+label+amount twice).
+Commit -> 201 `{ "batch_id":"uuid","period":"2026-11","created":118 }` only when there are NO row errors (else 422 `IMPORT_INVALID` with the same `errors` as `details`
+(`field` = `"row 14: employee_id"`)). The whole batch is one transaction. Errors: 409 `IMPORT_FILE_CHANGED` (`file_sha256` differs), 409 `IMPORT_DUPLICATE` (same file + period already imported),
+409 `PERIOD_LOCKED`, 422 `FILE_TYPE_NOT_ALLOWED` (not xlsx, macro, external links, zip limits), 422 `FILE_TOO_LARGE`, 422 `IMPORT_INVALID` (header mismatch, > 500 rows: `details[0].field` = `file`),
+503 `TEMPORARILY_UNAVAILABLE` (parser busy / timeout). Audit `payroll.import.commit` (batch_id, period, rows).
+**Batch** `{ "id","period","rows","created_at","created_by":UserSummary,"cancelled_at":"ts|null","counts":{"pending":0,"processing":0,"paid":118,"cancelled":0} }`.
+**Batch cancel** `{ "reason" }` -> 200 `{ "cancelled":110,"not_cancelled":8 }` (pending rows only).
+
+### 17.3 Loans and advances
+| Method | Path | Perm |
+|---|---|---|
+| GET | /admin/payroll/loans?user_id=&status=active\|closed\|cancelled&kind=&page=&page_size= | `payroll.view_all` |
+| POST | /admin/payroll/loans | `payroll.manage` + step-up |
+| GET | /admin/payroll/loans/{id} | `payroll.view_all` (audit `payroll.loan.view`) |
+| POST | /admin/payroll/loans/{id}/skip | `payroll.manage` |
+| POST | /admin/payroll/loans/{id}/reschedule | `payroll.manage` + step-up |
+| POST | /admin/payroll/loans/{id}/foreclose | `payroll.manage` + step-up |
+| POST | /admin/payroll/loans/{id}/cancel | `payroll.manage` + step-up |
+| GET | /me/loans | `payroll.view_own` |
+| GET | /me/loans/{id} | `payroll.view_own` (owner; audit `payroll.loan.view_own`) |
+
+**Loan** (admin):
+```json
+{ "id":"uuid","reference":"L-0007","user":UserSummary,"kind":"loan|advance","principal":"30000.00","emi":"2500.00","start_period":"2026-11",
+  "recovered":"5000.00","in_process":"2500.00","outstanding":"22500.00","status":"active|closed|cancelled",
+  "close_mode":null|"recovered"|"foreclosed_payroll"|"foreclosed_outside"|"cancelled","reason":"Medical emergency",
+  "installments":[ { "id":"uuid","seq":1,"period":"2026-11","amount":"2500.00","kind":"emi|foreclosure","status":"pending|processing|paid|skipped|cancelled","payslip_id":null,"flags":[] } ],
+  "version":3,"created_at":"ts","created_by":UserSummary,"closed_at":"ts|null" }
+```
+List items omit `installments` and `reason` and add `next_installment: { "period","amount" } | null`. `outstanding = principal - recovered`; `in_process` is part of it.
+**POST** `{ "user_id","kind":"loan","principal":"30000.00","emi":"2500.00","start_period":"2026-11","reason":"Medical emergency","current_password" }` -> 201 Loan.
+Rules: principal 1.00..1000000.00; 0 < emi <= principal; ceil(principal/emi) <= `payroll.loan_max_tenure_months` (60); active loans+advances < `payroll.loan_max_active` (3).
+**skip** `{ "installment_id","reason","expected_version" }` -> 200 Loan (installment `skipped`, one appended after the last). **reschedule** `{ "emi","from_period","reason","expected_version","current_password" }`.
+**foreclose** `{ "mode":"payroll","period":"2026-12","reason","expected_version","current_password" }` or `{ "mode":"outside","paid_on":"2026-11-20","reference":"UTR123","reason","expected_version","current_password" }`
+(`paid_on` not in the future; `reference` 1-60 `[A-Za-z0-9 ._/-]`, encrypted, stored in the event only). **cancel** `{ "reason","expected_version","current_password" }`.
+Errors: 409 `LOAN_NOT_ACTIVE`, `LOAN_HAS_RECOVERIES` (cancel), `ITEM_LOCKED` (an installment is processing), `PERIOD_LOCKED`, `VERSION_CONFLICT`, `LOAN_LIMIT_REACHED`; 422 (tenure, amounts); 403.
+Audit `payroll.loan.create|skip|reschedule|foreclose|cancel|close` (reference, kind, periods; never amounts).
+**GET /me/loans** -> `{ "items":[ { "id","reference","kind","principal","emi","outstanding","status","start_period","next_installment":{period,amount}|null } ] }` (un-paginated, active first).
+**GET /me/loans/{id}** -> the same + `"installments":[ { "seq","period","amount","status":"scheduled|deducted|deferred|cancelled" } ]` (`pending`/`processing` -> `scheduled`,
+`paid` -> `deducted`, `skipped` -> `deferred`). No `reason`, no payslip ids, no actors.
+
+### 17.4 Auto arrears
+| Method | Path | Perm |
+|---|---|---|
+| GET | /admin/payroll/arrears?status=proposed\|pending\|processing\|paid\|dismissed&user_id=&page=&page_size= | `payroll.view_all` |
+| GET | /admin/payroll/arrears/{id} | `payroll.view_all` (audit `payroll.arrears.view`) |
+| POST | /admin/payroll/employees/{user_id}/arrears/recalculate | `payroll.manage` |
+| POST | /admin/payroll/arrears/{id}/accept | `payroll.manage` + step-up |
+| POST | /admin/payroll/arrears/{id}/dismiss | `payroll.manage` |
+
+**Arrears**:
+```json
+{ "id":"uuid","user":UserSummary,"code":"ARREARS|OTHER_DEDUCTION","amount":"4800.00","from_period":"2026-08","to_period":"2026-10","period":null|"2026-11",
+  "status":"proposed|pending|processing|paid|dismissed","run_status":"none|draft|processed|published"|null,
+  "trigger_structure":{ "id":"uuid","effective_from":"2026-08-01" }|null,
+  "breakdown":[ { "period":"2026-08","paid_days":31.0,"paid_earnings":"40000.00","new_earnings":"41600.00","already_paid_arrears":"0.00","diff":"1600.00","basic_diff":"1000.00" } ],
+  "version":2,"created_at":"ts","updated_at":"ts" }
+```
+Proposals are created / recomputed automatically in the same transaction as a structure create, update or delete (13.4) that affects a month with a published payslip;
+the structure endpoints' responses are unchanged. **recalculate** -> 200 `{ "arrears": Arrears | null }` (null = no difference; an open proposal is then dismissed by the system).
+**accept** `{ "period":"2026-11","expected_version":2,"current_password" }` -> 200 (status `pending`). **dismiss** `{ "reason" }` -> 200 (`proposed` or `pending` only).
+Errors: 409 `ARREARS_STALE` (version changed; reload), `NOT_PROPOSED`, `ITEM_LOCKED`, `PERIOD_LOCKED`; 403 (own). Arrears are not PF or ESI wages (plan 15 Q1).
+
+### 17.5 Leave encashment
+| Method | Path | Perm |
+|---|---|---|
+| GET | /admin/payroll/encashments?user_id=&year=&status=&page=&page_size= | `payroll.view_all` |
+| GET | /admin/payroll/employees/{user_id}/encashment-quote?leave_type_id=&year=&days=&period= | `payroll.view_all` |
+| POST | /admin/payroll/encashments | `payroll.manage` + step-up |
+| POST | /admin/payroll/encashments/{id}/cancel | `payroll.manage` (pending only) |
+
+**quote** -> `{ "leave_type":{id,code,name},"year":2026,"available_days":6.0,"days":4.0,"daily_rate":"666.67","amount":"2666.68","basis":"basic","divisor":30,"period":"2026-11" }`
+(writes nothing; `days` optional, defaults to `available_days`).
+**POST** `{ "user_id","leave_type_id","year":2026,"days":4.0,"period":"2026-11","source":"request","reason":"Year-end encashment","current_password" }` -> 201 Encashment
+`{ "id","user":UserSummary,"leave_type":{id,code,name},"year","days","daily_rate","amount","period","source":"request|fnf","status","run_status","payslip_id","version","created_at","created_by" }`.
+`year` = current or previous; `days` > 0 in 0.5 steps. Errors: 422 `NOT_ENCASHABLE`, 409 `INSUFFICIENT_BALANCE` (`details:[{field:"available_days",message:"6.0"}]`), 422 `STRUCTURE_MISSING`,
+409 `PERIOD_LOCKED`; cancel 409 `ITEM_LOCKED`. Audit `payroll.encashment.create|cancel` (leave type code, year, days; never amounts).
+
+### 17.6 Reimbursement claims [3b]
+| Method | Path | Perm |
+|---|---|---|
+| GET | /reimbursements/categories | `reimbursement.submit` |
+| POST | /reimbursements | `reimbursement.submit` |
+| GET | /reimbursements?status=&year=&page=&page_size= | `reimbursement.submit` |
+| GET | /reimbursements/{id} | `reimbursement.submit` (owner) |
+| POST | /reimbursements/{id}/cancel | `reimbursement.submit` (owner; submitted / verified) |
+| GET | /admin/reimbursements?stage=manager\|hr\|all&status=&employee_id=&period=&category=&page=&page_size= | `request.view_team` (stage `manager`, direct reports) / `payroll.view_all` |
+| GET | /admin/reimbursements/{id} | same scope (audit `reimbursement.view`) |
+| PUT | /admin/reimbursements/{id}/verify | `request.approve_team` / `request.approve_all` (direct report, submitted) |
+| PUT | /admin/reimbursements/{id}/approve | `payroll.manage` |
+| PUT | /admin/reimbursements/{id}/reject | manager scope while `submitted`, or `payroll.manage` while `submitted`/`verified` |
+| PUT | /admin/reimbursements/{id}/payout | `payroll.manage` (approved only) |
+
+**categories** -> `{ "items":[ { "code":"travel","name":"Travel","max_amount":"5000.00"|null,"bill_required":true } ], "max_age_days":60 }`.
+**POST** `{ "category":"travel","expense_date":"2026-10-28","amount":"1240.00","description":"Cab to client site","bill_file_id":"uuid"|null }` (description 3-300 chars) -> 201 Claim:
+```json
+{ "id":"uuid","category":{"code":"travel","name":"Travel"},"expense_date":"2026-10-28","amount":"1240.00","approved_amount":null,"description":"Cab to client site",
+  "bill":{ "url":"/api/files/<id>","content_type":"image/jpeg|image/png|application/pdf" }|null,
+  "status":"submitted|verified|approved|paid|rejected|cancelled","manager_step":"pending|done|skipped","period":null|"2026-11",
+  "verifier":UserSummary|null,"verified_at":"ts|null","approver":UserSummary|null,"decided_at":"ts|null","decision_comment":null,"created_at":"ts","version":1 }
+```
+The employee sees `processing` as `approved`. Admin item = Claim + `"user":UserSummary`, real `status` (incl. `processing`), `payslip_id`, `run_status`, `flags`.
+Errors: 422 `INVALID_CATEGORY`, `INVALID_DATE` (future / older than `max_age_days`), `AMOUNT_ABOVE_LIMIT` (`details:[{field:"amount",message:"5000.00"}]`), `BILL_REQUIRED`,
+`VALIDATION_ERROR` (bill not your own unused `reimbursement_bill` upload); 409 `DUPLICATE_BILL`, `CLAIM_LIMIT_REACHED` (per month); 429; 503. Cancel: 409 `NOT_PENDING`; 404 not yours.
+**verify** `{ "comment":"optional" }` -> 200 (status `verified`). **approve** `{ "approved_amount":"1240.00","period":"2026-11","comment":"optional","expected_version":2 }` -> 200 (status `approved`);
+`approved_amount` > 0 and <= `amount`. Allowed on `verified`, or on `submitted` when `manager_step` is `skipped` or the caller is the employee's manager holding `payroll.manage`
+(then `manager_step` = `done`, `verifier` = caller, audit `combined:true`). The approver must not be the verifier otherwise (403 `SECOND_PERSON_REQUIRED`).
+**reject** `{ "comment":"required" }` -> 200. **payout** `{ "period":"2026-12","expected_version":3 }` -> 200.
+Errors: 409 `NOT_PENDING`, `VERSION_CONFLICT`, `PERIOD_LOCKED`, `ITEM_LOCKED`, `REQUESTER_INACTIVE` (verify only); 403 `FORBIDDEN` (own), 404 (out of scope; audited `reimbursement.denied`).
+Bills: `GET /api/files/{id}` is allowed for the owner, the owner's current manager (with `request.view_team`/`approve_team`) while the claim is `submitted`, and `payroll.view_all`
+holders; cross-user reads are audited `file.view_other`. Bills are kept (not purged).
+
+### 17.7 Push (section 11; data messages, never amounts)
+- `loan_created` to the employee, id = loan id, "Salary advance / loan added", body "A recovery schedule was added to your payslips. Open the app for details."
+- `reimbursement_submitted` to the stage approver (manager; or the `payroll.manage` holders, max 20, coalesced 10 min per requester), id = claim id, body = employee name only.
+  Also sent to the `payroll.manage` holders when a claim becomes `verified`.
+- `reimbursement_decision` to the employee, id = claim id, title "Expense claim approved" / "Expense claim rejected", body "Your <category name> claim was <status>."
+Best effort, after commit.
+
+### 17.8 Overtime [3b]
+| Method | Path | Perm |
+|---|---|---|
+| POST | /admin/payroll/overtime/compute?period= | `payroll.manage` |
+| GET | /admin/payroll/overtime?period=&user_id=&status=&page=&page_size= | `payroll.view_all` |
+| PUT | /admin/payroll/overtime/{id} | `payroll.manage` (computed / approved / rejected) |
+| POST | /admin/payroll/overtime/bulk | `payroll.manage` |
+| GET | /me/overtime?period= | `payroll.view_own` |
+
+All refuse with 409 `OVERTIME_DISABLED` while `payroll.overtime_enabled` is false (GET `/me/overtime` returns `{ "enabled":false,"items":[] }`).
+**compute** -> 200 `{ "period":"2026-11","created":34,"updated":5,"flagged_changed":1 }` (eligible employees only; `computed` rows rebuilt, reviewed rows only flagged).
+**OvertimeDay** `{ "id","user":UserSummary,"work_date":"2026-11-08","computed_minutes":120,"approved_minutes":90|null,"flags":["OFF_DAY"],"status":"computed|approved|rejected|processing|paid","reviewer":UserSummary|null,"reviewed_at":"ts|null","comment":null,"version":1 }`.
+List = paginated rows ordered by employee, date, plus `"summary":[{ "user_id","approved_minutes":540,"computed_minutes":600,"pending_rows":2 }]` for the filtered month (no money).
+**PUT** `{ "status":"approved","approved_minutes":90,"comment":null,"expected_version":1 }` (`approved_minutes` 0..computed_minutes, default computed) or `{ "status":"rejected","comment":"required","expected_version":1 }`.
+**bulk** `{ "ids":["uuid", ...] (1..200), "action":"approve|reject","comment":"..." }` -> 200 `{ "updated":40,"skipped":[{ "id","reason":"ITEM_LOCKED|FORBIDDEN" }] }`.
+**/me/overtime** -> `{ "enabled":true,"eligible":true,"period":"2026-11","items":[{ "work_date","computed_minutes","approved_minutes","status" }] }` (no money, no reviewer).
+Errors: 409 `OVERTIME_DISABLED`, `ITEM_LOCKED`, `VERSION_CONFLICT`; 422 (`approved_minutes` above computed); 403 (own rows).
+
+### 17.9 New settings (`/admin/payroll/settings`, snapshotted into each run like the other `payroll.*` keys)
+| Key | Default | Range |
+|---|---|---|
+| `payroll.loan_max_tenure_months` | 60 | 1..120 |
+| `payroll.loan_max_active` | 3 | 1..10 |
+| `payroll.encashment_basis` | `"basic"` | `basic` \| `gross` |
+| `payroll.encashment_divisor` | 30 | 1..31 |
+| `payroll.reimbursement_categories` [3b] | travel, food, medical, phone, internet, other (all `bill_required`, no max) | <= 20 items `{code ^[a-z][a-z0-9_]{1,19}$, name 1-40, max_amount money|null, bill_required}` |
+| `payroll.reimbursement_max_age_days` [3b] | 60 | 1..365 |
+| `payroll.reimbursement_max_claims_per_month` [3b] | 30 | 1..200 |
+| `payroll.overtime_enabled` [3b] | false | bool |
+| `payroll.overtime_multiplier` [3b] | 2 | 1..3 (2 decimals) |
+| `payroll.overtime_month_days` [3b] | 26 | 20..31 |
+| `payroll.overtime_min_minutes` [3b] | 30 | 0..240 |
+| `payroll.overtime_rounding_minutes` [3b] | 30 | 1..60 (floor) |
+| `payroll.overtime_max_hours_month` [3b] | 50 | 0..300 (0 = no cap) |
+| `payroll.overtime_offday_full` [3b] | true | bool |
+| `payroll.overtime_include_auto_closed` [3b] | false | bool |
+Removing a reimbursement category keeps existing claims (shown with their stored code); new claims need an active category.
+
+### 17.10 Error codes (new)
+409: `PERIOD_LOCKED`, `ITEM_LOCKED`, `TOO_MANY_ITEMS`, `COMPONENTS_CHANGED`, `IMPORT_DUPLICATE`, `IMPORT_FILE_CHANGED`, `LOAN_NOT_ACTIVE`, `LOAN_HAS_RECOVERIES`, `LOAN_LIMIT_REACHED`,
+`ARREARS_STALE`, `NOT_PROPOSED`, `DUPLICATE_BILL`, `CLAIM_LIMIT_REACHED`, `OVERTIME_DISABLED`. 422: `IMPORT_INVALID`, `NOT_ENCASHABLE`, `INVALID_CATEGORY`, `AMOUNT_ABOVE_LIMIT`, `BILL_REQUIRED`.
+Reused: `VERSION_CONFLICT`, `NOT_PENDING`, `INSUFFICIENT_BALANCE`, `REQUESTER_INACTIVE`, `SECOND_PERSON_REQUIRED`, `STRUCTURE_MISSING` (as 422), `INVALID_PERIOD`, `INVALID_DATE`,
+`FILE_TYPE_NOT_ALLOWED`, `FILE_TOO_LARGE`, `REAUTH_FAILED`, `FORBIDDEN`, `RATE_LIMITED`, `TEMPORARILY_UNAVAILABLE`.
