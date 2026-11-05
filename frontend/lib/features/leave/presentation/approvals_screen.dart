@@ -4,6 +4,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/api/api_exception.dart';
 import '../../../core/widgets/state_views.dart';
 import '../../admin/presentation/admin_widgets.dart' show adminPermissionsProvider, adminSelfIdProvider;
+import '../../payroll/domain/claims_models.dart' show canSeeTeamClaims;
+import '../../payroll/presentation/claims_review.dart' show ManagerClaimsBody;
 import '../domain/leave_logic.dart';
 import '../domain/leave_models.dart';
 import 'leave_providers.dart';
@@ -21,6 +23,9 @@ class ApprovalsScreen extends ConsumerStatefulWidget {
 
 class _ApprovalsScreenState extends ConsumerState<ApprovalsScreen> {
   RequestKind _kind = RequestKind.leave;
+
+  /// The Claims segment (expense reimbursements, manager step) is showing.
+  bool _claims = false;
   RequestStatus _status = RequestStatus.pending;
 
   ApprovalsQuery get _query => (kind: _kind, status: _status);
@@ -32,6 +37,7 @@ class _ApprovalsScreenState extends ConsumerState<ApprovalsScreen> {
     final selfId = ref.watch(adminSelfIdProvider);
     final perms = ref.watch(adminPermissionsProvider);
     final canDecide = canDecideRequests(perms);
+    final canClaims = canSeeTeamClaims(perms);
     final async = ref.watch(approvalsProvider(_query));
 
     Future<void> refresh() async {
@@ -90,17 +96,34 @@ class _ApprovalsScreenState extends ConsumerState<ApprovalsScreen> {
         children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-            child: SegmentedButton<RequestKind>(
-              showSelectedIcon: false,
-              segments: const [
-                ButtonSegment(value: RequestKind.leave, label: Text('Leave')),
-                ButtonSegment(value: RequestKind.permission, label: Text('Permission')),
-                ButtonSegment(value: RequestKind.onDuty, label: Text('On duty')),
-              ],
-              selected: {_kind},
-              onSelectionChanged: (s) => setState(() => _kind = s.first),
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: SegmentedButton<String>(
+                showSelectedIcon: false,
+                segments: [
+                  const ButtonSegment(value: 'leave', label: Text('Leave')),
+                  const ButtonSegment(value: 'permission', label: Text('Permission')),
+                  const ButtonSegment(value: 'on_duty', label: Text('On duty')),
+                  if (canClaims) const ButtonSegment(value: 'claims', label: Text('Claims')),
+                ],
+                selected: {_claims ? 'claims' : _kind.name == 'onDuty' ? 'on_duty' : _kind.name},
+                onSelectionChanged: (s) => setState(() {
+                  final v = s.first;
+                  _claims = v == 'claims';
+                  if (!_claims) {
+                    _kind = v == 'leave'
+                        ? RequestKind.leave
+                        : v == 'permission'
+                            ? RequestKind.permission
+                            : RequestKind.onDuty;
+                  }
+                }),
+              ),
             ),
           ),
+          if (_claims)
+            const Expanded(child: ManagerClaimsBody())
+          else ...[
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -183,6 +206,7 @@ class _ApprovalsScreenState extends ConsumerState<ApprovalsScreen> {
               ),
             ),
           ),
+          ],
         ],
       ),
     );

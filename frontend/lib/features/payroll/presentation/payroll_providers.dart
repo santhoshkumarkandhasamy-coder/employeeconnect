@@ -4,6 +4,7 @@ import '../../admin/presentation/admin_providers.dart' show AdminPagedNotifier;
 import '../../announcements/presentation/announcement_providers.dart' show PagedList;
 import '../../attendance/domain/attendance_models.dart' show Paged;
 import '../data/payroll_repository.dart';
+import '../domain/claims_models.dart';
 import '../domain/pay_items_models.dart';
 import '../domain/payroll_models.dart';
 
@@ -165,3 +166,70 @@ final myLoansProvider = FutureProvider.autoDispose<List<MyLoan>>(
 final myLoanProvider = FutureProvider.autoDispose.family<MyLoan, String>(
   (ref, id) => ref.watch(payrollRepositoryProvider).myLoan(id),
 );
+
+// ---- reimbursement claims and overtime (contract 17.6, 17.8) -----------------------
+
+/// Categories, caps and the maximum age of an expense (employee form).
+final claimCategoriesProvider = FutureProvider.autoDispose<ClaimCategories>(
+  (ref) => ref.watch(payrollRepositoryProvider).claimCategories(),
+);
+
+class MyClaimsNotifier extends AdminPagedNotifier<Claim, ClaimQuery> {
+  @override
+  Future<Paged<Claim>> fetchPage(ClaimQuery arg, int page) =>
+      ref.read(payrollRepositoryProvider).myClaims(arg, page: page);
+
+  @override
+  String idOf(Claim item) => item.id;
+}
+
+final myClaimsProvider = AsyncNotifierProvider.autoDispose
+    .family<MyClaimsNotifier, PagedList<Claim>, ClaimQuery>(MyClaimsNotifier.new);
+
+final myClaimProvider = FutureProvider.autoDispose.family<Claim, String>(
+  (ref, id) => ref.watch(payrollRepositoryProvider).myClaim(id),
+);
+
+class AdminClaimsNotifier extends AdminPagedNotifier<Claim, AdminClaimQuery> {
+  @override
+  Future<Paged<Claim>> fetchPage(AdminClaimQuery arg, int page) =>
+      ref.read(payrollRepositoryProvider).adminClaims(arg, page: page);
+
+  @override
+  String idOf(Claim item) => item.id;
+}
+
+final adminClaimsProvider = AsyncNotifierProvider.autoDispose
+    .family<AdminClaimsNotifier, PagedList<Claim>, AdminClaimQuery>(AdminClaimsNotifier.new);
+
+final adminClaimProvider = FutureProvider.autoDispose.family<Claim, String>(
+  (ref, id) => ref.watch(payrollRepositoryProvider).adminClaim(id),
+);
+
+class OvertimeNotifier extends AdminPagedNotifier<OvertimeDay, OvertimeQuery> {
+  @override
+  Future<Paged<OvertimeDay>> fetchPage(OvertimeQuery arg, int page) =>
+      ref.read(payrollRepositoryProvider).overtimeDays(arg, page: page);
+
+  @override
+  String idOf(OvertimeDay item) => item.id;
+}
+
+final overtimeProvider = AsyncNotifierProvider.autoDispose
+    .family<OvertimeNotifier, PagedList<OvertimeDay>, OvertimeQuery>(OvertimeNotifier.new);
+
+final overtimeSummaryProvider = FutureProvider.autoDispose.family<List<OvertimeSummary>, OvertimeQuery>(
+  (ref, q) => ref.watch(payrollRepositoryProvider).overtimeSummary(q),
+);
+
+/// Employee: own overtime of one month (`YYYY-MM`). `enabled == false` = show nothing.
+final myOvertimeProvider = FutureProvider.autoDispose.family<MyOvertime, String>(
+  (ref, period) => ref.watch(payrollRepositoryProvider).myOvertime(period),
+);
+
+/// Whether the overtime switch is on, from the payroll settings (HR/admin only;
+/// a failed read counts as off so the segment stays hidden).
+final overtimeEnabledProvider = FutureProvider.autoDispose<bool>((ref) async {
+  final s = await ref.watch(payrollSettingsProvider.future);
+  return s['payroll.overtime_enabled'] == true;
+});

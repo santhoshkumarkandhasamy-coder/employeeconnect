@@ -12,6 +12,8 @@ import '../data/payroll_repository.dart';
 import '../domain/payroll_logic.dart';
 import '../domain/payroll_models.dart';
 import '../domain/payroll_money.dart';
+import '../domain/claims_models.dart';
+import 'categories_editor.dart';
 import 'payroll_providers.dart';
 import 'payroll_widgets.dart';
 import 'pt_slab_editor.dart';
@@ -97,7 +99,9 @@ class _PayrollSettingsFormState extends State<PayrollSettingsForm> {
   final Map<String, String> _choices = {};
   final Map<String, String> _serverErrors = {};
   late List<PtSlab> _slabs = PtSlab.parseList(widget.initial[_ptKey]);
+  late List<CategoryDraft> _cats = CategoryDraft.parseList(widget.initial[reimbursementCategoriesKey]);
   String? _slabError;
+  String? _catError;
   bool _saving = false;
   String? _error;
 
@@ -145,6 +149,7 @@ class _PayrollSettingsFormState extends State<PayrollSettingsForm> {
       _serverErrors.clear();
       _error = null;
       _slabError = null;
+      _catError = null;
     });
     if (!(_form.currentState?.validate() ?? false)) return;
     final hasSlabs = widget.initial.containsKey(_ptKey);
@@ -152,6 +157,14 @@ class _PayrollSettingsFormState extends State<PayrollSettingsForm> {
       final e = validatePtSlabs(_slabs);
       if (e != null) {
         setState(() => _slabError = e);
+        return;
+      }
+    }
+    final hasCats = widget.initial.containsKey(reimbursementCategoriesKey);
+    if (hasCats) {
+      final e = validateCategories(_cats);
+      if (e != null) {
+        setState(() => _catError = e);
         return;
       }
     }
@@ -163,6 +176,13 @@ class _PayrollSettingsFormState extends State<PayrollSettingsForm> {
       ]);
       final after = jsonEncode([for (final s in _slabs) _normalised(s).toJson()]);
       if (before != after) changes[_ptKey] = [for (final s in _slabs) _normalised(s).toJson()];
+    }
+    if (hasCats) {
+      final before = jsonEncode([
+        for (final c in CategoryDraft.parseList(widget.initial[reimbursementCategoriesKey])) c.toJson(),
+      ]);
+      final after = jsonEncode([for (final c in _cats) c.toJson()]);
+      if (before != after) changes[reimbursementCategoriesKey] = [for (final c in _cats) c.toJson()];
     }
     if (changes.isEmpty) {
       payrollSnack(context, 'Nothing changed.');
@@ -263,6 +283,22 @@ class _PayrollSettingsFormState extends State<PayrollSettingsForm> {
                 enabled: en,
                 error: _slabError ?? _serverErrors[_ptKey],
                 onChanged: (v) => _slabs = v,
+              ),
+            ],
+            if (g.key == 'Expense claims' && widget.initial.containsKey(reimbursementCategoriesKey)) ...[
+              Text('Categories', style: theme.textTheme.titleSmall),
+              const SizedBox(height: 4),
+              Text(
+                'Employees pick one of these when they claim an expense. Removing a category keeps '
+                'the claims already made; new claims need a category that is still here.',
+                style: theme.textTheme.bodySmall,
+              ),
+              const SizedBox(height: 8),
+              CategoriesEditor(
+                initial: _cats,
+                enabled: en,
+                error: _catError ?? _serverErrors[reimbursementCategoriesKey],
+                onChanged: (v) => _cats = v,
               ),
             ],
           ],

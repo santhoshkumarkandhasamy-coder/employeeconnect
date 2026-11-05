@@ -37,7 +37,9 @@ class _PayrollDetailsScreenState extends ConsumerState<PayrollDetailsScreen> {
   late final _esi = TextEditingController(text: _prefill(widget.initial.esiIpNumber));
   late String _mode = widget.initial.paymentMode;
   late bool _include = widget.initial.includeInPayroll;
+  late bool _overtime = widget.initial.overtimeEligible;
   bool _saving = false;
+  bool _savingOvertime = false;
 
   String _prefill(String? v) => widget.initial.revealed ? (v ?? '') : '';
 
@@ -98,6 +100,29 @@ class _PayrollDetailsScreenState extends ConsumerState<PayrollDetailsScreen> {
     }
   }
 
+  /// `overtime_eligible` is saved on its own, with no password (contract 17.1):
+  /// it is sent alone, never with the other fields. Reverts if the call fails.
+  Future<void> _setOvertime(bool v) async {
+    if (_savingOvertime) return;
+    final before = _overtime;
+    setState(() {
+      _overtime = v;
+      _savingOvertime = true;
+    });
+    final repo = ref.read(payrollRepositoryProvider);
+    try {
+      await repo.saveOvertimeEligible(widget.employee.id, eligible: v);
+      if (mounted) payrollSnack(context, v ? 'Eligible for overtime.' : 'Not eligible for overtime.');
+    } on ApiException catch (e) {
+      if (mounted) {
+        setState(() => _overtime = before);
+        payrollSnack(context, payrollErrorMessage(e));
+      }
+    } finally {
+      if (mounted) setState(() => _savingOvertime = false);
+    }
+  }
+
   InputDecoration _dec(String label, {String? helper}) => InputDecoration(
         labelText: label,
         helperText: helper,
@@ -139,6 +164,17 @@ class _PayrollDetailsScreenState extends ConsumerState<PayrollDetailsScreen> {
                 title: const Text('Include in payroll'),
                 value: _include,
                 onChanged: (v) => setState(() => _include = v),
+              ),
+              SwitchListTile(
+                key: const ValueKey('overtime-eligible'),
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Eligible for overtime'),
+                subtitle: const Text(
+                  'Saved straight away, no password needed. Counts only while overtime is switched on '
+                  'in the payroll settings.',
+                ),
+                value: _overtime,
+                onChanged: _savingOvertime ? null : _setOvertime,
               ),
               gap,
               TextFormField(controller: _bankName, maxLength: 60, decoration: _dec('Bank name')),

@@ -812,6 +812,7 @@ class PayslipComponent {
     required this.label,
     required this.amount,
     this.minutes,
+    this.minutesTotal,
     this.sources = const [],
   });
 
@@ -820,6 +821,7 @@ class PayslipComponent {
         label: _s(j['label']),
         amount: _s(j['amount']),
         minutes: j['minutes'] is num ? (j['minutes'] as num).toInt() : null,
+        minutesTotal: j['minutes_total'] is num ? (j['minutes_total'] as num).toInt() : null,
         sources: [
           for (final s in _list(j['sources'])) ComponentSource(type: _s(s['type']), id: _s(s['id'])),
         ],
@@ -829,7 +831,28 @@ class PayslipComponent {
   final String label;
   final String amount;
   final int? minutes;
+
+  /// Overtime: approved minutes before the monthly cap (`minutes` is after it).
+  final int? minutesTotal;
   final List<ComponentSource> sources;
+
+  /// `7h 30m paid` or `7h 30m paid of 9h approved (capped)`; null when the line has no minutes.
+  String? get minutesCaption {
+    final m = minutes;
+    if (m == null) return null;
+    final t = minutesTotal;
+    final paid = formatMinutesShort(m);
+    if (t == null || t == m) return '$paid paid';
+    return '$paid paid of ${formatMinutesShort(t)} approved${t > m ? ' (capped)' : ''}';
+  }
+}
+
+String formatMinutesShort(int minutes) {
+  final m = minutes < 0 ? 0 : minutes;
+  final h = m ~/ 60;
+  final r = m % 60;
+  if (h == 0) return '${r}m';
+  return r == 0 ? '${h}h' : '${h}h ${r}m';
 }
 
 /// Short, readable form of a source id (first 8 characters).

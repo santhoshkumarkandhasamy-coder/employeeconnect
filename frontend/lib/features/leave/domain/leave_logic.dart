@@ -217,7 +217,17 @@ String leaveErrorMessage(ApiException e) {
 
 // ---- push routing (api-contract section 11) ---------------------------------
 
-enum RequestPushScreen { approvals, myRequests }
+enum RequestPushScreen {
+  approvals,
+  myRequests,
+
+  /// `reimbursement_submitted`: the claim approval queue (Approvals > Claims
+  /// for a manager, Pay items > Claims for HR; the screen picks by permission).
+  claimApprovals,
+
+  /// `reimbursement_decision`: the employee's own claim.
+  myClaims,
+}
 
 class RequestPushTarget {
   const RequestPushTarget(this.screen, {this.kind, this.id});
@@ -238,6 +248,8 @@ RequestPushTarget? parseRequestPush(Map<String, dynamic> data) {
       RequestPushTarget(RequestPushScreen.myRequests, kind: RequestKind.permission, id: id),
     'on_duty_decision' =>
       RequestPushTarget(RequestPushScreen.myRequests, kind: RequestKind.onDuty, id: id),
+    'reimbursement_submitted' => RequestPushTarget(RequestPushScreen.claimApprovals, id: id),
+    'reimbursement_decision' => RequestPushTarget(RequestPushScreen.myClaims, id: id),
     _ => null,
   };
 }

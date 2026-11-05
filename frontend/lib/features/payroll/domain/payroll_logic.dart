@@ -360,7 +360,30 @@ const List<PayrollSettingSpec> payrollSettingSpecs = [
       maxLength: 300,),
   PayrollSettingSpec('payroll.payslip_footer', 'Payslip footer', PayrollSettingKind.text, 'Payslip',
       maxLength: 200,),
+  // 3b: expense claims and overtime (contract 17.9). The category list has its own editor.
+  PayrollSettingSpec('payroll.reimbursement_max_age_days', 'Oldest expense that can be claimed',
+      PayrollSettingKind.number, 'Expense claims', min: 1, max: 365, suffix: 'days',),
+  PayrollSettingSpec('payroll.reimbursement_max_claims_per_month', 'Claims per employee per month',
+      PayrollSettingKind.number, 'Expense claims', min: 1, max: 200,),
+  PayrollSettingSpec('payroll.overtime_enabled', 'Overtime is paid', PayrollSettingKind.boolean,
+      'Overtime',),
+  PayrollSettingSpec('payroll.overtime_multiplier', 'Overtime rate (times the hourly pay)',
+      PayrollSettingKind.number, 'Overtime', min: 1, max: 3,),
+  PayrollSettingSpec('payroll.overtime_month_days', 'Days in a month for the hourly pay',
+      PayrollSettingKind.number, 'Overtime', min: 20, max: 31,),
+  PayrollSettingSpec('payroll.overtime_min_minutes', 'Shortest overtime that counts',
+      PayrollSettingKind.number, 'Overtime', min: 0, max: 240, suffix: 'min',),
+  PayrollSettingSpec('payroll.overtime_rounding_minutes', 'Round overtime down to',
+      PayrollSettingKind.number, 'Overtime', min: 1, max: 60, suffix: 'min',),
+  PayrollSettingSpec('payroll.overtime_max_hours_month', 'Most overtime paid per month (0 = no cap)',
+      PayrollSettingKind.number, 'Overtime', min: 0, max: 300, suffix: 'hours',),
+  PayrollSettingSpec('payroll.overtime_offday_full', 'Pay all worked time on holidays and weekly offs',
+      PayrollSettingKind.boolean, 'Overtime',),
+  PayrollSettingSpec('payroll.overtime_include_auto_closed', 'Include auto-closed days',
+      PayrollSettingKind.boolean, 'Overtime',),
 ];
+
+const String reimbursementCategoriesKey = 'payroll.reimbursement_categories';
 
 String? validatePayrollNumber(String? v, PayrollSettingSpec s) {
   final t = (v ?? '').trim();

@@ -4,9 +4,11 @@ import 'package:dio/dio.dart';
 import 'package:employee_connect/core/api/api_exception.dart';
 import 'package:employee_connect/features/admin/presentation/admin_widgets.dart';
 import 'package:employee_connect/features/attendance/domain/attendance_models.dart' show Paged;
+import 'package:employee_connect/features/payroll/data/claim_bill_picker.dart';
 import 'package:employee_connect/features/payroll/data/import_file_picker.dart';
 import 'package:employee_connect/features/payroll/data/payroll_delivery.dart';
 import 'package:employee_connect/features/payroll/data/payroll_repository.dart';
+import 'package:employee_connect/features/payroll/domain/claims_models.dart';
 import 'package:employee_connect/features/payroll/domain/pay_items_models.dart';
 import 'package:employee_connect/features/payroll/domain/payroll_models.dart';
 import 'package:employee_connect/features/payroll/presentation/payroll_providers.dart';
@@ -704,6 +706,218 @@ class FakeRepo extends PayrollRepository {
 
   @override
   Future<List<LeaveTypeRef>> encashableLeaveTypes() async => encashableTypes;
+
+  // ---- claims and overtime (3b) --------------------------------------------------
+
+  ClaimCategories categories = const ClaimCategories(
+    items: [
+      ClaimCategory(code: 'travel', name: 'Travel', maxAmount: '5000.00'),
+      ClaimCategory(code: 'phone', name: 'Phone', maxAmount: '1000.00', billRequired: false),
+    ],
+    maxAgeDays: 60,
+  );
+  ApiException? categoriesError;
+  List<Claim> claimList = [];
+  Claim? claimDetail;
+  ApiException? claimsError;
+  ApiException? submitError;
+  ApiException? uploadError;
+  ApiException? decideError;
+  Uint8List billData = Uint8List.fromList([1, 2, 3]);
+  ApiException? billError;
+  final List<Map<String, Object?>> claimCalls = [];
+  final List<AdminClaimQuery> adminClaimQueries = [];
+  List<Claim> adminClaimList = [];
+  Claim? adminClaimDetail;
+  List<OvertimeDay> overtimeList = [];
+  List<OvertimeSummary> overtimeSummaries = [];
+  ApiException? overtimeError;
+  MyOvertime myOvertimeData = const MyOvertime(enabled: false);
+  final List<Map<String, Object?>> overtimeCalls = [];
+  OvertimeBulkResult bulkResult = const OvertimeBulkResult(updated: 0, skipped: []);
+  final List<Map<String, Object?>> eligibleCalls = [];
+  ApiException? eligibleError;
+
+  @override
+  Future<ClaimCategories> claimCategories() async {
+    if (categoriesError != null) throw categoriesError!;
+    return categories;
+  }
+
+  @override
+  Future<String> uploadBill(List<int> bytes, String filename) async {
+    claimCalls.add({'op': 'upload', 'name': filename, 'len': bytes.length});
+    if (uploadError != null) throw uploadError!;
+    return 'file-1';
+  }
+
+  @override
+  Future<Claim> submitClaim({
+    required String category,
+    required String expenseDate,
+    required String amount,
+    required String description,
+    String? billFileId,
+  }) async {
+    claimCalls.add({
+      'op': 'submit',
+      'category': category,
+      'date': expenseDate,
+      'amount': amount,
+      'description': description,
+      'bill': billFileId,
+    });
+    if (submitError != null) throw submitError!;
+    return claimDetail ?? Claim.fromJson({'id': 'cn', 'version': 1});
+  }
+
+  @override
+  Future<Paged<Claim>> myClaims(ClaimQuery q, {int page = 1}) async {
+    claimCalls.add({'op': 'list', 'status': q.status});
+    if (claimsError != null) throw claimsError!;
+    return Paged(items: claimList, page: 1, total: claimList.length, pageSize: 20);
+  }
+
+  @override
+  Future<Claim> myClaim(String id) async {
+    if (claimsError != null) throw claimsError!;
+    return claimDetail!;
+  }
+
+  @override
+  Future<Claim> cancelClaim(String id) async {
+    claimCalls.add({'op': 'cancel', 'id': id});
+    if (decideError != null) throw decideError!;
+    return claimDetail!;
+  }
+
+  @override
+  Future<Uint8List> billBytes(String url) async {
+    claimCalls.add({'op': 'bill', 'url': url});
+    if (billError != null) throw billError!;
+    return billData;
+  }
+
+  @override
+  Future<Paged<Claim>> adminClaims(AdminClaimQuery q, {int page = 1}) async {
+    adminClaimQueries.add(q);
+    if (claimsError != null) throw claimsError!;
+    return Paged(items: adminClaimList, page: 1, total: adminClaimList.length, pageSize: 20);
+  }
+
+  @override
+  Future<Claim> adminClaim(String id) async {
+    if (claimsError != null) throw claimsError!;
+    return adminClaimDetail!;
+  }
+
+  @override
+  Future<Claim> verifyClaim(String id, {String? comment}) async {
+    claimCalls.add({'op': 'verify', 'id': id, 'comment': comment});
+    if (decideError != null) throw decideError!;
+    return adminClaimDetail!;
+  }
+
+  @override
+  Future<Claim> approveClaim(
+    String id, {
+    required String approvedAmount,
+    required String period,
+    required int expectedVersion,
+    String? comment,
+  }) async {
+    claimCalls.add({
+      'op': 'approve',
+      'id': id,
+      'amount': approvedAmount,
+      'period': period,
+      'v': expectedVersion,
+      'comment': comment,
+    });
+    if (decideError != null) throw decideError!;
+    return adminClaimDetail!;
+  }
+
+  @override
+  Future<Claim> rejectClaim(String id, {required String comment}) async {
+    claimCalls.add({'op': 'reject', 'id': id, 'comment': comment});
+    if (decideError != null) throw decideError!;
+    return adminClaimDetail!;
+  }
+
+  @override
+  Future<Claim> payoutClaim(String id, {required String period, required int expectedVersion}) async {
+    claimCalls.add({'op': 'payout', 'id': id, 'period': period, 'v': expectedVersion});
+    if (decideError != null) throw decideError!;
+    return adminClaimDetail!;
+  }
+
+  @override
+  Future<OvertimeComputeResult> computeOvertime(String period) async {
+    overtimeCalls.add({'op': 'compute', 'period': period});
+    if (overtimeError != null) throw overtimeError!;
+    return const OvertimeComputeResult(period: '2026-10', created: 3, updated: 1, flaggedChanged: 0);
+  }
+
+  @override
+  Future<Paged<OvertimeDay>> overtimeDays(OvertimeQuery q, {int page = 1}) async {
+    if (overtimeError != null) throw overtimeError!;
+    return Paged(items: overtimeList, page: 1, total: overtimeList.length, pageSize: 50);
+  }
+
+  @override
+  Future<List<OvertimeSummary>> overtimeSummary(OvertimeQuery q) async => overtimeSummaries;
+
+  @override
+  Future<OvertimeDay> approveOvertime(
+    String id, {
+    required int approvedMinutes,
+    required int expectedVersion,
+    String? comment,
+  }) async {
+    overtimeCalls.add({'op': 'approve', 'id': id, 'minutes': approvedMinutes, 'v': expectedVersion, 'comment': comment});
+    if (overtimeError != null) throw overtimeError!;
+    return overtimeList.first;
+  }
+
+  @override
+  Future<OvertimeDay> rejectOvertime(String id, {required String comment, required int expectedVersion}) async {
+    overtimeCalls.add({'op': 'reject', 'id': id, 'comment': comment, 'v': expectedVersion});
+    if (overtimeError != null) throw overtimeError!;
+    return overtimeList.first;
+  }
+
+  @override
+  Future<OvertimeBulkResult> bulkOvertime(List<String> ids, {required String action, String? comment}) async {
+    overtimeCalls.add({'op': 'bulk', 'ids': ids, 'action': action, 'comment': comment});
+    if (overtimeError != null) throw overtimeError!;
+    return bulkResult;
+  }
+
+  @override
+  Future<MyOvertime> myOvertime(String period) async {
+    if (overtimeError != null) throw overtimeError!;
+    return myOvertimeData;
+  }
+
+  @override
+  Future<PayrollDetails> saveOvertimeEligible(String userId, {required bool eligible}) async {
+    eligibleCalls.add({'user': userId, 'eligible': eligible});
+    if (eligibleError != null) throw eligibleError!;
+    return detailsMasked;
+  }
+}
+
+class FakeBillPicker implements ClaimBillPicker {
+  FakeBillPicker(this.result);
+  PickedBill? result;
+  final List<BillSource> asked = [];
+
+  @override
+  Future<PickedBill?> pick(BillSource source) async {
+    asked.add(source);
+    return result;
+  }
 }
 
 /// Pumps [child] with the fake repo, permissions and a fixed clock.
@@ -715,6 +929,7 @@ Future<void> pumpPayroll(
   String? selfId = 'me',
   FakeDelivery? delivery,
   PayrollImportPicker? picker,
+  ClaimBillPicker? billPicker,
   Size size = const Size(800, 2400),
 }) async {
   tester.view.physicalSize = size;
@@ -728,6 +943,7 @@ Future<void> pumpPayroll(
         adminSelfIdProvider.overrideWithValue(selfId),
         payrollDeliveryProvider.overrideWithValue(delivery ?? FakeDelivery()),
         if (picker != null) payrollImportPickerProvider.overrideWithValue(picker),
+        if (billPicker != null) claimBillPickerProvider.overrideWithValue(billPicker),
         payrollClockProvider.overrideWithValue(() => DateTime(2026, 10, 25)),
       ],
       child: MaterialApp(home: child),

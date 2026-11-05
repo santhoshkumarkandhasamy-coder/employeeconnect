@@ -1,0 +1,147 @@
+{
+  "_note": "HAND-WRITTEN from docs/api-contract.md sections 17.6 and 17.8 (incl. the 3b implementation notes), NOT captured from a running backend. Ids and names are invented. Replace with captured responses once the 3b backend runs against a seeded database.",
+  "categories": {
+    "items": [
+      {"code": "travel", "name": "Travel", "max_amount": "5000.00", "bill_required": true},
+      {"code": "food", "name": "Food", "max_amount": null, "bill_required": true},
+      {"code": "phone", "name": "Phone", "max_amount": "1000.00", "bill_required": false}
+    ],
+    "max_age_days": 60
+  },
+  "claim": {
+    "id": "c1111111-1111-1111-1111-111111111111",
+    "category": {"code": "travel", "name": "Travel"},
+    "expense_date": "2026-10-20",
+    "amount": "1240.00",
+    "approved_amount": null,
+    "description": "Cab to client site",
+    "bill": {"url": "/api/files/f1111111-1111-1111-1111-111111111111", "content_type": "image/jpeg"},
+    "status": "submitted",
+    "manager_step": "pending",
+    "period": null,
+    "verifier": null, "verified_at": null, "approver": null, "decided_at": null,
+    "decision_comment": null,
+    "created_at": "2026-10-21T09:00:00Z",
+    "version": 1
+  },
+  "claim_approved": {
+    "id": "c2222222-2222-2222-2222-222222222222",
+    "category": {"code": "food", "name": "Food"},
+    "expense_date": "2026-10-10",
+    "amount": "800.00",
+    "approved_amount": "700.00",
+    "description": "Team lunch with client",
+    "bill": {"url": "/api/files/f2222222-2222-2222-2222-222222222222", "content_type": "application/pdf"},
+    "status": "approved",
+    "manager_step": "done",
+    "period": "2026-11",
+    "verifier": {"id": "m1", "employee_id": "MGR001", "full_name": "Meena Iyer"},
+    "verified_at": "2026-10-12T09:00:00Z",
+    "approver": {"id": "h1", "employee_id": "HR001", "full_name": "Hari Prasad"},
+    "decided_at": "2026-10-13T09:00:00Z",
+    "decision_comment": "Approved, part is not claimable",
+    "created_at": "2026-10-11T09:00:00Z",
+    "version": 3
+  },
+  "claim_rejected": {
+    "id": "c3333333-3333-3333-3333-333333333333",
+    "category": {"code": "phone", "name": "Phone"},
+    "expense_date": "2026-10-02",
+    "amount": "999.00",
+    "approved_amount": null,
+    "description": "Phone recharge",
+    "bill": null,
+    "status": "rejected",
+    "manager_step": "skipped",
+    "period": null,
+    "verifier": null, "verified_at": null,
+    "approver": {"id": "h1", "employee_id": "HR001", "full_name": "Hari Prasad"},
+    "decided_at": "2026-10-05T09:00:00Z",
+    "decision_comment": "Personal expense",
+    "created_at": "2026-10-03T09:00:00Z",
+    "version": 2
+  },
+  "claims_page": {
+    "items": [], "page": 1, "page_size": 20, "total": 3
+  },
+  "admin_claim_verified": {
+    "id": "c4444444-4444-4444-4444-444444444444",
+    "user": {"id": "u1", "employee_id": "EMP001", "full_name": "Asha Rao"},
+    "category": {"code": "travel", "name": "Travel"},
+    "expense_date": "2026-10-20",
+    "amount": "1240.00",
+    "approved_amount": null,
+    "description": "Cab to client site",
+    "bill": {"url": "/api/files/f1111111-1111-1111-1111-111111111111", "content_type": "image/png"},
+    "status": "verified",
+    "manager_step": "done",
+    "period": null,
+    "verifier": {"id": "m1", "employee_id": "MGR001", "full_name": "Meena Iyer"},
+    "verified_at": "2026-10-22T09:00:00Z",
+    "approver": null, "decided_at": null, "decision_comment": null,
+    "created_at": "2026-10-21T09:00:00Z",
+    "version": 2,
+    "payslip_id": null, "run_status": "none", "flags": []
+  },
+  "admin_claim_processing": {
+    "id": "c5555555-5555-5555-5555-555555555555",
+    "user": {"id": "u2", "employee_id": "EMP002", "full_name": "Ravi Kumar"},
+    "category": {"code": "food", "name": "Food"},
+    "expense_date": "2026-09-20",
+    "amount": "800.00",
+    "approved_amount": "800.00",
+    "description": "Client dinner",
+    "bill": null,
+    "status": "processing",
+    "manager_step": "done",
+    "period": "2026-10",
+    "verifier": null, "verified_at": null, "approver": null, "decided_at": null, "decision_comment": null,
+    "created_at": "2026-09-21T09:00:00Z",
+    "version": 4,
+    "payslip_id": "p1", "run_status": "processed", "flags": ["PERIOD_CLOSED"]
+  },
+  "overtime_page": {
+    "items": [
+      {"id": "o1111111-1111-1111-1111-111111111111", "user": {"id": "u1", "employee_id": "EMP001", "full_name": "Asha Rao"},
+       "work_date": "2026-10-08", "computed_minutes": 120, "approved_minutes": null, "flags": ["OFF_DAY"],
+       "status": "computed", "reviewer": null, "reviewed_at": null, "comment": null, "version": 1},
+      {"id": "o2222222-2222-2222-2222-222222222222", "user": {"id": "u1", "employee_id": "EMP001", "full_name": "Asha Rao"},
+       "work_date": "2026-10-09", "computed_minutes": 90, "approved_minutes": 60, "flags": ["ATTENDANCE_CHANGED"],
+       "status": "approved", "reviewer": {"id": "h1", "employee_id": "HR001", "full_name": "Hari Prasad"},
+       "reviewed_at": "2026-10-20T09:00:00Z", "comment": null, "version": 2},
+      {"id": "o3333333-3333-3333-3333-333333333333", "user": {"id": "u2", "employee_id": "EMP002", "full_name": "Ravi Kumar"},
+       "work_date": "2026-10-10", "computed_minutes": 60, "approved_minutes": null, "flags": [],
+       "status": "computed", "reviewer": null, "reviewed_at": null, "comment": null, "version": 1}
+    ],
+    "page": 1, "page_size": 50, "total": 3,
+    "summary": [
+      {"user_id": "u1", "approved_minutes": 60, "computed_minutes": 210, "pending_rows": 1},
+      {"user_id": "u2", "approved_minutes": 0, "computed_minutes": 60, "pending_rows": 1}
+    ]
+  },
+  "overtime_compute": {"period": "2026-10", "created": 34, "updated": 5, "flagged_changed": 1},
+  "overtime_bulk": {"updated": 2, "skipped": [{"id": "o9", "reason": "ITEM_LOCKED"}, {"id": "o8", "reason": "FORBIDDEN"}]},
+  "me_overtime": {
+    "enabled": true, "eligible": true, "period": "2026-10",
+    "items": [
+      {"work_date": "2026-10-08", "computed_minutes": 120, "approved_minutes": 90, "status": "approved"},
+      {"work_date": "2026-10-09", "computed_minutes": 60, "approved_minutes": null, "status": "computed"}
+    ]
+  },
+  "me_overtime_disabled": {"enabled": false, "items": []},
+  "details_eligible": {
+    "user_id": "u1", "designation": "Analyst", "payment_mode": "bank_transfer", "include_in_payroll": true,
+    "overtime_eligible": true, "revealed": false
+  },
+  "overtime_component": {
+    "code": "OVERTIME", "label": "Overtime (7.5 h)", "amount": "2400.00", "minutes": 450, "minutes_total": 540,
+    "sources": [{"type": "overtime", "id": "o1111111-1111-1111-1111-111111111111"}]
+  },
+  "errors": {
+    "AMOUNT_ABOVE_LIMIT": {"error": {"code": "AMOUNT_ABOVE_LIMIT", "message": "Amount above the limit.", "details": [{"field": "amount", "message": "5000.00"}]}},
+    "AMOUNT_ABOVE_LIMIT_APPROVE": {"error": {"code": "AMOUNT_ABOVE_LIMIT", "message": "Amount above the limit.", "details": [{"field": "approved_amount", "message": "Not above the amount claimed."}]}},
+    "DUPLICATE_BILL": {"error": {"code": "DUPLICATE_BILL", "message": "Duplicate bill.", "details": []}},
+    "SECOND_PERSON_REQUIRED": {"error": {"code": "SECOND_PERSON_REQUIRED", "message": "Second person required.", "details": []}},
+    "OVERTIME_DISABLED": {"error": {"code": "OVERTIME_DISABLED", "message": "Overtime is disabled.", "details": []}}
+  }
+}

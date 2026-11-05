@@ -83,13 +83,15 @@ void main() {
   });
 
   group('Pay items tab', () {
-    testWidgets('the payroll home screen has a Pay items tab with the four sections', (tester) async {
+    testWidgets('the payroll home screen has a Pay items tab with its sections (overtime only when on)',
+        (tester) async {
       await pumpPayroll(tester, const PayrollHomeScreen(), repo: _repo(), perms: _view);
       await tester.tap(find.text('Pay items'));
       await tester.pumpAndSettle();
-      for (final s in PaySection.values) {
+      for (final s in PaySection.values.where((s) => s != PaySection.overtime)) {
         expect(find.byKey(ValueKey('pay-section-${s.name}')), findsOneWidget);
       }
+      expect(find.byKey(const ValueKey('pay-section-overtime')), findsNothing);
       expect(find.text('One-time'), findsOneWidget);
       expect(find.text('Encashment'), findsOneWidget);
     });
@@ -812,7 +814,7 @@ void main() {
       expect(find.text('Arrears Aug 2026 - Oct 2026'), findsOneWidget);
       expect(find.text('Loan instalment 9f1c2d3e'), findsOneWidget);
       expect(find.text('Leave encashment 55556666'), findsOneWidget);
-      expect(find.text('Overtime aaaa1111'), findsOneWidget);
+      expect(find.textContaining('Overtime aaaa1111'), findsOneWidget); // 3b: minutes now lead the caption
       // read-only: no text field or remove button belongs to them
       expect(find.byTooltip('Remove adjustment'), findsNothing);
     });

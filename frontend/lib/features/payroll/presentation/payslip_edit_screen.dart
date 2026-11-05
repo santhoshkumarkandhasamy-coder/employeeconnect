@@ -483,6 +483,7 @@ class _PayslipEditorState extends ConsumerState<PayslipEditor> {
                 label: c.label.isEmpty ? c.code : c.label,
                 value: formatRupees(c.amount),
                 caption: [
+                  if (c.minutesCaption != null) c.minutesCaption!,
                   for (final s in c.sources) '${componentSourceLabel(s.type)} ${shortId(s.id)}',
                 ].join(', '),
               ),

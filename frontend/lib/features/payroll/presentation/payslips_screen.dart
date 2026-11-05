@@ -8,7 +8,10 @@ import '../../admin/presentation/admin_widgets.dart' show NoPermissionScreen, ad
 import '../domain/payroll_models.dart';
 import 'payroll_providers.dart';
 import 'payroll_widgets.dart';
+import '../domain/claims_models.dart';
+import 'my_claims_screen.dart';
 import 'my_loans_screen.dart';
+import 'my_overtime_screen.dart';
 import 'payslip_detail_screen.dart';
 
 /// "Payslips" under More: the signed-in user's published payslips, one row per
@@ -30,11 +33,32 @@ class _PayslipsScreenState extends ConsumerState<PayslipsScreen> {
     if (!canViewOwnPayslips(perms)) return const NoPermissionScreen(title: 'Payslips');
     final now = ref.read(payrollClockProvider)();
     final async = ref.watch(myPayslipsProvider(_year));
+    // "My overtime" is offered only when the server says it is on and the user
+    // is eligible; a failed read just hides the entry.
+    final overtime = ref.watch(myOvertimeProvider(monthKey(now))).valueOrNull;
     return SecureScreen(
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Payslips'),
           actions: [
+            if (canSubmitClaims(perms))
+              IconButton(
+                key: const ValueKey('open-my-claims'),
+                tooltip: 'My claims',
+                icon: const Icon(Icons.receipt_outlined),
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(builder: (_) => const MyClaimsScreen()),
+                ),
+              ),
+            if (overtime != null && overtime.visible)
+              IconButton(
+                key: const ValueKey('open-my-overtime'),
+                tooltip: 'My overtime',
+                icon: const Icon(Icons.more_time_outlined),
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(builder: (_) => const MyOvertimeScreen()),
+                ),
+              ),
             IconButton(
               key: const ValueKey('open-my-loans'),
               tooltip: 'My loans',

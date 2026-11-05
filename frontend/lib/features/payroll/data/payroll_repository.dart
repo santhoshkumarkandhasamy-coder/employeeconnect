@@ -7,6 +7,8 @@ import '../../../core/api/api_exception.dart';
 import '../../../core/api/dio_client.dart';
 import '../../attendance/domain/attendance_models.dart' show Paged;
 import '../../export/data/export_repository.dart' show decodeErrorBody;
+import '../../../core/files/file_service.dart' show fileIdFromUrl;
+import '../domain/claims_models.dart';
 import '../domain/pay_items_models.dart';
 import '../domain/payroll_models.dart';
 
@@ -612,6 +614,186 @@ class PayrollRepository {
 
   Future<PayrollFile> payslipPdf(String id) =>
       _file('GET', '$_a/payslips/$id/pdf', fallbackName: 'payslip.pdf', ext: '.pdf');
+
+  /// Employee payroll details: ONLY `overtime_eligible`, sent alone. The server
+  /// asks for no password in that case (contract 17.1); `null` is refused (422).
+  Future<PayrollDetails> saveOvertimeEligible(String userId, {required bool eligible}) async =>
+      PayrollDetails.fromJson(
+        await _json('PUT', '$_a/employees/$userId/details', body: {'overtime_eligible': eligible}),
+      );
+
+  // ---- reimbursement claims, employee (17.6) ------------------------------------------
+
+  Future<ClaimCategories> claimCategories() async =>
+      ClaimCategories.fromJson(await _json('GET', '/reimbursements/categories'));
+
+  /// `POST /files` with `purpose=reimbursement_bill`; returns the file id.
+  /// The caller has already checked the size and type ([validateClaimBill]).
+  Future<String> uploadBill(List<int> bytes, String filename) => guardApi<String>(() async {
+        final form = FormData.fromMap({
+          'purpose': 'reimbursement_bill',
+          'file': MultipartFile.fromBytes(
+            bytes,
+            filename: filename,
+            contentType: DioMediaType.parse(billContentTypeFor(filename)),
+          ),
+        });
+        final res = await _dio.post<Map<String, dynamic>>('/files', data: form);
+        return '${res.data?['id'] ?? ''}';
+      });
+
+  Future<Claim> submitClaim({
+    required String category,
+    required String expenseDate,
+    required String amount,
+    required String description,
+    String? billFileId,
+  }) async =>
+      Claim.fromJson(await _json('POST', '/reimbursements', body: {
+        'category': category,
+        'expense_date': expenseDate,
+        'amount': amount,
+        'description': description,
+        'bill_file_id': billFileId,
+      },),);
+
+  Future<Paged<Claim>> myClaims(ClaimQuery q, {int page = 1}) async => Paged.parse(
+        await _json('GET', '/reimbursements', query: {
+          if (q.status != null) 'status': q.status,
+          if (q.year != null) 'year': q.year,
+          'page': page,
+          'page_size': 20,
+        },),
+        Claim.fromJson,
+      );
+
+  Future<Claim> myClaim(String id) async => Claim.fromJson(await _json('GET', '/reimbursements/$id'));
+
+  Future<Claim> cancelClaim(String id) async =>
+      Claim.fromJson(await _json('POST', '/reimbursements/$id/cancel'));
+
+  /// A bill held in memory, fetched through the app client (bearer header,
+  /// pinning). The link from the server is reduced to its file id, so a
+  /// tampered link cannot send the token elsewhere.
+  Future<Uint8List> billBytes(String url) async {
+    final id = fileIdFromUrl(url);
+    if (id == null) throw const ApiException(code: 'NOT_FOUND', message: 'The bill is not available.');
+    try {
+      final res = await _dio.get<List<int>>(
+        '/files/$id',
+        options: Options(responseType: ResponseType.bytes),
+      );
+      final data = res.data ?? const <int>[];
+      if (data.length > payrollMaxFileBytes) {
+        throw const ApiException(code: 'FILE_TOO_LARGE', message: 'The file is too large.');
+      }
+      return Uint8List.fromList(data);
+    } on DioException catch (e) {
+      throw ApiException.fromDio(decodeErrorBody(e));
+    }
+  }
+
+  // ---- reimbursement claims, manager and HR (17.6) --------------------------------------
+
+  Future<Paged<Claim>> adminClaims(AdminClaimQuery q, {int page = 1}) async => Paged.parse(
+        await _json('GET', '/admin/reimbursements', query: {
+          'stage': q.stage,
+          if (q.status != null) 'status': q.status,
+          if (q.period != null) 'period': q.period,
+          if (q.category != null) 'category': q.category,
+          if (q.employeeId != null && q.employeeId!.trim().isNotEmpty) 'employee_id': q.employeeId!.trim(),
+          'page': page,
+          'page_size': 20,
+        },),
+        Claim.fromJson,
+      );
+
+  Future<Claim> adminClaim(String id) async =>
+      Claim.fromJson(await _json('GET', '/admin/reimbursements/$id'));
+
+  Future<Claim> verifyClaim(String id, {String? comment}) async => Claim.fromJson(await _json(
+        'PUT',
+        '/admin/reimbursements/$id/verify',
+        body: {if (comment != null && comment.trim().isNotEmpty) 'comment': comment.trim()},
+      ),);
+
+  Future<Claim> approveClaim(
+    String id, {
+    required String approvedAmount,
+    required String period,
+    required int expectedVersion,
+    String? comment,
+  }) async =>
+      Claim.fromJson(await _json('PUT', '/admin/reimbursements/$id/approve', body: {
+        'approved_amount': approvedAmount,
+        'period': period,
+        if (comment != null && comment.trim().isNotEmpty) 'comment': comment.trim(),
+        'expected_version': expectedVersion,
+      },),);
+
+  Future<Claim> rejectClaim(String id, {required String comment}) async => Claim.fromJson(
+        await _json('PUT', '/admin/reimbursements/$id/reject', body: {'comment': comment.trim()}),
+      );
+
+  Future<Claim> payoutClaim(String id, {required String period, required int expectedVersion}) async =>
+      Claim.fromJson(await _json('PUT', '/admin/reimbursements/$id/payout', body: {
+        'period': period,
+        'expected_version': expectedVersion,
+      },),);
+
+  // ---- overtime (17.8) ----------------------------------------------------------------------
+
+  Future<OvertimeComputeResult> computeOvertime(String period) async => OvertimeComputeResult.fromJson(
+        await _json('POST', '$_a/overtime/compute', query: {'period': period}),
+      );
+
+  Map<String, Object?> _overtimeQuery(OvertimeQuery q, int page, int pageSize) => {
+        'period': q.period,
+        if (q.status != null) 'status': q.status,
+        if (q.userId != null) 'user_id': q.userId,
+        'page': page,
+        'page_size': pageSize,
+      };
+
+  Future<Paged<OvertimeDay>> overtimeDays(OvertimeQuery q, {int page = 1}) async => Paged.parse(
+        await _json('GET', '$_a/overtime', query: _overtimeQuery(q, page, 50)),
+        OvertimeDay.fromJson,
+      );
+
+  /// Per-employee totals of the filtered month (no money). Read from a page of one row.
+  Future<List<OvertimeSummary>> overtimeSummary(OvertimeQuery q) async =>
+      OvertimeSummary.parseList(await _json('GET', '$_a/overtime', query: _overtimeQuery(q, 1, 1)));
+
+  Future<OvertimeDay> approveOvertime(
+    String id, {
+    required int approvedMinutes,
+    required int expectedVersion,
+    String? comment,
+  }) async =>
+      OvertimeDay.fromJson(await _json('PUT', '$_a/overtime/$id', body: {
+        'status': 'approved',
+        'approved_minutes': approvedMinutes,
+        'comment': (comment == null || comment.trim().isEmpty) ? null : comment.trim(),
+        'expected_version': expectedVersion,
+      },),);
+
+  Future<OvertimeDay> rejectOvertime(String id, {required String comment, required int expectedVersion}) async =>
+      OvertimeDay.fromJson(await _json('PUT', '$_a/overtime/$id', body: {
+        'status': 'rejected',
+        'comment': comment.trim(),
+        'expected_version': expectedVersion,
+      },),);
+
+  /// [action] is `approve` or `reject` (comment required for reject); 1..200 ids.
+  Future<OvertimeBulkResult> bulkOvertime(List<String> ids, {required String action, String? comment}) async =>
+      OvertimeBulkResult.fromJson(await _json('POST', '$_a/overtime/bulk', body: {
+        'ids': ids,
+        'action': action,
+        if (comment != null && comment.trim().isNotEmpty) 'comment': comment.trim(),
+      },),);
+
+  Future<MyOvertime> myOvertime(String period) async =>
+      MyOvertime.fromJson(await _json('GET', '/me/overtime', query: {'period': period}));
 }
 
 final payrollRepositoryProvider =

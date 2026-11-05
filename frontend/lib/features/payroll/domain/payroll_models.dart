@@ -1,6 +1,7 @@
 import '../../../core/api/api_exception.dart';
 import '../../../core/utils/dates.dart';
 import '../../admin/domain/admin_models.dart' show EmployeeRef;
+import 'claims_models.dart' show claimCapFromError;
 import 'pay_items_models.dart' show PayslipComponent, payItemWarningLabels;
 import 'payroll_money.dart';
 
@@ -778,6 +779,7 @@ class PayrollDetails {
     this.uan,
     this.esiIpNumber,
     this.updatedAt,
+    this.overtimeEligible = false,
   });
   final String userId;
   final String? designation;
@@ -792,6 +794,9 @@ class PayrollDetails {
   final bool revealed;
   final DateTime? updatedAt;
 
+  /// Contract 17.1 (3b): counts for overtime when the switch is on.
+  final bool overtimeEligible;
+
   factory PayrollDetails.fromJson(Map<String, dynamic> j) => PayrollDetails(
         userId: _s(j['user_id']),
         designation: _opt(j['designation']),
@@ -805,6 +810,7 @@ class PayrollDetails {
         esiIpNumber: _opt(j['esi_ip_number']),
         revealed: j['revealed'] == true,
         updatedAt: parseTimestamp(j['updated_at']),
+        overtimeEligible: j['overtime_eligible'] == true,
       );
 }
 
@@ -1023,6 +1029,11 @@ String payrollErrorMessage(ApiException e) {
     case 'INVALID_CATEGORY':
       return 'Choose a valid category.';
     case 'AMOUNT_ABOVE_LIMIT':
+      final cap = claimCapFromError(e);
+      if (cap != null) return 'The amount is above the limit for this category (${formatRupees(cap)}).';
+      if (e.details.any((d) => d.field == 'approved_amount')) {
+        return 'The approved amount cannot be above the amount claimed.';
+      }
       return 'The amount is above the limit for this category.';
     case 'BILL_REQUIRED':
       return 'A bill is required for this category.';
@@ -1065,7 +1076,8 @@ String payrollErrorMessage(ApiException e) {
       return 'Choose a valid month. A payroll run cannot be in the future; pay items can be '
           'set up to 12 months ahead.';
     case 'SECOND_PERSON_REQUIRED':
-      return 'A different person must publish this: you processed the run or last edited a payslip in it.';
+      return 'A different person must do this: the person who processed the run, last edited a payslip '
+          'in it, or verified a claim cannot also publish or approve it.';
     case 'FORBIDDEN':
       return e.message.isNotEmpty && e.message != 'Something went wrong.'
           ? e.message
