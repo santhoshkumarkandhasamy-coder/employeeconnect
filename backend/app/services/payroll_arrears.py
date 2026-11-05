@@ -96,13 +96,16 @@ async def compute(session: AsyncSession, user_id: uuid.UUID) -> dict[str, Any] |
     breakdown: list[dict[str, Any]] = []
     for ps, run in months:
         new = calc.structure_for(timeline, run.period)
-        if new is None or new.id == ps.structure_id:
+        if new is None:
             continue
+        key = pc.period_str(run.period)
+        done = calc.q2(already.get(key, Decimal(0)))
+        if new.id == ps.structure_id and done == 0:
+            continue  # same structure and nothing paid: no difference. With arrears already paid the month MUST be
+            # compared (a revision that adopted the new structure would otherwise pay the same difference twice, H1)
         rules = calc.Rules.from_config(run.config or {})
         basic_new, new_total = calc.structure_earnings(structs_svc.data_of(new), rules, _d(ps.basis_days), _d(ps.paid_days))
         paid_total, paid_basic = _paid_earnings(ps.result)
-        key = pc.period_str(run.period)
-        done = calc.q2(already.get(key, Decimal(0)))
         diff = calc.q2(new_total - paid_total - done)
         if diff == 0:
             continue
@@ -304,6 +307,7 @@ async def accept(
     if row.version != body.expected_version:
         raise AppError("ARREARS_STALE", "The proposal was recalculated meanwhile; reload it")
     run_status = await comps.check_target_period(session, [row.user_id], target)
+    await items_svc._lock_users(session, [row.user_id])
     comps.check_caps((await comps.live_counts(session, [row.user_id], target))[row.user_id])
     row.status, row.period, row.updated_by, row.version = "pending", target, actor.id, row.version + 1
     await pc.flush(session)
@@ -362,4 +366,4 @@ async def _warn(session: AsyncSession, user_ids: list[uuid.UUID], period: dt.dat
     return {uid: ["ARREARS_PROPOSED"] for uid in (await session.execute(q)).scalars()}
 
 
-comps.register(comps.Provider("arrears", PayrollArrears, _lines, comps.LIVE, warn=_warn))
+comps.register(comps.Provider("arrears", PayrollArrears, _lines, comps.LIVE, warn=_warn, order=30))

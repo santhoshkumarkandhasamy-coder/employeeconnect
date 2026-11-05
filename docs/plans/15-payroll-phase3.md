@@ -179,6 +179,11 @@ For overtime the "pending" state is `approved` (P4 table in 17.0). `employee_pay
 - Concurrency: lock order P7; process/publish re-read sources `FOR UPDATE`; `paid` immutability and no-delete in the DB (trigger + revokes), append-only events.
 - Pushes carry no amounts; employee loan/claim endpoints return 404 for anything not their own (audited probe).
 - Rate limits fail closed on writes (section 17.0).
+- Known limitations (3a security review): (L6) the append-only and `paid`-immutability guarantees of the payroll tables rest on triggers and REVOKEs for `app_user`;
+  the migration role and the application role are still the same database server account family, so a compromised migration credential could bypass them. Defence in depth
+  (a separate, non-owner DB role for the API with no DDL right) is deliberately not built now. (L7) `payroll_loan_installments.seq` is unique per loan over all rows and
+  limited to 1..120 by migration 0022, so a loan that is skipped / rescheduled very often can run out of numbers (clear 422, close and re-issue the loan); lifting it needs a
+  migration (live-only unique index or a renumbering column) and was left for 3b.
 
 ## 6. Test plan
 - **Unit (pure)**: calc with `components` (OVERTIME ESI wage, LEAVE_ENCASH not, PT on new gross), `overtime_amount`, overtime minute derivation (working day, off day, half-day leave,

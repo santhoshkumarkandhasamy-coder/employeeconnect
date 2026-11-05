@@ -265,7 +265,11 @@ async def _next_reference(session: AsyncSession) -> str:
 
 def _new_inst(loan: PayrollLoan, actor_id: uuid.UUID, seq: int, period: dt.date, amount: Decimal, kind: str = "emi") -> INST:
     if seq > MAX_SEQ:
-        raise _bad("emi", f"a loan can have at most {MAX_SEQ} installments")
+        # the table (migration 0022, frozen) numbers EVERY installment of a loan ever created, cancelled and deferred ones
+        # included, 1..120 and unique; the tenure limit is enforced on live installments by create / reschedule
+        raise AppError("VALIDATION_ERROR", f"This loan has used all {MAX_SEQ} installment numbers (cancelled and deferred "
+                       "installments count); close it and start a new loan",
+                       details=[{"field": "emi", "message": "installment numbers exhausted"}])  # fmt: skip
     return INST(
         loan_id=loan.id, user_id=loan.user_id, seq=seq, period=period, amount=calc.money_str(amount), kind=kind,
         status="pending", version=1, created_by=actor_id, updated_by=actor_id,
@@ -595,6 +599,13 @@ async def _after_paid(session: AsyncSession, rows: list[INST], actor_id: uuid.UU
 
 comps.register(
     comps.Provider(
-        "loan_installment", INST, _lines, comps.LIVE, prepare=_prepare, lock_parents=_lock_parents, after_paid=_after_paid
+        "loan_installment",
+        INST,
+        _lines,
+        comps.LIVE,
+        prepare=_prepare,
+        lock_parents=_lock_parents,
+        after_paid=_after_paid,
+        order=20,
     )
 )

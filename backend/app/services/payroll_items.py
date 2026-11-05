@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import hmac
+import logging
 import re
 import uuid
 from collections import defaultdict
@@ -23,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.audit import audit
 from ..core.clock import utcnow
+from ..core.config import get_settings
 from ..core.errors import AppError
 from ..core.pagination import PageParams, make_page
 from ..core.rbac import Principal
@@ -36,6 +39,8 @@ from . import payroll_common as pc
 from . import payroll_components as comps
 from . import payroll_runs as runs
 
+log = logging.getLogger("app.payroll")
+DRY_RUN_TTL_S = 15 * 60  # a commit must follow its dry run within this time (L3)
 CODES = ("BONUS", "INCENTIVE", "OTHER_EARNING", "OTHER_DEDUCTION")
 _EID = re.compile(r"^[A-Z0-9._-]{1,32}$")
 _ENTITY = "payroll_item"
@@ -102,6 +107,14 @@ async def _lock_runs(session: AsyncSession, periods: list[dt.date]) -> None:
         )
 
 
+async def _lock_users(session: AsyncSession, user_ids: list[uuid.UUID]) -> None:
+    """After the run lock (P7): the employees' user rows FOR UPDATE in id order (id only: no joined loads), so two writers
+    for one employee serialise and the per-month caps cannot be overshot by concurrent creates / imports (L2)."""
+    ids = sorted(set(user_ids))
+    if ids:
+        await session.execute(select(User.id).where(User.id.in_(ids)).order_by(User.id).with_for_update())
+
+
 async def _item_or_404(session: AsyncSession, item_id: uuid.UUID, *, lock: bool = False) -> PayrollOneTimeItem:
     q = select(PayrollOneTimeItem).where(PayrollOneTimeItem.id == item_id)
     if lock:
@@ -156,6 +169,7 @@ async def create_item(session: AsyncSession, actor: Principal, body: OneTimeItem
     await pc.forbid_self(session, actor, body.user_id, entity_type=_ENTITY, entity_id=body.user_id)
     user = await _eligible_user(session, body.user_id, period)
     await comps.check_target_period(session, [user.id], period, lock=True)
+    await _lock_users(session, [user.id])
     comps.check_caps((await comps.live_counts(session, [user.id], period))[user.id])
     item = PayrollOneTimeItem(
         user_id=user.id, period=period, code=body.code, label=body.label, amount=calc.money_str(body.amount),
@@ -186,6 +200,7 @@ async def update_item(session: AsyncSession, actor: Principal, item_id: uuid.UUI
     if "period" in sent and new_period != item.period:
         user = await _eligible_user(session, item.user_id, new_period)
         await comps.check_target_period(session, [user.id], new_period)
+        await _lock_users(session, [user.id])
         comps.check_caps((await comps.live_counts(session, [user.id], new_period))[user.id])
         item.period = new_period
         changed.append("period")
@@ -384,7 +399,9 @@ async def _validate_rows(
         if "label" not in pr.formula:
             raw_label = _text(v.get("label"))
             cleaned = clean_text(raw_label) if raw_label else ""
-            if 1 <= len(cleaned) <= 40:
+            if cleaned.startswith(xlsx_import.FORMULA_START):  # the CLEANED text decides (hidden prefixes, markup)
+                err(pr.row, "label", "FORMULA_NOT_ALLOWED")
+            elif 1 <= len(cleaned) <= 40:
                 label = cleaned
             else:
                 err(pr.row, "label", "INVALID_LABEL")
@@ -414,6 +431,53 @@ async def _validate_rows(
     return errors, valid
 
 
+def _dry_run_key(actor: Principal, period: dt.date, digest: str) -> str:
+    """HMAC(actor, period, sha256 of the file) under the server secret: only this admin's dry run of this exact file for
+    this month unlocks the commit."""
+    msg = f"{actor.id}|{pc.period_str(period)}|{digest}".encode()
+    mac = hmac.new(get_settings().jwt_secret.encode(), msg, hashlib.sha256).hexdigest()
+    return f"payroll:import:dry:{mac}"
+
+
+async def _remember_dry_run(redis: Redis, key: str) -> None:
+    try:
+        await redis.set(key, "1", ex=DRY_RUN_TTL_S)
+    except Exception:  # noqa: BLE001 - fail closed: without the record no commit would be accepted anyway
+        log.error("import dry-run record unavailable; failing closed")
+        raise AppError(
+            "TEMPORARILY_UNAVAILABLE", "Service temporarily unavailable. Try again shortly.", headers={"Retry-After": "30"}
+        ) from None
+
+
+async def _require_dry_run(redis: Redis, key: str) -> None:
+    try:
+        found = await redis.get(key)
+    except Exception:  # noqa: BLE001
+        log.error("import dry-run record unavailable; failing closed")
+        raise AppError(
+            "TEMPORARILY_UNAVAILABLE", "Service temporarily unavailable. Try again shortly.", headers={"Retry-After": "30"}
+        ) from None
+    if found is None:
+        raise AppError("IMPORT_NOT_CHECKED", "Run the dry run for this file and month first (it is valid for 15 minutes)")
+
+
+async def _existing_duplicates(session: AsyncSession, valid: list[dict], period: dt.date) -> list[dict]:
+    """Warnings (row, code) for valid rows equal to a LIVE item of the month (same employee, code, label and amount).
+    Not an error: HR may mean to pay twice, but a re-upload of last week's file under another name is caught here."""
+    ids = list({r["user"].id for r in valid})
+    if not ids:
+        return []
+    q = select(PayrollOneTimeItem).where(
+        PayrollOneTimeItem.user_id.in_(ids), PayrollOneTimeItem.period == period, PayrollOneTimeItem.status.in_(comps.LIVE)
+    )
+    have = {(i.user_id, i.code, i.label, calc.money_str(Decimal(i.amount))) for i in (await session.execute(q)).scalars()}
+    return [
+        {"row": r["row"], "field": "employee_id", "message": "DUPLICATE_OF_EXISTING_ITEM"}
+        for r in valid
+        if (r["user"].id, r["code"], r["label"], calc.money_str(r["amount"])) in have
+    ]
+
+
 def _by_code(valid: list[dict]) -> list[dict]:
     agg: dict[str, list] = {}
     for r in valid:
@@ -437,6 +501,7 @@ async def import_items(
     today = await runs._today(session)
     period = comps.parse_target_period(raw_period, today)
     digest = hashlib.sha256(data).hexdigest()
+    dry_key = _dry_run_key(actor, period, digest)
     if not dry_run:
         if not file_sha256 or not re.fullmatch(r"[0-9a-f]{64}", file_sha256):
             raise _bad("file_sha256", "send the file_sha256 returned by the dry run")
@@ -448,20 +513,26 @@ async def import_items(
         )
         if dup.first():
             raise AppError("IMPORT_DUPLICATE", "This file was already imported for that month")
+        await _require_dry_run(redis, dry_key)
     parsed = await xlsx_import.parse(data)
     if not parsed:
         raise AppError("IMPORT_INVALID", "The sheet has no data rows", details=[{"field": "file", "message": "no data rows"}])
     errors, valid = await _validate_rows(session, actor, period, parsed)
     user_ids = list({r["user"].id for r in valid})
     run_status = await comps.check_target_period(session, user_ids, period, lock=not dry_run)
+    if not dry_run:
+        await _lock_users(session, user_ids)  # run row -> user rows (P7), then the caps are checked on locked data (L2)
+        errors, valid = await _validate_rows(session, actor, period, parsed)
 
     if dry_run:
+        warnings = await _existing_duplicates(session, valid, period)
+        await _remember_dry_run(redis, dry_key)
         audit(session, action="payroll.import.dry_run", actor=actor, entity_type="payroll_import_batch",
               after={"period": pc.period_str(period), "rows": len(parsed), "valid": len(valid), "errors": len(errors)})  # fmt: skip
         await pc.commit(session)
         return {
             "period": pc.period_str(period), "file_sha256": digest, "rows": len(parsed), "valid": len(valid),
-            "errors": errors, "by_code": _by_code(valid), "run_status": run_status,
+            "errors": errors, "warnings": warnings, "by_code": _by_code(valid), "run_status": run_status,
         }  # fmt: skip
 
     if errors:
@@ -490,4 +561,8 @@ async def import_items(
           after={"batch_id": str(batch.id), "period": pc.period_str(period), "rows": len(valid)})  # fmt: skip
     batch_id = batch.id
     await pc.commit(session)
+    try:
+        await redis.delete(dry_key)  # one dry run, one commit
+    except Exception:  # noqa: BLE001 - the duplicate-file guard still holds
+        log.warning("import dry-run record not deleted")
     return {"batch_id": str(batch_id), "period": pc.period_str(period), "created": len(valid)}

@@ -59,6 +59,9 @@ class Provider:
     lock_parents: Callable[[AsyncSession, list[uuid.UUID]], Awaitable[None]] | None = None
     after_paid: Callable[[AsyncSession, list[Any], uuid.UUID], Awaitable[None]] | None = None
     warn: Callable[[AsyncSession, list[uuid.UUID], dt.date], Awaitable[dict[uuid.UUID, list[str]]]] | None = None
+    # position in the global lock order of P7 (lower locks first); PROVIDERS is sorted by it on every register, so the
+    # import order of the provider modules can never change the lock order (L1)
+    order: int = 0
 
 
 def _money(x: str | Decimal) -> str:
@@ -77,7 +80,7 @@ def _one_time_lines(rows: list[PayrollOneTimeItem]) -> list[dict]:
     ]
 
 
-PROVIDERS: list[Provider] = [Provider("one_time", PayrollOneTimeItem, _one_time_lines)]
+PROVIDERS: list[Provider] = [Provider("one_time", PayrollOneTimeItem, _one_time_lines, order=10)]
 
 
 def ensure_providers() -> None:
@@ -90,6 +93,7 @@ def register(provider: Provider) -> None:
     """Add a source table (idempotent). Keep PROVIDERS in the global lock order of plan 15 P7."""
     if all(p.type != provider.type for p in PROVIDERS):
         PROVIDERS.append(provider)
+        PROVIDERS.sort(key=lambda p: p.order)  # stable: equal `order` keeps registration order
 
 
 # ============================================================================================ events

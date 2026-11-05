@@ -32,6 +32,18 @@ def _label(v: str) -> str:
     return v
 
 
+_FORMULA_START = ("=", "+", "-", "@", "＝", "＋", "－", "＠")
+
+
+def _item_label(v: str) -> str:
+    """A one-time item label: as `_label`, and the CLEANED text must not look like a spreadsheet formula (it ends up in
+    xlsx exports; checking before cleaning would miss `<b>=1+1`, zero-width or control-character prefixes)."""
+    v = _label(v)
+    if v.startswith(_FORMULA_START):
+        raise ValueError("must not start with = + - or @")
+    return v
+
+
 def _code(v: str) -> str:
     if not calc.CODE_RE.match(v):
         raise ValueError("must match ^[A-Z][A-Z0-9_]{1,15}$")
@@ -279,7 +291,7 @@ class OneTimeItemCreate(_Strict):
     label: str
     amount: Money
 
-    _l = field_validator("label")(_label)
+    _l = field_validator("label")(_item_label)
     _a = field_validator("amount")(_positive)
 
 
@@ -292,7 +304,7 @@ class OneTimeItemUpdate(_Strict):
     @field_validator("label")
     @classmethod
     def _lab(cls, v: str | None) -> str | None:
-        return _label(v) if v is not None else None
+        return _item_label(v) if v is not None else None
 
     @field_validator("amount")
     @classmethod

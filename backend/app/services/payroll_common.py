@@ -87,6 +87,15 @@ async def forbid_self(
 
 
 # ---------------------------------------------------------------------------------------------- rate limits
+async def audit_read(
+    session: AsyncSession, actor: Principal, action: str, entity_type: str, *, count: int, entity_id: uuid.UUID | None = None
+) -> None:
+    """Audit entry for a money list / quote read (L8): the action, how many rows were returned and, for a quote, the
+    employee. Never amounts, labels or filters' values."""
+    audit(session, action=action, actor=actor, entity_type=entity_type, entity_id=entity_id, after={"count": count})
+    await commit(session)
+
+
 async def limit(redis: Redis, actor: Principal, name: str, *windows: tuple[int, int], closed: bool = False) -> None:
     """windows = (limit, seconds)... per user. `closed` = fail closed (503) when Redis is down."""
     await rate_limit.enforce(redis, [(f"rl:payroll:{name}:{actor.id}:{w}", n, w) for n, w in windows], fail_closed=closed)

@@ -367,3 +367,125 @@ async def test_arrears_are_stored_encrypted(db, client, payroll, uid):
     assert raw is not None and b"4000" not in bytes(raw)
     raw = (await db.execute(select(type_coerce(PayrollArrears.breakdown, LargeBinary)))).scalars().first()
     assert b"29000" not in bytes(raw)
+
+
+# ================================================================================================ H1 (security review 3a)
+async def revise_and_publish(client, hr, run_id, user_id):
+    r = await client.post(f"{RUNS}/{run_id}/employees/{user_id}/revise", json={"reason": "Adopt the new structure"}, headers=hr)
+    assert r.status_code == 201, r.text
+    rev = r.json()
+    r = await client.post(f"/api/admin/payroll/payslips/{rev['id']}/process", headers=hr)
+    assert r.status_code == 200, r.text
+    r = await client.post(f"/api/admin/payroll/payslips/{rev['id']}/publish", json={"current_password": PASSWORD}, headers=hr)
+    assert r.status_code == 200, r.text
+    return rev
+
+
+async def test_revising_a_month_after_its_arrears_were_paid_proposes_the_recovery(client, payroll, uid):
+    hr = payroll["hr"]
+    june = await published_june(client, hr)
+    await add_structure(client, hr, uid["employee"], basic="24000", hra="5000", eff="2025-06-01")
+    (a,) = await proposals(client, hr)
+    july = await new_run(client, hr, "2025-07")
+    await accept(client, hr, a, period="2025-07")
+    await process_and_publish(client, hr, july["id"])  # 4000.00 paid as arrears
+    assert (await client.get(f"{ARREARS}/{a['id']}", headers=hr)).json()["status"] == "paid"
+
+    await revise_and_publish(client, hr, june["id"], uid["employee"])  # June now pays the new structure itself
+    assert (await payslip(client, hr, june["id"]))["totals"]["gross_earnings"] == "29000.00"
+    (rec,) = await proposals(client, hr, status="proposed")  # paying 4000 again would be a double payment: recover it
+    assert (rec["code"], rec["amount"]) == ("OTHER_DEDUCTION", "4000.00")
+    (b,) = rec["breakdown"]
+    assert (b["paid_earnings"], b["new_earnings"], b["already_paid_arrears"], b["diff"]) == (
+        "29000.00", "29000.00", "4000.00", "-4000.00"
+    )  # fmt: skip
+
+
+async def test_revision_published_while_arrears_are_accepted_but_unpaid_pays_nothing_twice(client, payroll, uid):
+    hr = payroll["hr"]
+    june = await published_june(client, hr)
+    await add_structure(client, hr, uid["employee"], basic="24000", hra="5000", eff="2025-06-01")
+    (a,) = await proposals(client, hr)
+    july = await new_run(client, hr, "2025-07")
+    await accept(client, hr, a, period="2025-07")  # pending in July
+    await revise_and_publish(client, hr, june["id"], uid["employee"])
+    # nothing is left to pay: the accepted row is gone from the payable set
+    assert await proposals(client, hr, status="pending") == []
+    assert (await client.post(f"{RUNS}/{july['id']}/refresh", headers=hr)).status_code == 200
+    p = await payslip(client, hr, july["id"])
+    assert p["inputs"]["components"] == []
+    await process_and_publish(client, hr, july["id"])
+    assert (await payslip(client, hr, july["id"]))["totals"]["gross_earnings"] == "29000.00"
+
+
+# ================================================================================================ L1, L2, L7, L8 (security review 3a)
+def test_providers_are_in_the_lock_order_whatever_the_import_order():
+    from app.services import payroll_components as comps
+
+    comps.ensure_providers()
+    assert [p.type for p in comps.PROVIDERS] == ["one_time", "loan_installment", "arrears", "encashment"]
+    assert [p.order for p in comps.PROVIDERS] == sorted(p.order for p in comps.PROVIDERS)
+    saved = list(comps.PROVIDERS)
+    try:
+        comps.PROVIDERS.reverse()
+        comps.register(comps.Provider("zz_test", PayrollArrears, lambda rows: [], order=5))
+        assert [p.type for p in comps.PROVIDERS][0] == "zz_test"  # a new source is placed by its order, not appended
+        comps.PROVIDERS[:] = saved
+        comps.PROVIDERS.reverse()
+        comps.register(comps.Provider("zz_test2", PayrollArrears, lambda rows: [], order=50))
+        assert [p.type for p in comps.PROVIDERS][-1] == "zz_test2"
+    finally:
+        comps.PROVIDERS[:] = saved
+
+
+async def test_item_create_and_import_lock_the_user_rows_after_the_run(client, payroll, uid, monkeypatch):
+    from app.services import payroll_items as items_svc
+
+    calls = []
+    real = items_svc._lock_users
+
+    async def spy(session, ids):
+        calls.append(sorted(ids))
+        return await real(session, ids)
+
+    monkeypatch.setattr(items_svc, "_lock_users", spy)
+    body = {"user_id": uid["employee"], "period": "2025-07", "code": "BONUS", "label": "Diwali", "amount": "10"}
+    assert (await client.post("/api/admin/payroll/items", json=body, headers=payroll["hr"])).status_code == 201
+    assert calls == [[__import__("uuid").UUID(uid["employee"])]]
+
+
+def test_encashment_amount_is_capped_at_the_money_ceiling():
+    from app.core.errors import AppError
+    from app.services import payroll_encashment as enc
+
+    assert enc.checked_amount(D("1"), D("100.00")) == D("100.00")
+    with pytest.raises(AppError) as e:
+        enc.checked_amount(D("20"), calc.MAX_MONEY)
+    assert e.value.code == "VALIDATION_ERROR"
+
+
+def test_loan_installment_numbers_exhausted_is_a_clear_422():
+    import datetime as dt
+    import uuid
+
+    from app.core.errors import AppError
+    from app.services import payroll_loans as loans
+
+    loan = type("L", (), {"id": uuid.uuid4(), "user_id": uuid.uuid4()})()
+    assert loans._new_inst(loan, uuid.uuid4(), 120, dt.date(2025, 7, 1), D("1")).seq == 120
+    with pytest.raises(AppError) as e:
+        loans._new_inst(loan, uuid.uuid4(), 121, dt.date(2025, 7, 1), D("1"))
+    assert e.value.code == "VALIDATION_ERROR" and "installment numbers" in str(e.value.details)
+
+
+async def test_list_and_quote_reads_are_audited_with_counts_only(client, payroll, uid, db):
+    hr = payroll["hr"]
+    base = "/api/admin/payroll"
+    for path in ("/items", "/items/batches", "/loans", "/arrears", "/encashments"):
+        assert (await client.get(base + path, headers=hr)).status_code == 200, path
+    db.expire_all()
+    rows = {x.action: x for x in (await db.execute(select(AuditLog))).scalars() if x.action.endswith(".list")}
+    assert set(rows) >= {
+        "payroll.item.list", "payroll.import.list", "payroll.loan.list", "payroll.arrears.list", "payroll.encashment.list",
+    }  # fmt: skip
+    assert all(x.after == {"count": 0} for x in rows.values())

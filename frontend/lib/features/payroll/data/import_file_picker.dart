@@ -10,9 +10,13 @@ const int payrollImportMaxBytes = 1024 * 1024;
 /// A workbook chosen for bulk import, held in memory only (no path, so it also
 /// works in the browser console).
 class PickedWorkbook {
-  const PickedWorkbook({required this.name, required this.bytes});
+  const PickedWorkbook(
+      {required this.name, required this.bytes, this.tooLarge = false});
   final String name;
   final Uint8List bytes;
+
+  /// The file is over [payrollImportMaxBytes]; it was NOT read ([bytes] is empty).
+  final bool tooLarge;
 
   /// Lower-case hex SHA-256 of the bytes (compared with the dry run's).
   String get sha256Hex => sha256.convert(bytes).toString();
@@ -29,15 +33,31 @@ class PluginPayrollImportPicker implements PayrollImportPicker {
   @override
   Future<PickedWorkbook?> pickWorkbook() async {
     try {
+      // The size is checked before any byte is loaded, and the stream is read with a hard cap, so a huge file
+      // cannot exhaust memory in the app or the browser.
       final r = await FilePicker.platform.pickFiles(
         type: FileType.custom,
         allowedExtensions: const ['xlsx'],
-        withData: true,
+        withData: false,
+        withReadStream: true,
       );
       final f = r?.files.single;
-      final data = f?.bytes;
-      if (f == null || data == null) return null;
-      return PickedWorkbook(name: f.name, bytes: data);
+      if (f == null) return null;
+      if (f.size > payrollImportMaxBytes) {
+        return PickedWorkbook(
+            name: f.name, bytes: Uint8List(0), tooLarge: true);
+      }
+      final stream = f.readStream;
+      if (stream == null) return null;
+      final buf = BytesBuilder(copy: false);
+      await for (final chunk in stream) {
+        buf.add(chunk);
+        if (buf.length > payrollImportMaxBytes) {
+          return PickedWorkbook(
+              name: f.name, bytes: Uint8List(0), tooLarge: true);
+        }
+      }
+      return PickedWorkbook(name: f.name, bytes: buf.takeBytes());
     } on Exception {
       return null;
     }

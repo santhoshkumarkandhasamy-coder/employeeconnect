@@ -59,6 +59,14 @@ def amount_for(days: Decimal, rate: Decimal) -> Decimal:
     return calc.q2(days * rate)
 
 
+def checked_amount(days: Decimal, rate: Decimal) -> Decimal:
+    """amount_for with the money ceiling of the calculation engine (a huge basic must not overflow the column / payslip)."""
+    amount = amount_for(days, rate)
+    if amount > calc.MAX_MONEY:
+        raise _bad("days", "the amount would exceed the maximum allowed")
+    return amount
+
+
 # ============================================================================================ checks
 async def _leave_type(session: AsyncSession, leave_type_id: uuid.UUID) -> LeaveType:
     lt = await session.get(LeaveType, leave_type_id)
@@ -145,7 +153,7 @@ async def quote(
         "available_days": leave_svc.num(available),
         "days": leave_svc.num(use),
         "daily_rate": calc.money_str(rate),
-        "amount": calc.money_str(amount_for(use, rate)),
+        "amount": calc.money_str(checked_amount(use, rate)),
         "basis": basis,
         "divisor": divisor,
         "period": pc.period_str(period),
@@ -222,16 +230,18 @@ async def create(session: AsyncSession, redis: Redis, actor: Principal, body: En
     lt = await _leave_type(session, body.leave_type_id)
     rate, _basis, _divisor = await _rate_for(session, user.id, period)
     run_status = await comps.check_target_period(session, [user.id], period, lock=True)  # run row first (P7)
+    await items_svc._lock_users(session, [user.id])  # serialise the per-month caps (L2)
     comps.check_caps((await comps.live_counts(session, [user.id], period))[user.id])
-    bal = await leave_svc.get_balance(session, user, lt, body.year, lock=True)  # then the balance row
     days = leave_svc.d1(body.days)
+    amount = checked_amount(days, rate)  # 422 before anything is locked or changed
+    bal = await leave_svc.get_balance(session, user, lt, body.year, lock=True)  # then the balance row
     available = await _available(session, user.id, lt, body.year, bal, bal.quota)
     if days > available:
         raise _insufficient(available)
     bal.encashed = leave_svc.d1(bal.encashed) + days
     row = LeaveEncashment(
         user_id=user.id, leave_type_id=lt.id, year=body.year, days=days, daily_rate=calc.money_str(rate),
-        amount=calc.money_str(amount_for(days, rate)), period=period, source=body.source, reason=body.reason,
+        amount=calc.money_str(amount), period=period, source=body.source, reason=body.reason,
         status="pending", version=1, created_by=actor.id, updated_by=actor.id,
     )  # fmt: skip
     session.add(row)
@@ -296,4 +306,4 @@ def _lines(rows: list[LeaveEncashment]) -> list[dict]:
     ]
 
 
-comps.register(comps.Provider("encashment", LeaveEncashment, _lines, comps.LIVE))
+comps.register(comps.Provider("encashment", LeaveEncashment, _lines, comps.LIVE, order=40))

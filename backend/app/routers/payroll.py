@@ -646,9 +646,11 @@ async def list_items(
     actor: Principal = Depends(VIEW_ALL),
 ):
     await pc.limit(redis, actor, "admin_read", (120, 60))
-    return await payroll_items.list_items(
+    out = await payroll_items.list_items(
         session, period=period, user_id=user_id, code=code, status=status, batch_id=batch_id, page=page
     )
+    await pc.audit_read(session, actor, "payroll.item.list", "payroll_item", count=len(out["items"]))
+    return out
 
 
 @admin_router.post("/items", status_code=201)
@@ -710,7 +712,9 @@ async def list_batches(
     actor: Principal = Depends(VIEW_ALL),
 ):
     await pc.limit(redis, actor, "admin_read", (120, 60))
-    return await payroll_items.list_batches(session, period)
+    out = await payroll_items.list_batches(session, period)
+    await pc.audit_read(session, actor, "payroll.import.list", "payroll_import_batch", count=len(out["items"]))
+    return out
 
 
 @admin_router.post("/items/batches/{batch_id}/cancel")
@@ -761,7 +765,9 @@ async def list_loans(
     actor: Principal = Depends(VIEW_ALL),
 ):
     await pc.limit(redis, actor, "admin_read", (120, 60))
-    return await payroll_loans.list_loans(session, user_id=user_id, status=status, kind=kind, page=page)
+    out = await payroll_loans.list_loans(session, user_id=user_id, status=status, kind=kind, page=page)
+    await pc.audit_read(session, actor, "payroll.loan.list", "payroll_loan", count=len(out["items"]))
+    return out
 
 
 @admin_router.post("/loans", status_code=201)
@@ -864,7 +870,9 @@ async def list_arrears(
     actor: Principal = Depends(VIEW_ALL),
 ):
     await pc.limit(redis, actor, "admin_read", (120, 60))
-    return await payroll_arrears.list_arrears(session, status=status, user_id=user_id, page=page)
+    out = await payroll_arrears.list_arrears(session, status=status, user_id=user_id, page=page)
+    await pc.audit_read(session, actor, "payroll.arrears.list", "payroll_arrears", count=len(out["items"]))
+    return out
 
 
 @admin_router.get("/arrears/{arrears_id}")
@@ -925,7 +933,9 @@ async def list_encashments(
     actor: Principal = Depends(VIEW_ALL),
 ):
     await pc.limit(redis, actor, "admin_read", (120, 60))
-    return await payroll_encashment.list_encashments(session, user_id=user_id, year=year, status=status, page=page)
+    out = await payroll_encashment.list_encashments(session, user_id=user_id, year=year, status=status, page=page)
+    await pc.audit_read(session, actor, "payroll.encashment.list", "leave_encashment", count=len(out["items"]))
+    return out
 
 
 @admin_router.get("/employees/{user_id}/encashment-quote")
@@ -940,7 +950,9 @@ async def encashment_quote(
     actor: Principal = Depends(VIEW_ALL),
 ):
     await pc.limit(redis, actor, "admin_read", (120, 60))
-    return await payroll_encashment.quote(session, user_id, leave_type_id, year, days, period)
+    out = await payroll_encashment.quote(session, user_id, leave_type_id, year, days, period)
+    await pc.audit_read(session, actor, "payroll.encashment.quote", "user", count=1, entity_id=user_id)
+    return out
 
 
 @admin_router.post("/encashments", status_code=201)

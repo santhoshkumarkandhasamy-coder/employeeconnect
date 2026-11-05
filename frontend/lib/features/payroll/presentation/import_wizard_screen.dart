@@ -46,7 +46,7 @@ class _ImportWizardScreenState extends ConsumerState<ImportWizardScreen> {
     setState(() {
       _report = null;
       _done = null;
-      if (f.bytes.length > payrollImportMaxBytes) {
+      if (f.tooLarge || f.bytes.length > payrollImportMaxBytes) {
         _file = null;
         _error = 'The file is too large (1 MB at most).';
       } else {

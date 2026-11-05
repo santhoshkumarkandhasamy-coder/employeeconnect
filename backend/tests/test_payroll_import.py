@@ -58,7 +58,10 @@ async def post(client, hdr, data, *, period=PERIOD, dry_run=True, sha=None, pass
     )  # fmt: skip
 
 
-async def commit(client, hdr, data, **kw):
+async def commit(client, hdr, data, *, dry_first=True, **kw):
+    """Commit as the app does: the commit is only accepted after the dry run of the same file, month and admin (L3)."""
+    if dry_first:
+        await post(client, hdr, data, **{k: v for k, v in kw.items() if k in ("period", "name")})
     return await post(client, hdr, data, dry_run=False, sha=hashlib.sha256(data).hexdigest(), password=PASSWORD, **kw)
 
 
@@ -373,8 +376,10 @@ async def test_commit_period_locked_and_draft_revision(client, payroll, uid, db)
     run = await new_run(client, hr)
     await process_and_publish(client, hr, run["id"])
     data = make_xlsx([["EMP001", "BONUS", "late", 100]])
-    r = await commit(client, hr, data)
+    r = await post(client, hr, data)  # the dry run already says so ...
     assert r.status_code == 409 and r.json()["error"]["code"] == "PERIOD_LOCKED"
+    r = await commit(client, hr, data, dry_first=False)  # ... and without a dry run there is no commit
+    assert r.status_code == 409 and r.json()["error"]["code"] == "IMPORT_NOT_CHECKED"
     await client.post(
         f"/api/admin/payroll/runs/{run['id']}/employees/{uid['employee']}/revise", json={"reason": "Bonus"}, headers=hr
     )
@@ -444,3 +449,87 @@ async def test_template_is_a_valid_workbook(client, payroll):
     # the example row is not a real employee: importing the template unchanged fails loudly
     d = await post(client, payroll["hr"], r.content)
     assert errs(d) == {(2, "employee_id", "UNKNOWN_EMPLOYEE")}
+
+
+# ================================================================================================ security review 3a
+async def test_commit_needs_its_own_dry_run_of_the_same_file_month_and_admin(client, payroll, db, redis):
+    hr, admin = payroll["hr"], payroll["admin"]
+    data = make_xlsx(good_rows())
+    r = await commit(client, hr, data, dry_first=False)  # never checked
+    assert r.status_code == 409 and r.json()["error"]["code"] == "IMPORT_NOT_CHECKED"
+    assert (await post(client, hr, data)).status_code == 200
+    r = await commit(client, hr, data, dry_first=False, period="2025-07")  # another month
+    assert r.json()["error"]["code"] == "IMPORT_NOT_CHECKED"
+    r = await commit(client, admin, data, dry_first=False)  # another admin
+    assert r.status_code in (403, 409) and (r.status_code == 403 or r.json()["error"]["code"] == "IMPORT_NOT_CHECKED")
+    assert await count_items(db) == 0
+    assert (await commit(client, hr, data, dry_first=False)).status_code == 201  # the record is there and is used up
+    assert (await commit(client, hr, make_xlsx([["EMP001", "BONUS", "x", 1]]), dry_first=False)).status_code == 409
+
+
+async def test_commit_fails_closed_when_the_dry_run_record_expires_or_redis_is_down(client, payroll, db, redis, monkeypatch):
+    hr = payroll["hr"]
+    data = make_xlsx(good_rows())
+    await post(client, hr, data)
+    for k in await redis.keys("payroll:import:dry:*"):
+        await redis.delete(k)  # TTL elapsed
+    r = await commit(client, hr, data, dry_first=False)
+    assert r.json()["error"]["code"] == "IMPORT_NOT_CHECKED"
+    await post(client, hr, data)
+
+    async def down(*a, **k):
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr(redis, "get", down)
+    r = await commit(client, hr, data, dry_first=False)
+    assert r.status_code == 503 and await count_items(db) == 0
+
+
+async def test_dry_run_record_has_a_ttl(client, payroll, redis):
+    await post(client, payroll["hr"], make_xlsx(good_rows()))
+    (key,) = await redis.keys("payroll:import:dry:*")
+    assert 0 < await redis.ttl(key) <= 900
+
+
+async def test_dry_run_warns_about_duplicates_of_live_items(client, payroll, db):
+    hr = payroll["hr"]
+    data = make_xlsx(good_rows())
+    assert (await post(client, hr, data)).json()["warnings"] == []
+    assert (await commit(client, hr, data)).status_code == 201
+    again = make_xlsx([["EMP001", "BONUS", "Diwali bonus", 5000], ["EMP001", "BONUS", "Diwali bonus", 5001]])
+    out = (await post(client, hr, again)).json()
+    assert out["warnings"] == [{"row": 2, "field": "employee_id", "message": "DUPLICATE_OF_EXISTING_ITEM"}]
+    assert out["valid"] == 2  # a warning, not an error
+
+
+async def test_formula_check_applies_to_the_cleaned_label(client, payroll, uid):
+    hr = payroll["hr"]
+    rows = [
+        ["EMP001", "BONUS", "<b>=1+1</b>", 100],
+        ["EMP001", "BONUS", "​@SUM(A1)", 100],
+        ["EMP001", "BONUS", "Fine bonus", 100],
+    ]
+    r = await post(client, hr, make_xlsx(rows))
+    assert errs(r) == {(2, "label", "FORMULA_NOT_ALLOWED"), (3, "label", "FORMULA_NOT_ALLOWED")}
+    for label in ("<i>=cmd</i>", "​+1", "-2"):
+        body = {"user_id": uid["employee"], "period": PERIOD, "code": "BONUS", "label": label, "amount": "10"}
+        r = await client.post("/api/admin/payroll/items", json=body, headers=hr)
+        assert r.status_code == 422, (label, r.text)
+    body["label"] = "Diwali"
+    item = await client.post("/api/admin/payroll/items", json=body, headers=hr)
+    assert item.status_code == 201
+    r = await client.put(
+        f"/api/admin/payroll/items/{item.json()['id']}",
+        json={"expected_version": 1, "label": "<b>=evil</b>"},
+        headers=hr,
+    )
+    assert r.status_code == 422
+
+
+def test_nginx_has_an_exact_location_for_the_payroll_import():
+    from pathlib import Path
+
+    conf = (Path(__file__).resolve().parents[2] / "deploy" / "nginx.conf").read_text(encoding="utf-8")
+    block = conf.split("location = /api/admin/payroll/items/import {", 1)[1].split("proxy_pass", 1)[0]
+    for needle in ("client_max_body_size 1100k", "limit_req zone=upload", "limit_conn uploadsrv", "limit_except POST"):
+        assert needle in block

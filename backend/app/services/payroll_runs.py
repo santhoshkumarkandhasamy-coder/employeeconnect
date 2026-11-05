@@ -770,6 +770,19 @@ async def _publish_one(session: AsyncSession, p: Payslip, actor_id: uuid.UUID, n
     await pc.flush(session)
 
 
+async def _resync_arrears(session: AsyncSession, actor: Principal, revised_users: list[uuid.UUID]) -> None:
+    """A published REVISION changes what a month paid: recompute the employee's arrears proposal in the same transaction
+    (H1). An accepted-but-unpaid row returns to 'proposed' with a new version; arrears already paid are subtracted, so a
+    revision that adopted the new structure yields a recovery instead of paying the same difference twice."""
+    from . import payroll_arrears  # local import: payroll_arrears imports this module
+
+    for uid in sorted(set(revised_users)):
+        row = await payroll_arrears.sync_proposal(session, uid, actor.id)
+        audit(session, action="payroll.arrears.propose", actor=actor, entity_type="payroll_arrears",
+              entity_id=row.id if row else None,
+              after={"user_id": str(uid), "proposal": row is not None, "trigger": "revision"})  # fmt: skip
+
+
 async def _push_published(session: AsyncSession, items: list[tuple[uuid.UUID, uuid.UUID, dt.date, bool]]) -> None:
     """Data-only push after commit (best effort, never amounts)."""
     for user_id, payslip_id, period, revised in items:
@@ -802,6 +815,7 @@ async def publish_run(session: AsyncSession, redis: Redis, actor: Principal, run
     for p in todo:
         await _publish_one(session, p, actor.id, now)
         pushes.append((p.user_id, p.id, run.period, p.revision > 1))
+    await _resync_arrears(session, who, [p.user_id for p in todo if p.revision > 1])
     run.status, run.published_at, run.published_by, run.company_name = (
         "published",
         now,
@@ -986,6 +1000,8 @@ async def publish_payslip(
     await comps.mark_paid(session, [ps], actor.id)
     now = utcnow()
     await _publish_one(session, ps, actor.id, now)
+    if ps.revision > 1:
+        await _resync_arrears(session, actor, [ps.user_id])
     audit(session, action="payroll.payslip.publish", actor=who, entity_type="payslip", entity_id=ps.id,
           after={"revision": ps.revision, "run_id": str(run.id)})  # fmt: skip
     push = [(ps.user_id, ps.id, run.period, ps.revision > 1)]
