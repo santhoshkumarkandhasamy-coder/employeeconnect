@@ -1306,3 +1306,321 @@ Removing a reimbursement category keeps existing claims (shown with their stored
 `ARREARS_STALE`, `NOT_PROPOSED`, `DUPLICATE_BILL`, `CLAIM_LIMIT_REACHED`, `OVERTIME_DISABLED`. 422: `IMPORT_INVALID`, `NOT_ENCASHABLE`, `INVALID_CATEGORY`, `AMOUNT_ABOVE_LIMIT`, `BILL_REQUIRED`.
 Reused: `VERSION_CONFLICT`, `NOT_PENDING`, `INSUFFICIENT_BALANCE`, `REQUESTER_INACTIVE`, `SECOND_PERSON_REQUIRED`, `STRUCTURE_MISSING` (as 422), `INVALID_PERIOD`, `INVALID_DATE`,
 `FILE_TYPE_NOT_ALLOWED`, `FILE_TOO_LARGE`, `REAUTH_FAILED`, `FORBIDDEN`, `RATE_LIMITED`, `TEMPORARILY_UNAVAILABLE`.
+
+## 18. Payroll increments, structure import, CTC / gratuity, full and final (plan 16 = plan 14 phase 4) - PROPOSED
+
+Plan: `docs/plans/16-payroll-phase4.md`. Sections 13.0 and 17.0 conventions apply (money strings, `period` = `YYYY-MM`, labels 1-40 / reasons and comments 3-200 chars cleaned,
+unknown fields 422, self rule 403 `FORBIDDEN` audited `payroll.denied`, admin unknown ids 404, employee routes 404 for anything not their own). Money, percents, labels, reasons and comments
+are never written to audit rows, logs, push payloads or error messages. **[4a]** = work package 4a (migration 0024), **[4b]** = 4b (migration 0025).
+
+### 18.0 Common
+**Permissions.** Reads, CTC calculator, gratuity, F&F preview / statement: `payroll.view_all`. Maker actions: `payroll.manage`. Checker actions (approve / reject increments, batches and F&F; F&F revoke):
+NEW `payroll.approve` (seeded to `admin` and `hr` by 0024). Employee F&F view: `payroll.view_own`.
+
+**Maker-checker.** The checker must not be the employee (403 `FORBIDDEN`), nor the creator or the submitter of the record (403 `SECOND_PERSON_REQUIRED`). The database enforces the same with CHECK constraints.
+Approve audits carry `maker_id` and `checker_id`.
+
+**Step-up** (`current_password`; 422 `VALIDATION_ERROR` when missing, 403 `REAUTH_FAILED`; verified before any state check; shared 5/min limiter): increment approve, batch approve, structure import commit,
+arrears bulk accept, F&F approve, F&F revoke, changing `payroll.structure_changes_need_approval`.
+
+**Rate limits** (per user, Redis; writes fail closed -> 503 `TEMPORARILY_UNAVAILABLE`): reads `payroll:admin_read` 120/min; drafts / edits / submit / withdraw / cancel `payroll:write` 60/min;
+approve / reject / revoke / batch create / bulk accept `payroll:action` 10/min; import dry run and template `payroll:import` 10/min + 50/day (shared with 17.2); CTC calculator `payroll:calc` 60/min;
+gratuity xlsx and F&F statement PDF `payroll:report` 10/min; employee `/me/fnf` `payroll:own_list`, statement `payroll:own_detail` (shared with payslips).
+
+**Money history.** Every create / edit / state change of an increment or F&F appends to `payroll_item_events` (`item_type` `increment` | `fnf`); not exposed through the API.
+
+### 18.1 Changes to existing sections
+- **13.4 Structure** gains read-only `"source":"manual|increment|import"`, `"increment_id":"uuid"|null`. **[4a]** While `payroll.structure_changes_need_approval` is true (default), `POST /admin/payroll/employees/{user_id}/structures`
+  is allowed only when the employee has NO structure, and `PUT` / `DELETE /admin/payroll/structures/{id}` only on the employee's only structure while it is `manual` and not in use; otherwise 409 `APPROVAL_REQUIRED`
+  ("Use an increment"). Unchanged when the setting is false.
+- **13.3 settings**: changing `payroll.structure_changes_need_approval` needs `role.assign` + `current_password` (same rules and errors as `payroll.publish_requires_second_person`); after commit an `admin_alert` push goes to `role.assign` holders.
+- **13.4 payroll details [4b]** gain `"notice_period_days": 30|null` (editable, 0..365, no step-up when it is the only key sent) and read-only `"last_working_day":"2026-12-15"|null` (written by 18.8; sending it -> 422).
+- **13.5 / 13.6 [4b]**: payroll eligibility and the employment window end at `last_working_day` when it is set (else deactivation date - 1, as before). An employee with an `approved` F&F whose
+  `settlement_period` is the run month is eligible even when not employed in it: a **settlement-only payslip** (`employed_days` 0, `paid_days` 0, structure earnings 0, components only, warning `FNF_SETTLEMENT_ONLY`).
+  AdminPayslip gains `"final_settlement": { "fnf_id":"uuid","status":"approved|settled" } | null`; employee `Payslip` and list items gain `"is_final": true|false`. New warning codes `FNF_SETTLEMENT_ONLY`, `EXIT_IN_MONTH` (LWD inside the month).
+- **13.0 reserved codes [4b]** gain `NOTICE_RECOVERY` (deduction, system-only, not a PF / ESI wage): refused in `adjustments`, structure components and the 17.2 endpoints / import (422).
+- **17.2 OneTimeItem**, **17.3 installments**, **17.5 Encashment** gain `"fnf_id":"uuid"|null` [4b]. Rows with `fnf_id` can only be edited / cancelled through 18.8 (17.2 / 17.3 / 17.5 actions on them -> 409 `FNF_MANAGED`).
+- **15.1 dashboard** alerts gain `FNF_PENDING_APPROVAL`, `EXIT_WITHOUT_FNF` (deactivated or LWD passed, with an active loan or no F&F) [4b]; `leavers` use `last_working_day` when set. **15.1 reports** kind `gratuity` [4a] (18.3).
+- **16 ESI file** "Last Working Day" uses `last_working_day` when set [4b].
+- **Section 9 activate** [4b]: 409 `FNF_OPEN` while the employee has a `draft` / `submitted` / `approved` F&F; after `settled`, activation clears `last_working_day` (audited `payroll.details.update`).
+- **Section 11 push** types: `payroll_approval`, `fnf_settled` (18.10).
+
+### 18.2 CTC calculator [4a]
+| Method | Path | Perm |
+|---|---|---|
+| POST | /admin/payroll/ctc/calculate | `payroll.view_all` (pure calculation, writes nothing; audit `payroll.ctc.calculate` with `after={mode}` only) |
+
+Request:
+```json
+{ "mode":"from_gross|from_ctc", "amount":"40000.00", "frequency":"monthly|annual",
+  "pf_applicable":true, "pf_on_full_basic":false, "esi_applicable":true, "pt_applicable":true,
+  "split":{ "basic_pct":50, "hra_pct_of_basic":40 } | null,
+  "include_gratuity":true | null, "employer_share_from_employee":false | null }
+```
+`null` = the current payroll setting (the response example below uses `employer_share_from_employee: false`; with `true`, `employer_recovered` equals employer PF + ESI and lowers `ctc` and the net estimate). `amount` 1.00..10000000.00 (annual: up to 120000000.00, then divided by 12, rounded to paise). `basic_pct` 1..100, `hra_pct_of_basic` 0..100 (integers).
+Response 200:
+```json
+{ "mode":"from_ctc","frequency":"annual",
+  "split":{ "basic":"20000.00","hra":"8000.00","allowances":[ { "code":"SPECIAL","name":"Special allowance","amount":"12000.00" } ] },
+  "monthly":{ "gross":"40000.00","employer_pf":"1800.00","employer_esi":"0.00","employer_recovered":"0.00","gratuity_accrual":"961.54","ctc":"42761.54" },
+  "annual":{ "gross":"480000.00","ctc":"513138.48" },
+  "employee":{ "pf":"1800.00","esi":"0.00","pt_annual_estimate":"2500.00","net_monthly_estimate":"37991.67" },
+  "unallocated_monthly":"0.00",
+  "flags":[ "PF_CEILING_APPLIED" ],
+  "rules":{ "pf_employee_rate_pct":12,"pf_employer_rate_pct":12,"pf_wage_ceiling":15000,"esi_wage_threshold":20000,"esi_employee_rate_pct":0.75,"esi_employer_rate_pct":3.25,
+            "pt_frequency":"half_yearly","rounding":"rupee","gratuity_wage_basis":"basic" } }
+```
+Gross is whole rupees; split per plan 16 F9 (allowance = remainder). `ctc = gross + employer_pf + employer_esi - employer_recovered + gratuity_accrual`. `from_ctc`: the largest gross whose monthly CTC <= target;
+`unallocated_monthly` = target - CTC. Flags: `ESI_APPLIES`, `PF_CEILING_APPLIED`, `PF_NOT_APPLICABLE`, `TARGET_TOO_LOW` (no gross >= 1 fits; 422 instead when the result would be empty), `NO_PT`.
+`net_monthly_estimate` excludes TDS. Errors: 422 `VALIDATION_ERROR`.
+
+### 18.3 Gratuity accrual [4a]
+| Method | Path | Perm |
+|---|---|---|
+| GET | /admin/payroll/gratuity?as_of=YYYY-MM-DD&department_id=&eligible_only=false&q=&page=&page_size= | `payroll.view_all` (audit `payroll.gratuity.view`, `after={count}`) |
+| POST | /admin/payroll/reports/gratuity?period=YYYY-MM | `payroll.view_all` (15.1 report kind; `as_of` = last day of the month; .xlsx, no-store; audit `payroll.report.export`) |
+
+`as_of` default today, 2000-01-01..today. Employees: not deleted, `include_in_payroll`, employed on `as_of` (or LWD / deactivation inside the month of `as_of`).
+```json
+{ "as_of":"2026-11-30","basis":"basic","cap":"2000000.00","min_years":5,
+  "items":[ { "user":UserSummary,"join_date":"2019-06-01"|null,"exit_date":"2026-12-15"|null,
+              "service":{ "years":7,"months":5,"days":29 },"counted_years":7,"eligible":true,
+              "wage":"22000.00","accrued":"88846.00","monthly_accrual":"1057.69","flags":[] } ],
+  "totals":{ "accrued":"1250000.00","eligible_accrued":"910000.00","monthly_accrual":"45000.00" },
+  "page":1,"page_size":50,"total":48 }
+```
+`counted_years` = completed years + 1 when the remainder is more than 6 months. `accrued = min(cap, round_rupee(wage x 15 / 26 x counted_years))`, shown for every employee; `eligible` = completed years >= `payroll.gratuity_min_years`
+(`exit_reason = death` [4b]: always). `wage` = monthly basic of the structure in force on `as_of` (or the larger of basic and 50% of gross when `payroll.gratuity_wage_basis = basic_or_half_gross`).
+`monthly_accrual = round(wage x 15 / 26 / 12, 2)`. Flags: `NO_JOIN_DATE`, `NO_STRUCTURE` (money null), `CAPPED`. `totals` cover the whole filtered set (not the page). xlsx sheet `Gratuity` has the same columns. Errors: 422 `INVALID_DATE`.
+
+### 18.4 Increments [4a]
+| Method | Path | Perm |
+|---|---|---|
+| GET | /admin/payroll/increments?status=&user_id=&batch_id=&effective_from=YYYY-MM&page=&page_size= | `payroll.view_all` (audit `payroll.increment.list`, `after={count}`) |
+| GET | /admin/payroll/increments/{id} | `payroll.view_all` (audit `payroll.increment.view`) |
+| POST | /admin/payroll/employees/{user_id}/increments | `payroll.manage` |
+| PUT | /admin/payroll/increments/{id} | `payroll.manage` (draft) |
+| POST | /admin/payroll/increments/{id}/submit | `payroll.manage` (draft) |
+| POST | /admin/payroll/increments/{id}/withdraw | `payroll.manage` (submitted -> draft) |
+| POST | /admin/payroll/increments/{id}/approve | `payroll.approve` + step-up (submitted) |
+| POST | /admin/payroll/increments/{id}/reject | `payroll.approve` (submitted) |
+| POST | /admin/payroll/increments/{id}/cancel | `payroll.manage` (draft / submitted) |
+| GET | /admin/payroll/employees/{user_id}/salary-history | `payroll.view_all` (audit `payroll.structure.view`) |
+
+**Increment**:
+```json
+{ "id":"uuid","user":UserSummary,"batch_id":"uuid"|null,"kind":"percent|amount|structure|remove|import",
+  "effective_from":"2027-04-01","percent":"10.00"|null,"method":"proportional|split_from_gross"|null,
+  "base_structure":{ "id":"uuid","effective_from":"2026-04-01","monthly_gross":"40000.00" }|null,
+  "replaces_structure_id":"uuid"|null,
+  "proposed":{ "basic":"22000.00","hra":"8800.00","allowances":[ { "code":"SPECIAL","name":"Special allowance","amount":"13200.00","prorate":true,"esi_wage":true } ],
+               "fixed_deductions":[],"tds_monthly":"1200.00","pf_applicable":true,"pf_on_full_basic":false,"esi_applicable":true,"pt_applicable":true,"monthly_gross":"44000.00" }|null,
+  "change":{ "old_gross":"40000.00","new_gross":"44000.00","amount":"4000.00","percent":"10.00" },
+  "diff":[ { "code":"BASIC","old":"20000.00","new":"22000.00" },{ "code":"SPECIAL","old":"12000.00","new":"13200.00" } ],
+  "warnings":[ "BACKDATED","TDS_REVIEW" ],"reason":"Annual increment 2027",
+  "status":"draft|submitted|approved|rejected|cancelled","run_status":"none|draft|processed|published",
+  "structure_id":"uuid"|null,"arrears_proposed":true|null,
+  "created_by":UserSummary,"created_at":"ts","submitted_by":UserSummary|null,"submitted_at":"ts|null",
+  "decided_by":UserSummary|null,"decided_at":"ts|null","decision_comment":null,"version":1 }
+```
+List items omit `proposed`, `diff` and `decision_comment`. `run_status` is the status of the run of `effective_from`'s month. `change.percent` is rounded to 2 decimals (negative for a decrease).
+**POST** (201 Increment, status `draft`), one of:
+```json
+{ "kind":"percent","effective_from":"2027-04-01","percent":"10.00","method":"proportional","reason":"Annual increment 2027" }
+{ "kind":"amount","effective_from":"2027-04-01","monthly_gross":"44000.00","method":"split_from_gross","reason":"Promotion" }
+{ "kind":"structure","effective_from":"2027-04-01","structure":{ "basic":"22000.00","hra":"8800.00","allowances":[],"fixed_deductions":[],"tds_monthly":"0.00",
+  "pf_applicable":true,"pf_on_full_basic":false,"esi_applicable":true,"pt_applicable":true },"replaces_structure_id":null,"reason":"Correction" }
+{ "kind":"remove","replaces_structure_id":"uuid","reason":"Entered in error" }
+```
+`effective_from` = 1st of a month, <= 12 months ahead, >= current month - `payroll.increment_backdate_months` (422 `INVALID_PERIOD`); `remove` takes the structure's own date. `percent` 0.01..`payroll.increment_max_pct`
+(422 `INVALID_PERCENT`). `structure` follows the 13.4 validation (reserved codes, <= 15 allowances, <= 10 deductions). `kind: import` is created only by 18.6.
+**PUT** `{ "expected_version":1, ...the same fields as POST for its kind (kind cannot change) }` -> 200. **submit** / **withdraw** `{ "expected_version":1 }` -> 200.
+**approve** `{ "expected_version":2,"comment":null,"current_password":"..." }` -> 200 Increment (`approved`, `structure_id` set, `arrears_proposed` true when an arrears proposal was created / refreshed).
+**reject** `{ "expected_version":2,"comment":"required" }` -> 200 (`rejected`, final). **cancel** `{ "reason":"..." }` -> 200.
+Approve check order: step-up, self (403), second person (403 `SECOND_PERSON_REQUIRED`), `submitted` (409 `NOT_SUBMITTED`), version (409 `VERSION_CONFLICT`), base unchanged (409 `INCREMENT_STALE`),
+`STRUCTURE_EXISTS` / `LATER_STRUCTURE_EXISTS` / `STRUCTURE_IN_USE` (replace / remove), `AFTER_EXIT` (422). The structure is created with `source: "increment"`, `increment_id`, `created_by` = checker; the 17.4 arrears hook runs in the same transaction.
+Errors (all): 409 `INCREMENT_EXISTS` (a draft / submitted one for the employee and month), `NOT_SUBMITTED`, `NOT_DRAFT`, `VERSION_CONFLICT`, `INCREMENT_STALE`, `STRUCTURE_EXISTS`, `LATER_STRUCTURE_EXISTS`, `STRUCTURE_IN_USE`;
+422 `STRUCTURE_MISSING` (no structure in force on `effective_from`), `INVALID_PERCENT`, `INVALID_PERIOD`, `AFTER_EXIT`, `NO_CHANGE` (submit of an identical structure), `VALIDATION_ERROR`; 403 `FORBIDDEN`, `SECOND_PERSON_REQUIRED`, `REAUTH_FAILED`.
+Warnings: `BACKDATED`, `TDS_REVIEW`, `DECREASE`, `LARGE_CHANGE`, `ESI_THRESHOLD_CROSSED`, `PF_CEILING_CROSSED`, `NO_CHANGE`.
+Audit `payroll.increment.create|update|submit|withdraw|approve|reject|cancel` (`after={kind, effective_from, status, maker_id, checker_id, structure_id}`; never percents or amounts).
+**salary-history** -> `{ "items":[ { "type":"structure","structure_id":"uuid","effective_from":"2026-04-01","effective_to":"2027-03-31"|null,"monthly_gross":"40000.00","change_percent":"8.11"|null,
+"source":"manual|increment|import","increment_id":"uuid"|null,"approved_by":UserSummary|null },
+{ "type":"increment","increment_id":"uuid","effective_from":"2027-04-01","status":"submitted","kind":"percent","new_gross":"44000.00" } ] }` (newest first; increments only while draft / submitted).
+
+### 18.5 Increment batches (bulk hike) [4a]
+| Method | Path | Perm |
+|---|---|---|
+| POST | /admin/payroll/increments/bulk | `payroll.manage` |
+| GET | /admin/payroll/increments/batches?kind=percent\|import&page=&page_size= | `payroll.view_all` |
+| GET | /admin/payroll/increments/batches/{id} | `payroll.view_all` |
+| POST | /admin/payroll/increments/batches/{id}/submit | `payroll.manage` |
+| POST | /admin/payroll/increments/batches/{id}/approve | `payroll.approve` + step-up |
+| POST | /admin/payroll/increments/batches/{id}/reject | `payroll.approve` |
+| POST | /admin/payroll/increments/batches/{id}/cancel | `payroll.manage` |
+
+**bulk** request:
+```json
+{ "effective_from":"2027-04-01","percent":"8.00","method":"proportional","reason":"Annual increment FY 2027-28",
+  "scope":{ "department_ids":["uuid"]|null,"user_ids":["uuid"]|null,"exclude_user_ids":["uuid"] },
+  "overrides":[ { "user_id":"uuid","percent":"12.00" } ] }
+```
+`scope` null lists = all active payroll employees with a structure; at most 500 employees (else 422 `TOO_MANY_ROWS`). -> 201
+`{ "batch":Batch,"created":46,"skipped":[ { "user":UserSummary,"reason":"NO_STRUCTURE|SELF|INCREMENT_EXISTS|STRUCTURE_EXISTS|LATER_STRUCTURE_EXISTS|NOT_ELIGIBLE|AFTER_EXIT" } ] }`.
+Per-employee changes use `PUT /increments/{id}` while draft; `cancel` of a single row removes it from the batch outcome.
+**Batch**:
+```json
+{ "id":"uuid","kind":"percent|import","effective_from":"2027-04-01"|null,"percent":"8.00"|null,"method":"proportional"|null,"rows":46,"reason":"...",
+  "counts":{ "draft":0,"submitted":44,"approved":0,"rejected":0,"cancelled":2 },
+  "totals":{ "old_gross":"1850000.00","new_gross":"1998000.00","delta_monthly":"148000.00","delta_annual":"1776000.00" },
+  "file_sha256":"<64 hex>"|null,"created_by":UserSummary,"created_at":"ts","cancelled_at":"ts|null" }
+```
+`totals` cover the live rows (draft / submitted / approved). **submit** `{}` -> 200 `{ "submitted":44,"skipped":[ { "id","reason":"NO_CHANGE|NOT_DRAFT" } ] }`.
+**approve** `{ "comment":null,"current_password":"..." }` -> 200 `{ "approved":43,"failed":[ { "id":"uuid","reason":"INCREMENT_STALE|LATER_STRUCTURE_EXISTS|STRUCTURE_EXISTS|AFTER_EXIT|SECOND_PERSON_REQUIRED|FORBIDDEN" } ],"arrears_proposed":5 }`
+(one transaction; failed rows stay `submitted`; the batch maker counts as maker of every row). **reject** `{ "comment":"required" }` -> 200 `{ "rejected":44 }`. **cancel** `{ "reason" }` -> 200 `{ "cancelled":44,"not_cancelled":0 }` (draft / submitted rows).
+Audit `payroll.increment_batch.create|submit|approve|reject|cancel` (batch id, rows, counts).
+
+### 18.6 Bulk salary-structure import [4a]
+| Method | Path | Perm |
+|---|---|---|
+| GET | /admin/payroll/structures/template | `payroll.manage` |
+| POST | /admin/payroll/structures/import?dry_run=true\|false | `payroll.manage` (+ step-up when `dry_run=false`) |
+
+**template** -> `.xlsx`, sheets `Structures` (header `Employee ID | Effective From | Gross | Basic | HRA | TDS Monthly | PF | PF On Full Basic | ESI | PT`), `Components`
+(header `Employee ID | Type | Code | Name | Amount | Prorate | ESI Wage`) and `Help` (rules, reserved codes, split rule). One example row per sheet (`EXAMPLE-DELETE-ME`, fails `UNKNOWN_EMPLOYEE`). `Cache-Control: no-store`.
+Cells: `Effective From` text `YYYY-MM` (or a date cell; the 1st is used); flags `Y` / `N` (blank = default `Y`, `N`, `Y`, `Y`); `Type` `allowance` | `deduction`; `Prorate` / `ESI Wage` only for allowances (blank = `Y`).
+Either `Gross` alone (split per the split settings, no component rows) or `Basic` (+ optional `HRA` and component rows).
+**import** multipart: `file` (xlsx <= 1 MB), for `dry_run=false` also `file_sha256`, `reason` (3-200) and `current_password`. Same container checks, parser limits, formula refusal, HMAC dry-run binding
+(key = actor | `structures` | sha256, 15 min, Redis fail closed) and nginx body rule as 17.2. Structures sheet <= 500 data rows, Components <= 2000.
+Dry run -> 200 (writes nothing; audit `payroll.structure_import.dry_run` with rows / errors counts):
+```json
+{ "file_sha256":"<64 hex>","rows":120,"valid":118,
+  "errors":[ { "row":14,"sheet":"Structures","field":"employee_id","message":"UNKNOWN_EMPLOYEE" },
+             { "row":33,"sheet":"Components","field":"code","message":"RESERVED_CODE" } ],
+  "warnings":[ { "row":22,"sheet":"Structures","field":"effective_from","message":"BACKDATED" },
+               { "row":40,"sheet":"Structures","field":"employee_id","message":"NEEDS_APPROVAL" } ],
+  "actions":{ "create":80,"increment":38 },
+  "totals":{ "monthly_gross":"4200000.00" } }
+```
+Row errors: `UNKNOWN_EMPLOYEE`, `DELETED`, `SELF`, `DUPLICATE_ROW`, `INVALID_PERIOD`, `INVALID_AMOUNT`, `INVALID_FLAG`, `INVALID_TYPE`, `INVALID_CODE`, `RESERVED_CODE`, `DUPLICATE_CODE`, `TOO_MANY_COMPONENTS`,
+`GROSS_AND_PARTS`, `MISSING_BASIC`, `ORPHAN_COMPONENT`, `STRUCTURE_EXISTS`, `LATER_STRUCTURE_EXISTS`, `INCREMENT_EXISTS`, `AFTER_EXIT`, `FORMULA_NOT_ALLOWED`.
+Warnings: `BACKDATED`, `NO_CHANGE`, `NEEDS_APPROVAL` (becomes a submitted increment), `ESI_THRESHOLD_CROSSED`, `TDS_REVIEW`.
+Commit -> 201 `{ "batch_id":"uuid","created":80,"increments_submitted":38,"arrears_proposed":0 }` only with no row errors (else 422 `IMPORT_INVALID`, `details[].field` = `"Structures row 14: employee_id"`).
+One transaction. Employees without a structure: structure created (`source: "import"`, `import_batch_id`). Employees with one: a `submitted` increment (kind `import`, maker = importer) when
+`payroll.structure_changes_need_approval` is true, else a structure directly (arrears hook runs for backdated rows). Errors: 409 `IMPORT_NOT_CHECKED`, `IMPORT_FILE_CHANGED`, `IMPORT_DUPLICATE` (same file imported before),
+422 `FILE_TYPE_NOT_ALLOWED`, `FILE_TOO_LARGE`, `IMPORT_INVALID` (header mismatch / missing sheet / too many rows: `details[0].field` = `file`), 503 `TEMPORARILY_UNAVAILABLE`, 403 `REAUTH_FAILED`.
+Audit `payroll.structure_import.commit` (batch id, created, increments_submitted).
+
+### 18.7 Arrears bulk accept [4a]
+| POST | /admin/payroll/arrears/bulk-accept | `payroll.manage` + step-up |
+|---|---|---|
+
+`{ "items":[ { "id":"uuid","expected_version":2 } ] (1..200, unique),"period":"2027-05","current_password":"..." }` -> 200
+`{ "accepted":40,"skipped":[ { "id":"uuid","reason":"ARREARS_STALE|NOT_PROPOSED|ITEM_LOCKED|PERIOD_LOCKED|TOO_MANY_ITEMS|NOT_ELIGIBLE|FORBIDDEN|NOT_FOUND" } ] }`.
+Same per-row checks as 17.4 accept; one transaction; run lock first. Audit `payroll.arrears.bulk_accept` (`after={period, accepted, skipped}`).
+
+### 18.8 Full and final settlement [4b]
+| Method | Path | Perm |
+|---|---|---|
+| GET | /admin/payroll/fnf?status=&q=&page=&page_size= | `payroll.view_all` (audit `payroll.fnf.list`, `after={count}`) |
+| POST | /admin/payroll/employees/{user_id}/fnf | `payroll.manage` |
+| GET | /admin/payroll/fnf/{id} | `payroll.view_all` (audit `payroll.fnf.view`) |
+| PUT | /admin/payroll/fnf/{id} | `payroll.manage` (draft) |
+| GET | /admin/payroll/fnf/{id}/preview | `payroll.view_all` (audit `payroll.fnf.preview`) |
+| POST | /admin/payroll/fnf/{id}/submit | `payroll.manage` (draft) |
+| POST | /admin/payroll/fnf/{id}/withdraw | `payroll.manage` (submitted -> draft) |
+| POST | /admin/payroll/fnf/{id}/approve | `payroll.approve` + step-up (submitted) |
+| POST | /admin/payroll/fnf/{id}/reject | `payroll.approve` (submitted -> draft) |
+| POST | /admin/payroll/fnf/{id}/revoke | `payroll.approve` + step-up (approved -> draft) |
+| POST | /admin/payroll/fnf/{id}/cancel | `payroll.manage` (draft / submitted) |
+| GET | /admin/payroll/fnf/{id}/statement | `payroll.view_all` (PDF; audit `payroll.fnf.statement`) |
+
+**POST** `{ "resignation_date":"2026-11-15"|null,"last_working_day":"2026-12-15","exit_reason":"resignation|termination|retirement|death|contract_end|absconding|other",
+"notice_period_days":30|null,"settlement_period":"2026-12","remarks":null }` -> 201 FnF (`draft`). `notice_period_days` null = payroll details value, else `payroll.notice_period_days`.
+Sets `employee_payroll_details.last_working_day` (row created when missing). Rules: LWD >= join date and <= today + 180 days; `resignation_date` <= LWD (422 `INVALID_DATE`);
+`settlement_period` from the LWD month to LWD month + 3 and 17.0 target month rule at approve (422 `INVALID_PERIOD`). Errors: 409 `FNF_EXISTS` (a live one), 403 `FORBIDDEN` (own), 422.
+**FnF**:
+```json
+{ "id":"uuid","user":UserSummary,"status":"draft|submitted|approved|settled|cancelled",
+  "resignation_date":"2026-11-15"|null,"last_working_day":"2026-12-15","exit_reason":"resignation","settlement_period":"2026-12","run_status":"none|draft|processed|published",
+  "notice":{ "required_days":30,"served_days":31,"shortfall_days":0,"computed_shortfall_days":0,"waived":false,"override":{ "days":5,"reason":"..." }|null,
+             "basis":"gross","divisor":30,"daily_rate":"1333.33","amount":"0.00","item_id":"uuid"|null },
+  "encashments":[ { "leave_type":{ "id","code":"EL","name":"Earned leave" },"year":2026,"days":6.0,"available_days":8.0,"daily_rate":"666.67","amount":"4000.02",
+                    "encashment_id":"uuid"|null,"status":"pending|processing|paid|cancelled"|null } ],
+  "loans":[ { "loan":{ "id","reference":"L-0007","kind":"loan" },"outstanding":"22500.00","mode":"payroll|outside"|null,"paid_on":"2026-12-10"|null,"reference":"UTR123"|null,
+              "installment_id":"uuid"|null,"status":"pending|processing|paid|closed"|null } ],
+  "items":[ { "code":"OTHER_EARNING|OTHER_DEDUCTION|BONUS|INCENTIVE","label":"Pro-rata bonus","amount":"3000.00","item_id":"uuid"|null,"status":"pending|processing|paid|cancelled"|null } ],
+  "move_open_items":true,
+  "open_items":[ { "type":"one_time|encashment|arrears|reimbursement","id":"uuid","period":"2027-01"|null,"code":"BONUS","status":"pending","flags":["PERIOD_CLOSED"],"action":"move|keep" } ],
+  "gratuity":{ "eligible":true,"service":{ "years":7,"months":6,"days":14 },"counted_years":8,"wage":"22000.00","amount":"101538.00","capped":false,"basis":"basic",
+               "note":"For information. Gratuity is paid separately, outside payroll." },
+  "warnings":[ "CLAIMS_OPEN","TDS_REVIEW" ],
+  "summary":{ "earnings":"52000.00","deductions":"4100.00","net_estimate":"47900.00","computed_at":"ts" }|null,
+  "final_payslip":{ "id":"uuid","revision":1,"status":"draft|processed|published|superseded" }|null,
+  "remarks":null,"created_by":UserSummary,"created_at":"ts","submitted_by":UserSummary|null,"submitted_at":"ts|null",
+  "decided_by":UserSummary|null,"decided_at":"ts|null","decision_comment":null,"version":3 }
+```
+`notice.amount` / `encashments[].amount` are quotes until approval and the stored amounts after. `summary` is the approval snapshot (null before). `gratuity` is null without a join date or structure.
+List items: `{ id, user, status, last_working_day, settlement_period, exit_reason, run_status, warnings, created_at }` (no money).
+**PUT** (draft) `{ "expected_version":3, "resignation_date"?, "last_working_day"?, "exit_reason"?, "notice_period_days"?, "settlement_period"?,
+"notice"?:{ "waived":false,"override":{ "days":5,"reason":"Handover completed early" }|null },
+"encashments"?:[ { "leave_type_id":"uuid","year":2026,"days":6.0 } ] (<= 10),
+"loans"?:[ { "loan_id":"uuid","mode":"payroll" } | { "loan_id":"uuid","mode":"outside","paid_on":"2026-12-10","reference":"UTR123" } ],
+"items"?:[ { "code":"OTHER_EARNING","label":"Pro-rata bonus","amount":"3000.00" } ] (<= 20), "move_open_items"?:true, "remarks"?:"..." }` -> 200 FnF.
+Lists are replaced as a whole. `override.days` 0..required; `items[].code` one of the 17.2 codes (`NOTICE_RECOVERY` -> 422); loan ids must be the employee's `active` loans; `reference` per 17.3.
+Errors: 409 `NOT_DRAFT`, `VERSION_CONFLICT`, `INSUFFICIENT_BALANCE` (encashment days), 422 `NOT_ENCASHABLE`, `INVALID_DATE`, `INVALID_PERIOD`, `VALIDATION_ERROR`.
+**preview** -> 200 `{ "estimate":true,"days":{ "basis_days":31.0,"employed_days":15.0,"lop_days":0.0,"paid_days":15.0 },"earnings":[ Line ],"deductions":[ Line ],
+"totals":{ "gross_earnings","total_deductions","net_pay" },"warnings":[...],"source":"structure|payslip" }` (Line = 13.2 earnings/deductions item). Uses the open payslip of the settlement month when one exists
+(`source: payslip`), else the structure. Rate limit `payroll:admin_read`.
+**submit** / **withdraw** `{ "expected_version" }` -> 200. Submit needs a mode for every active loan (422 `LOAN_UNRESOLVED`) and re-checks quotes (409 `INSUFFICIENT_BALANCE`).
+**approve** `{ "expected_version":4,"comment":null,"current_password":"..." }` -> 200 FnF (`approved`). In one transaction (lock order plan 16 F15, F&F row last): target month rule for `settlement_period`,
+then creates the `NOTICE_RECOVERY` one-time item (when amount > 0), the other items, the encashments (`source: fnf`), the loan foreclosures (`payroll`: installment in `settlement_period`; `outside`: loan closed),
+moves open items (when `move_open_items`), all with `fnf_id`, events and the `summary` snapshot. Any failure rolls everything back: 409 `PERIOD_LOCKED`, `ITEM_LOCKED`, `INSUFFICIENT_BALANCE`, `LOAN_NOT_ACTIVE`,
+`TOO_MANY_ITEMS`, `FNF_NEGATIVE` (net estimate below 0), `VERSION_CONFLICT`, `NOT_SUBMITTED`; 403 `SECOND_PERSON_REQUIRED`, `FORBIDDEN`, `REAUTH_FAILED`; `details[0].field` names the part (`notice`, `encashments[0]`, `loans[1]`, `items[2]`).
+**reject** `{ "expected_version","comment":"required" }` -> 200 (back to `draft`, `decision_comment` set). **cancel** `{ "reason" }` -> 200 (draft / submitted; clears `last_working_day`).
+**revoke** `{ "expected_version","reason","current_password" }` -> 200 (`draft`): only while no `fnf_id` row is `processing` / `paid` (409 `FNF_NOT_REVOCABLE`); cancels created items and encashments (days back),
+cancels `payroll` foreclosure installments and regenerates the loan schedule with its EMI from `settlement_period`; `outside` foreclosures stay closed (`details` lists them). Moved items stay moved.
+**Settlement**: the publish (13.5 / 13.6) of the employee's payslip in `settlement_period` sets `settled` and `final_payslip_id` in the same transaction (audit `payroll.fnf.settle`, push `fnf_settled`);
+publishing a later revision of that payslip moves `final_payslip_id`. Reopen leaves the F&F `approved`.
+**statement** -> `application/pdf`, `filename="fnf-EMP014-2026-12.pdf"`, `Cache-Control: no-store`, `nosniff`, CSP as 13.8. Content: company, employee, dates, exit reason, notice (required / served / shortfall / waived),
+lines of the final payslip grouped (salary for the final month, leave encashment, notice recovery, loan recovery, other items, statutory deductions), loans settled outside (reference, date),
+net payable in figures and words, gratuity information block. Watermark `DRAFT - NOT FINAL` until `settled` (from `preview` data). 503 `TEMPORARILY_UNAVAILABLE` when PDF slots are busy.
+Audit `payroll.fnf.create|update|submit|withdraw|approve|reject|revoke|cancel|settle` (`after={status, last_working_day, settlement_period, exit_reason, shortfall_days, counts:{items, encashments, loans}, maker_id, checker_id}`; never amounts, labels, references or remarks).
+
+### 18.9 Employee F&F [4b]
+| Method | Path | Perm |
+|---|---|---|
+| GET | /me/fnf | `payroll.view_own` |
+| GET | /me/fnf/statement | `payroll.view_own` (owner, `settled` only; audit `payroll.fnf.view_own`) |
+
+**GET /me/fnf** -> `{ "fnf": { "id":"uuid","status":"in_progress|settled","last_working_day":"2026-12-15","settlement_period":"2026-12","final_payslip_id":"uuid"|null } | null }`
+(`submitted` / `approved` show as `in_progress`; `draft` and `cancelled` are not shown; no money). **statement** -> PDF as 18.8 without watermark; anything else 404 (audited `payroll.denied`).
+Only reachable while the account is active (a deactivated user cannot sign in).
+
+### 18.10 Push (section 11; data messages, never amounts or percents)
+- `payroll_approval` to the `payroll.approve` holders except the maker (max 20, coalesced 10 min per kind): id = increment / batch / F&F id, `"kind":"increment|increment_batch|fnf"`, title "Approval needed", body "<maker name> submitted <n> increment(s)" / "<maker name> submitted a final settlement for <employee name>".
+  Also to the maker on approve / reject: title "Increment approved" / "Final settlement rejected", body = employee name or batch row count.
+- `fnf_settled` to the employee (best effort; usually no device after deactivation), id = F&F id, "Final settlement completed", body "Your final settlement statement is available."
+Best effort, after commit.
+
+### 18.11 New settings (`/admin/payroll/settings`, snapshotted into each run like the other `payroll.*` keys)
+| Key | Default | Range |
+|---|---|---|
+| `payroll.structure_changes_need_approval` [4a] | true | bool (change needs `role.assign` + step-up) |
+| `payroll.split_basic_pct` [4a] | 50 | 1..100 |
+| `payroll.split_hra_pct_of_basic` [4a] | 40 | 0..100 |
+| `payroll.split_allowance_code` / `payroll.split_allowance_name` [4a] | `SPECIAL` / `Special allowance` | code per 13.0, not reserved / name 1-40 |
+| `payroll.increment_max_pct` [4a] | 50 | 1..100 |
+| `payroll.increment_backdate_months` [4a] | 12 | 0..24 |
+| `payroll.ctc_include_gratuity` [4a] | true | bool |
+| `payroll.gratuity_min_years` [4a] | 5 | 0..10 |
+| `payroll.gratuity_cap` [4a] | `"2000000.00"` | money |
+| `payroll.gratuity_wage_basis` [4a] | `"basic"` | `basic` \| `basic_or_half_gross` |
+| `payroll.notice_period_days` [4b] | 30 | 0..365 |
+| `payroll.notice_recovery_basis` [4b] | `"gross"` | `gross` \| `basic` |
+| `payroll.notice_recovery_divisor` [4b] | 30 | 1..31 |
+
+### 18.12 Error codes (new)
+409: `APPROVAL_REQUIRED`, `INCREMENT_EXISTS`, `INCREMENT_STALE`, `LATER_STRUCTURE_EXISTS`, `NOT_SUBMITTED`, `NOT_DRAFT`, `FNF_EXISTS`, `FNF_OPEN`, `FNF_NOT_REVOCABLE`, `FNF_NEGATIVE`, `FNF_MANAGED`.
+422: `INVALID_PERCENT`, `AFTER_EXIT`, `NO_CHANGE`, `LOAN_UNRESOLVED`, `TOO_MANY_ROWS`.
+Reused: `SECOND_PERSON_REQUIRED`, `STRUCTURE_EXISTS`, `STRUCTURE_IN_USE`, `STRUCTURE_MISSING` (422), `VERSION_CONFLICT`, `PERIOD_LOCKED`, `ITEM_LOCKED`, `TOO_MANY_ITEMS`, `INSUFFICIENT_BALANCE`, `NOT_ENCASHABLE`,
+`LOAN_NOT_ACTIVE`, `ARREARS_STALE`, `NOT_PROPOSED`, `IMPORT_*` (17.2), `FILE_TYPE_NOT_ALLOWED`, `FILE_TOO_LARGE`, `INVALID_PERIOD`, `INVALID_DATE`, `REAUTH_FAILED`, `FORBIDDEN`, `RATE_LIMITED`, `TEMPORARILY_UNAVAILABLE`.
