@@ -75,7 +75,7 @@ def test_pt_is_looked_up_on_the_gross_including_components():
 
 
 def test_system_codes_are_reserved_everywhere():
-    assert calc.SYSTEM_ONLY_CODES == {"OVERTIME", "LEAVE_ENCASH"}
+    assert calc.SYSTEM_ONLY_CODES == {"OVERTIME", "LEAVE_ENCASH", "NOTICE_RECOVERY"}
     assert calc.SYSTEM_ONLY_CODES <= calc.RESERVED_CODES  # refused as allowance / fixed deduction codes
     assert "OVERTIME" in calc.ESI_ADJUSTMENTS and "LEAVE_ENCASH" not in calc.ESI_ADJUSTMENTS
     assert {"OVERTIME_UNREVIEWED", "OVERTIME_CAPPED", "ARREARS_PROPOSED", "MANUAL_COMPONENT_OVERLAP"} <= calc.WARNING_CODES

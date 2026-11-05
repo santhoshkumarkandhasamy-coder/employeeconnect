@@ -127,7 +127,7 @@ def _outstanding(loan: PayrollLoan, insts: list[INST]) -> Decimal:
 def _inst_out(i: INST, flags: list[str]) -> dict[str, Any]:
     return {
         "id": str(i.id), "seq": i.seq, "period": pc.period_str(i.period), "amount": calc.money_str(_d(i.amount)),
-        "kind": i.kind, "status": i.status, "payslip_id": str(i.payslip_id) if i.payslip_id else None, "flags": flags,
+        "kind": i.kind, "status": i.status, "fnf_id": str(i.fnf_id) if i.fnf_id else None, "payslip_id": str(i.payslip_id) if i.payslip_id else None, "flags": flags,
     }  # fmt: skip
 
 
@@ -289,11 +289,13 @@ def _cancel_inst(session: AsyncSession, i: INST, actor_id: uuid.UUID, action: st
     comps.add_event(session, item_type="loan_installment", item=i, action=action, actor_id=actor_id, detail=detail)
 
 
-def _require_active(loan: PayrollLoan, expected_version: int) -> None:
+def _require_active(loan: PayrollLoan, expected_version: int, insts: list[INST] | None = None) -> None:
     if loan.status != "active":
         raise AppError("LOAN_NOT_ACTIVE", "The loan is not active")
     if loan.version != expected_version:
         raise AppError("VERSION_CONFLICT", "The loan was changed by someone else; reload it")
+    if insts and any(i.fnf_id is not None and i.status in LIVE for i in insts):  # plan 16: the F&F owns the settlement
+        raise AppError("FNF_MANAGED", "This loan is being settled in a final settlement; change it there")
 
 
 async def _setting_int(session: AsyncSession, key: str) -> int:
@@ -381,7 +383,7 @@ async def skip(session: AsyncSession, actor: Principal, loan_id: uuid.UUID, body
     guess = _append_period(peeked, target)
     await items_svc._lock_runs(session, [target.period, guess])  # run rows first, ascending
     loan, insts = await _lock_loan(session, loan_id)
-    _require_active(loan, body.expected_version)
+    _require_active(loan, body.expected_version, insts)
     inst = next(i for i in insts if i.id == body.installment_id)
     if inst.status != "pending" or inst.kind != "emi":
         raise AppError("ITEM_LOCKED", f"The installment is {inst.status} and cannot be deferred")
@@ -424,7 +426,7 @@ async def reschedule(
     await _prelude(session, redis, actor, loan_id, body.current_password, "payroll.loan.reschedule")
     await items_svc._lock_runs(session, [frm])
     loan, insts = await _lock_loan(session, loan_id)
-    _require_active(loan, body.expected_version)
+    _require_active(loan, body.expected_version, insts)
     done = [i for i in insts if i.status in ("paid", "processing")]
     kept = [i for i in insts if i.status == "pending" and i.period < frm]
     drop = [i for i in insts if i.status == "pending" and i.period >= frm]
@@ -473,7 +475,7 @@ async def foreclose(
     if period is not None:
         await items_svc._lock_runs(session, [period])
     loan, insts = await _lock_loan(session, loan_id)
-    _require_active(loan, body.expected_version)
+    _require_active(loan, body.expected_version, insts)
     if any(i.status == "processing" for i in insts):
         raise AppError("ITEM_LOCKED", "An installment is inside a processed payslip; reopen the run first")
     outstanding = calc.q2(_d(loan.principal) - _sum(insts, "paid"))
@@ -513,7 +515,7 @@ async def foreclose(
 async def cancel(session: AsyncSession, redis: Redis, actor: Principal, loan_id: uuid.UUID, body: LoanCancel) -> dict[str, Any]:
     await _prelude(session, redis, actor, loan_id, body.current_password, "payroll.loan.cancel")
     loan, insts = await _lock_loan(session, loan_id)
-    _require_active(loan, body.expected_version)
+    _require_active(loan, body.expected_version, insts)
     if any(i.status in ("processing", "paid") for i in insts):
         raise AppError("LOAN_HAS_RECOVERIES", "Installments were already deducted or are in a processed payslip")
     for i in insts:

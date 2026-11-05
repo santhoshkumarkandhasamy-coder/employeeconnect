@@ -179,9 +179,22 @@ def pull_identity(ps: Payslip, user: User, det: EmployeePayrollDetails | None) -
     ps.identity = _identity(det)
 
 
-def pull_days(ps: Payslip, user: User, ctx: pdays.DayContext, cutoff: dt.date, cfg: dict) -> bool:
-    """Re-pull basis / employed / LOP from attendance and leave. False = not employed in the period."""
-    res = pdays.compute_days(user, ctx, cutoff, cfg)
+def pull_days(
+    ps: Payslip, user: User, ctx: pdays.DayContext, cutoff: dt.date, cfg: dict,
+    det: EmployeePayrollDetails | None = None, *, settlement: bool = False,
+) -> bool:  # fmt: skip
+    """Re-pull basis / employed / LOP from attendance and leave. False = not employed in the period. `settlement` = the
+    employee has an approved F&F for this month: when not employed in it, the payslip is settlement-only (employed 0)."""
+    res = pdays.compute_days(user, ctx, cutoff, cfg, det.last_working_day if det is not None else None)
+    only = res is None and settlement
+    if only:
+        res = pdays.settlement_only_days(ctx, cfg)
+    inputs = copy.deepcopy(ps.inputs or _blank_inputs())
+    if only:
+        inputs["settlement_only"] = True
+    else:
+        inputs.pop("settlement_only", None)
+    ps.inputs = inputs
     if res is None:
         return False
     ps.basis_days = _d1(res.basis_days)
@@ -261,6 +274,7 @@ def recompute(
     cfg: dict,
     prior: list[Decimal],
     keep: tuple[str, ...] = ("NOT_ELIGIBLE",),
+    lwd: dt.date | None = None,
 ) -> None:
     """Sets paid_days, structure_id, result and warnings from the stored days / inputs. Pure apart from mutating `ps`."""
     from .payroll_structures import data_of
@@ -274,8 +288,12 @@ def recompute(
         warns.append("NO_SHIFT")
     if float((ps.lop_breakdown or {}).get("pending_leave_days", 0)) > 0:
         warns.append("PENDING_LEAVE")
-    if ps.paid_days == 0:
+    if (ps.inputs or {}).get("settlement_only"):
+        warns.append("FNF_SETTLEMENT_ONLY")
+    elif ps.paid_days == 0:
         warns.append("ZERO_PAID_DAYS")
+    if lwd is not None and lwd.replace(day=1) == period:
+        warns.append("EXIT_IN_MONTH")
     system_codes = {c["code"] for c in (ps.inputs or {}).get("components", [])}
     if system_codes & {a["code"] for a in (ps.inputs or {}).get("adjustments", [])}:
         warns.append("MANUAL_COMPONENT_OVERLAP")  # likely double counting: a manual line and a system line share a code
@@ -324,11 +342,19 @@ def _new_payslip(run: PayrollRun, user: User, actor: Principal, revision: int = 
     )  # fmt: skip
 
 
-def _eligible(user: User, det: EmployeePayrollDetails | None, period: dt.date, tz) -> bool:
+def _lwd(det: EmployeePayrollDetails | None) -> dt.date | None:
+    return det.last_working_day if det is not None else None
+
+
+def _eligible(user: User, det: EmployeePayrollDetails | None, period: dt.date, tz, settlement: bool = False) -> bool:
+    """Employed in the month (the window ends at the last working day when one is set) or, with `settlement`, the employee has
+    an approved F&F that pays in this month (settlement-only payslip, plan 16 F13)."""
     if det is not None and not det.include_in_payroll:
         return False
     start, end = pdays.month_bounds(period)
-    return pdays.employment_window(user, start, end, tz) is not None
+    if pdays.employment_window(user, start, end, tz, _lwd(det)) is not None:
+        return True
+    return settlement
 
 
 @dataclass
@@ -338,6 +364,20 @@ class _Bulk:
     structs: dict
     ctx: pdays.DayContext
     prior: dict
+    fnf: set  # users with an approved / settled F&F that pays in the month
+
+
+async def fnf_users(session: AsyncSession, period: dt.date, user_ids: list[uuid.UUID]) -> set[uuid.UUID]:
+    """Employees whose approved (or settled) F&F has `period` as its settlement month. Plain read, takes no lock."""
+    if not user_ids:
+        return set()
+    from ..models import FnfSettlement
+
+    q = select(FnfSettlement.user_id).where(
+        FnfSettlement.user_id.in_(user_ids), FnfSettlement.settlement_period == period,
+        FnfSettlement.status.in_(("approved", "settled")),
+    )  # fmt: skip
+    return set((await session.execute(q)).scalars())
 
 
 async def _bulk(
@@ -351,6 +391,7 @@ async def _bulk(
     return _Bulk(
         users, await _load_details(session, ids), await _load_structs(session, ids, period, share_lock=share_lock_structs),
         await pdays.load_context(session, period, ids), await _prior_gross(session, ids, period),
+        await fnf_users(session, period, ids),
     )  # fmt: skip
 
 
@@ -478,9 +519,21 @@ def _lop_days(p: Payslip) -> float:
     return float(p.lop_override if p.lop_override is not None else p.lop_auto)
 
 
+async def settled_fnf(session: AsyncSession, user_id: uuid.UUID, period: dt.date, *, live: bool = False):
+    """The F&F that pays in `period` for the employee: settled (employee view) or approved / settled (`live`, admin view)."""
+    from ..models import FnfSettlement
+
+    st = ("approved", "settled") if live else ("settled",)
+    q = select(FnfSettlement).where(
+        FnfSettlement.user_id == user_id, FnfSettlement.settlement_period == period, FnfSettlement.status.in_(st)
+    )  # fmt: skip
+    return (await session.execute(q)).scalars().first()
+
+
 def employee_view(
-    p: Payslip, run: PayrollRun, *, successor_id: uuid.UUID | None, company, logo_url: str | None, admin: bool = False
-) -> dict[str, Any]:
+    p: Payslip, run: PayrollRun, *, successor_id: uuid.UUID | None, company, logo_url: str | None, admin: bool = False,
+    final: bool = False,
+) -> dict[str, Any]:  # fmt: skip
     """The `Payslip` object of contract 13.2 (also the base of AdminPayslip). `admin=True` (admin JSON and admin PDF) ALWAYS
     masks PAN, UAN and ESI IP number: admins get unmasked values only through the audited, rate-limited `details?reveal=true`."""
     cfg = run.config
@@ -493,6 +546,7 @@ def employee_view(
         "period": pc.period_str(run.period),
         "revision": p.revision,
         "status": p.status,
+        "is_final": final,
         "published_at": pc.iso(p.published_at),
         "pay_date": run.pay_date.isoformat() if run.pay_date else None,
         "company": {
@@ -558,7 +612,9 @@ async def _view_parts(session: AsyncSession, p: Payslip, *, admin: bool) -> tupl
 async def admin_payslip_out(session: AsyncSession, p: Payslip) -> dict[str, Any]:
     await session.refresh(p)  # server-side onupdate columns (updated_at) are expired after a write
     run, succ, company, logo = await _view_parts(session, p, admin=True)
-    out = employee_view(p, run, successor_id=succ, company=company, logo_url=logo, admin=True)
+    fnf = await settled_fnf(session, p.user_id, run.period, live=True)
+    out = employee_view(p, run, successor_id=succ, company=company, logo_url=logo, admin=True, final=fnf is not None)
+    out["final_settlement"] = {"fnf_id": str(fnf.id), "status": fnf.status} if fnf is not None else None
     user = await session.get(User, p.user_id)
     struct = await session.get(SalaryStructure, p.structure_id) if p.structure_id else None
     errors, warnings = _split(p.warnings)
@@ -622,17 +678,18 @@ async def create_run(session: AsyncSession, actor: Principal, body: RunCreate) -
     fresh: list[tuple[User, Payslip]] = []
     for u in b.users:
         det = b.details.get(u.id)
-        if not _eligible(u, det, period, tz):
+        if not _eligible(u, det, period, tz, u.id in b.fnf):
             continue
         ps = _new_payslip(run, u, actor)
         pull_identity(ps, u, det)
-        if not pull_days(ps, u, b.ctx, run.attendance_cutoff, cfg):
+        if not pull_days(ps, u, b.ctx, run.attendance_cutoff, cfg, det, settlement=u.id in b.fnf):
             continue
         fresh.append((u, ps))
     await comps.pull_for(session, [ps for _, ps in fresh], period, lock=False)  # pay components (plan 15 P2)
     for u, ps in fresh:
         recompute(
-            ps, user=u, period=period, structs=b.structs.get(u.id, []), adopt_latest=True, cfg=cfg, prior=b.prior.get(u.id, [])
+            ps, user=u, period=period, structs=b.structs.get(u.id, []), adopt_latest=True, cfg=cfg, prior=b.prior.get(u.id, []),
+            lwd=_lwd(b.details.get(u.id)),
         )
         ps.version = 1
         session.add(ps)
@@ -674,19 +731,19 @@ async def refresh_run(session: AsyncSession, actor: Principal, run_id: uuid.UUID
     for u in b.users:
         det = b.details.get(u.id)
         ps = existing.get(u.id)
-        eligible = _eligible(u, det, run.period, b.ctx.tz)
+        eligible = _eligible(u, det, run.period, b.ctx.tz, u.id in b.fnf)
         if ps is None:
             if not eligible:
                 continue
             ps = _new_payslip(run, u, actor)
             pull_identity(ps, u, det)
-            if not pull_days(ps, u, b.ctx, run.attendance_cutoff, run.config):
+            if not pull_days(ps, u, b.ctx, run.attendance_cutoff, run.config, det, settlement=u.id in b.fnf):
                 continue
             todo.append((u, ps, True, ("NOT_ELIGIBLE",)))
             continue
         keep = ("NOT_ELIGIBLE",) if not eligible else ()
         pull_identity(ps, u, det)
-        pull_days(ps, u, b.ctx, run.attendance_cutoff, run.config)
+        pull_days(ps, u, b.ctx, run.attendance_cutoff, run.config, det, settlement=u.id in b.fnf)
         if not eligible:
             ps.warnings = [*(ps.warnings or []), "NOT_ELIGIBLE"]
         ps.updated_by = actor.id
@@ -694,7 +751,7 @@ async def refresh_run(session: AsyncSession, actor: Principal, run_id: uuid.UUID
     await comps.pull_for(session, [ps for _, ps, _, _ in todo], run.period, lock=False)  # pay components (plan 15 P2)
     for u, ps, is_new, keep in todo:
         recompute(ps, user=u, period=run.period, structs=b.structs.get(u.id, []), adopt_latest=True, cfg=run.config,
-                  prior=b.prior.get(u.id, []), keep=keep)  # fmt: skip
+                  prior=b.prior.get(u.id, []), keep=keep, lwd=_lwd(b.details.get(u.id)))  # fmt: skip
         if is_new:
             ps.version = 1
             session.add(ps)
@@ -718,7 +775,7 @@ async def _recompute_open(session: AsyncSession, run: PayrollRun, payslips: list
         u = users[p.user_id]
         pull_identity(p, u, b.details.get(u.id))
         recompute(p, user=u, period=run.period, structs=b.structs.get(u.id, []), adopt_latest=True, cfg=run.config,
-                  prior=b.prior.get(u.id, []))  # fmt: skip
+                  prior=b.prior.get(u.id, []), lwd=_lwd(b.details.get(u.id)))  # fmt: skip
         for code in _split(p.warnings)[0]:
             errors.append((u.employee_id, code))
     return errors
@@ -828,6 +885,9 @@ async def _publish_one(session: AsyncSession, p: Payslip, actor_id: uuid.UUID, n
             await pc.flush(session)
     p.status, p.published_at, p.published_by, p.updated_by = "published", now, actor_id, actor_id
     await pc.flush(session)
+    from . import payroll_fnf  # local import: payroll_fnf imports this module
+
+    await payroll_fnf.on_published(session, p, actor_id, now)  # locks the approved F&F LAST (plan 16 F15)
 
 
 async def _resync_arrears(session: AsyncSession, actor: Principal, revised_users: list[uuid.UUID]) -> None:
@@ -841,6 +901,12 @@ async def _resync_arrears(session: AsyncSession, actor: Principal, revised_users
         audit(session, action="payroll.arrears.propose", actor=actor, entity_type="payroll_arrears",
               entity_id=row.id if row else None,
               after={"user_id": str(uid), "proposal": row is not None, "trigger": "revision"})  # fmt: skip
+
+
+async def _push_settled(session: AsyncSession) -> None:
+    from . import payroll_fnf
+
+    await payroll_fnf.push_settled(session)
 
 
 async def _push_published(session: AsyncSession, items: list[tuple[uuid.UUID, uuid.UUID, dt.date, bool]]) -> None:
@@ -886,6 +952,7 @@ async def publish_run(session: AsyncSession, redis: Redis, actor: Principal, run
           after={"payslips": len(todo), "self_included": any(p.user_id == actor.id for p in todo)})  # fmt: skip
     await pc.commit(session)
     await _push_published(session, pushes)
+    await _push_settled(session)
     return await run_out(session, run)
 
 
@@ -993,7 +1060,8 @@ async def update_payslip(session: AsyncSession, actor: Principal, payslip_id: uu
     user = await session.get(User, ps.user_id)
     structs = (await _load_structs(session, [ps.user_id], run.period)).get(ps.user_id, [])
     prior = (await _prior_gross(session, [ps.user_id], run.period)).get(ps.user_id, [])
-    recompute(ps, user=user, period=run.period, structs=structs, adopt_latest=False, cfg=run.config, prior=prior)
+    recompute(ps, user=user, period=run.period, structs=structs, adopt_latest=False, cfg=run.config, prior=prior,
+              lwd=_lwd((await _load_details(session, [ps.user_id])).get(ps.user_id)))
     ps.updated_by = actor.id
     audit(session, action="payroll.payslip.update", actor=actor, entity_type="payslip", entity_id=ps.id,
           after={"fields": sorted(sent)})  # fmt: skip
@@ -1067,6 +1135,7 @@ async def publish_payslip(
     push = [(ps.user_id, ps.id, run.period, ps.revision > 1)]
     await pc.commit(session)
     await _push_published(session, push)
+    await _push_settled(session)
     return await admin_payslip_out(session, ps)
 
 
@@ -1093,16 +1162,17 @@ async def revise(session: AsyncSession, actor: Principal, run_id: uuid.UUID, use
         new.supersedes_id = live.id
         new.inputs = copy.deepcopy(live.inputs)
         new.lop_override, new.lop_override_reason = live.lop_override, live.lop_override_reason
-    elif not _eligible(u, det, run.period, b.ctx.tz):
+    elif not _eligible(u, det, run.period, b.ctx.tz, u.id in b.fnf):
         raise AppError("VALIDATION_ERROR", "The employee is not eligible for payroll in this period",
                        details=[{"field": "user_id", "message": "not eligible"}])  # fmt: skip
     cutoff = min(pdays.month_bounds(run.period)[1], await _today(session))  # the run itself is locked: never touched
-    if not pull_days(new, u, b.ctx, cutoff, run.config):
+    settlement = u.id in b.fnf or (live is not None and bool((live.inputs or {}).get("settlement_only")))
+    if not pull_days(new, u, b.ctx, cutoff, run.config, det, settlement=settlement):
         raise AppError("VALIDATION_ERROR", "The employee was not employed in this period",
                        details=[{"field": "user_id", "message": "not employed"}])  # fmt: skip
     await comps.pull_for(session, [new], run.period, lock=False)  # carried `paid` rows of the live copy + new pending rows
     recompute(new, user=u, period=run.period, structs=b.structs.get(u.id, []), adopt_latest=True, cfg=run.config,
-              prior=b.prior.get(u.id, []))  # fmt: skip
+              prior=b.prior.get(u.id, []), lwd=_lwd(det))  # fmt: skip
     new.version = 1
     session.add(new)
     await pc.flush(session)
@@ -1128,10 +1198,20 @@ async def list_own(session: AsyncSession, actor: Principal, year: int | None) ->
         )
         .order_by(PayrollRun.period.desc())
     )
+    from ..models import FnfSettlement
+
+    final_periods = set(
+        (
+            await session.execute(
+                select(FnfSettlement.settlement_period).where(FnfSettlement.user_id == actor.id, FnfSettlement.status == "settled")
+            )
+        ).scalars()
+    )
     items = [
         {
             "id": str(p.id),
             "period": pc.period_str(r.period),
+            "is_final": r.period in final_periods,
             "revision": p.revision,
             "published_at": pc.iso(p.published_at),
             "revised": p.revision > 1,
@@ -1154,7 +1234,10 @@ async def own_payslip_or_404(session: AsyncSession, actor: Principal, payslip_id
 
 async def own_view(session: AsyncSession, actor: Principal, ps: Payslip, *, audit_action: str) -> dict[str, Any]:
     run, succ, company, logo = await _view_parts(session, ps, admin=False)
-    out = employee_view(ps, run, successor_id=succ, company=company, logo_url=logo)
+    out = employee_view(
+        ps, run, successor_id=succ, company=company, logo_url=logo,
+        final=await settled_fnf(session, ps.user_id, run.period) is not None,
+    )  # fmt: skip
     audit(session, action=audit_action, actor=actor, entity_type="payslip", entity_id=ps.id)
     await pc.commit(session)
     return out
@@ -1165,7 +1248,10 @@ async def pdf_parts(session: AsyncSession, ps: Payslip, *, admin: bool) -> tuple
     from . import company as company_svc
 
     run, succ, company, logo_url = await _view_parts(session, ps, admin=admin)
-    view = employee_view(ps, run, successor_id=succ, company=company, logo_url=logo_url, admin=admin)
+    view = employee_view(
+        ps, run, successor_id=succ, company=company, logo_url=logo_url, admin=admin,
+        final=await settled_fnf(session, ps.user_id, run.period, live=admin) is not None,
+    )  # fmt: skip
     view["pay_date"] = run.pay_date.isoformat() if run.pay_date else None
     if ps.supersedes_id:
         prev = await session.get(Payslip, ps.supersedes_id)

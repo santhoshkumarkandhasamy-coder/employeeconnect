@@ -105,6 +105,10 @@ DEFAULTS: dict[str, Any] = {
     "payroll.gratuity_min_years": 5,
     "payroll.gratuity_cap": "2000000.00",
     "payroll.gratuity_wage_basis": "basic",
+    # plan 16, work package 4b (full and final settlement)
+    "payroll.notice_period_days": 30,
+    "payroll.notice_recovery_basis": "gross",
+    "payroll.notice_recovery_divisor": 30,
 }
 
 _ENUMS = {
@@ -113,6 +117,7 @@ _ENUMS = {
     "payroll.rounding": ("rupee", "paise"),
     "payroll.encashment_basis": ("basic", "gross"),
     "payroll.gratuity_wage_basis": ("basic", "basic_or_half_gross"),
+    "payroll.notice_recovery_basis": ("gross", "basic"),
 }
 _BOOLS = {
     "payroll.lop_absent_days",
@@ -152,6 +157,8 @@ _INTS = {  # key -> (min, max), whole numbers
     "payroll.increment_max_pct": (1, 100),
     "payroll.increment_backdate_months": (0, 24),
     "payroll.gratuity_min_years": (0, 10),
+    "payroll.notice_period_days": (0, 365),
+    "payroll.notice_recovery_divisor": (1, 31),
 }
 _TEXTS = {"payroll.company_address": (0, 300), "payroll.payslip_footer": (0, 200)}
 

@@ -583,7 +583,7 @@ async def test_employee_list_has_no_amounts_and_only_own_published(client, payro
     body = r.json()
     assert len(body["items"]) == 1
     item = body["items"][0]
-    assert set(item) == {"id", "period", "revision", "published_at", "revised", "pay_date"}
+    assert set(item) == {"id", "period", "is_final", "revision", "published_at", "revised", "pay_date"}
     assert item["period"] == PERIOD and item["revised"] is False and item["pay_date"] == "2025-06-30"
     assert not any(k in r.text for k in ("net", "gross", "amount", "23200"))
     assert (await client.get("/api/payslips", params={"year": 2024}, headers=payroll["employee"])).json()["items"] == []

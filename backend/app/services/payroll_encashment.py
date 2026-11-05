@@ -182,6 +182,7 @@ async def _out_many(session: AsyncSession, rows: list[LeaveEncashment]) -> list[
                 "amount": calc.money_str(_d(r.amount)),
                 "period": pc.period_str(r.period),
                 "source": r.source,
+                "fnf_id": str(r.fnf_id) if r.fnf_id else None,
                 "status": r.status,
                 "run_status": states[r.id][0],
                 "flags": states[r.id][1],
@@ -221,6 +222,9 @@ async def list_encashments(
 
 # ============================================================================================ create / cancel
 async def create(session: AsyncSession, redis: Redis, actor: Principal, body: EncashmentCreate) -> dict[str, Any]:
+    if body.source == "fnf":  # plan 16: `source = fnf` rows are written by the F&F approve only
+        raise AppError("FNF_MANAGED", "Leave encashment for a final settlement is created through the settlement",
+                       details=[{"field": "source", "message": "reserved for final settlements"}])  # fmt: skip
     today = await runs._today(session)
     period = comps.parse_target_period(body.period, today)
     await pc.forbid_self(session, actor, body.user_id, entity_type=ENTITY, entity_id=body.user_id)
@@ -277,6 +281,8 @@ async def cancel(session: AsyncSession, actor: Principal, enc_id: uuid.UUID, rea
         )
     ).scalar_one_or_none()
     row = await _or_404(session, enc_id, lock=True)
+    if row.fnf_id is not None:
+        raise AppError("FNF_MANAGED", "This encashment belongs to a final settlement; change it there")
     if row.status != "pending":
         raise AppError("ITEM_LOCKED", f"The encashment is {row.status} and can no longer be cancelled")
     if bal is None or leave_svc.d1(bal.encashed) < leave_svc.d1(row.days):

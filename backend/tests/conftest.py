@@ -92,6 +92,7 @@ TABLES = [
     "employee_payroll_details",
     "payroll_runs",
     "payslips",
+    "fnf_settlements",
     "statutory_challans",
     "statutory_challan_events",
     "payroll_import_batches",
@@ -170,6 +171,10 @@ def _adapt_metadata_for_sqlite() -> None:
     inc_contrib.type = JSON()
     inc_contrib.server_default = None
     inc_contrib.default = ColumnDefault(list)
+    fnf_contrib = Base.metadata.tables["fnf_settlements"].c.contributors  # text[] in Postgres
+    fnf_contrib.type = JSON()
+    fnf_contrib.server_default = None
+    fnf_contrib.default = ColumnDefault(list)
     wd = Base.metadata.tables["shifts"].c.working_days
     wd.type = JSON()
     wd.server_default = None

@@ -105,7 +105,15 @@ def test_models_match_migration():
         spec.loader.exec_module(m23)
     finally:
         sys.path.remove(str(DB))
-    up = _load().UPGRADE + m23.UPGRADE
+    # 0025 (F&F) added fnf_id columns / indexes / checks to three of these tables and a code to the one-time item CHECK
+    try:
+        sys.path.insert(0, str(DB))
+        spec = importlib.util.spec_from_file_location("mig0025_22", DB / "alembic" / "versions" / "0025_fnf_settlements.py")
+        m25 = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m25)
+    finally:
+        sys.path.remove(str(DB))
+    up = _load().UPGRADE + m23.UPGRADE + m25.UPGRADE
     for name in TABLES:
         t = Base.metadata.tables[name]
         for idx in t.indexes:

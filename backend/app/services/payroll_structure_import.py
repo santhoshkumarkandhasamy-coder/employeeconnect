@@ -447,7 +447,7 @@ async def _validate(
             continue
         warns: list[str] = []
         if not ctx.structures:
-            last = ig.last_employed_day(user, cfg.tz)
+            last = ig.last_employed_day(user, cfg.tz, ctx.lwd)
             try:
                 ig.check_effective(eff, cfg, lower=False)
             except AppError:

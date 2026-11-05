@@ -92,13 +92,20 @@ async def load_context(session: AsyncSession, period: dt.date, user_ids: list[uu
     return ctx
 
 
-def employment_window(user: User, period_start: dt.date, period_end: dt.date, tz: ZoneInfo) -> tuple[dt.date, dt.date] | None:
-    """[max(period start, join date), min(period end, deactivation date - 1)] or None when the user was not employed."""
+def employment_window(
+    user: User, period_start: dt.date, period_end: dt.date, tz: ZoneInfo, last_working_day: dt.date | None = None
+) -> tuple[dt.date, dt.date] | None:
+    """[max(period start, join date), min(period end, last end)] or None when the user was not employed. The last day is the
+    last working day when one is set (plan 16 F12: an F&F decides what is paid, not the deactivation), else the day before the
+    deactivation."""
     start = max(period_start, user.join_date) if user.join_date else period_start
     end = period_end
-    gone = user.deactivated_at or user.deleted_at
-    if gone is not None:
-        end = min(end, as_utc(gone).astimezone(tz).date() - dt.timedelta(days=1))
+    if last_working_day is not None:
+        end = min(end, last_working_day)
+    else:
+        gone = user.deactivated_at or user.deleted_at
+        if gone is not None:
+            end = min(end, as_utc(gone).astimezone(tz).date() - dt.timedelta(days=1))
     return (start, end) if start <= end else None
 
 
@@ -106,9 +113,11 @@ def is_working_day(user: User, day: dt.date, holidays: set[dt.date]) -> bool:
     return not att.is_weekly_off(user.shift, day) and day not in holidays
 
 
-def compute_days(user: User, ctx: DayContext, cutoff: dt.date, cfg: dict[str, Any]) -> DaysResult | None:
+def compute_days(
+    user: User, ctx: DayContext, cutoff: dt.date, cfg: dict[str, Any], last_working_day: dt.date | None = None
+) -> DaysResult | None:
     """`cfg` is the run snapshot (keys without the `payroll.` prefix). None = the user was not employed in the period."""
-    window = employment_window(user, ctx.period_start, ctx.period_end, ctx.tz)
+    window = employment_window(user, ctx.period_start, ctx.period_end, ctx.tz, last_working_day)
     if window is None:
         return None
     w_start, w_end = window
@@ -186,3 +195,15 @@ def compute_days(user: User, ctx: DayContext, cutoff: dt.date, cfg: dict[str, An
         },
         warnings=warnings,
     )
+
+
+def settlement_only_days(ctx: DayContext, cfg: dict[str, Any]) -> DaysResult:
+    """A settlement-only payslip (plan 16 F13): the employee left in an earlier month; this month pays the settlement lines only."""
+    month_days = list(_daterange(ctx.period_start, ctx.period_end))
+    basis = Decimal(30) if cfg.get("pay_days_basis", "calendar") == "fixed_30" else Decimal(len(month_days))
+    return DaysResult(
+        basis_days=basis, employed_days=ZERO, lop_auto=ZERO,
+        breakdown={"unpaid_leave": 0.0, "absent": 0.0, "half_day_attendance": 0.0, "not_employed": float(basis),
+                   "pending_leave_days": 0.0},
+        warnings=[],
+    )  # fmt: skip

@@ -108,7 +108,12 @@ class PayrollOneTimeItem(TimestampMixin, Base):
     __table_args__ = (
         CheckConstraint("extract(day from period) = 1", name="ck_payroll_one_time_items_period_first"),
         CheckConstraint(f"period {PERIOD_BOUNDS}", name="ck_payroll_one_time_items_period_year"),
-        CheckConstraint("code IN ('BONUS','INCENTIVE','OTHER_EARNING','OTHER_DEDUCTION')", name="ck_payroll_one_time_items_code"),
+        CheckConstraint(
+            "code IN ('BONUS','INCENTIVE','OTHER_EARNING','OTHER_DEDUCTION','NOTICE_RECOVERY')", name="ck_payroll_one_time_items_code"
+        ),
+        # migration 0025: NOTICE_RECOVERY is system-only (written by the F&F approve); an F&F row is never an imported row
+        CheckConstraint("code <> 'NOTICE_RECOVERY' OR fnf_id IS NOT NULL", name="ck_payroll_one_time_items_notice_system"),
+        CheckConstraint("fnf_id IS NULL OR batch_id IS NULL", name="ck_payroll_one_time_items_fnf_batch"),
         CheckConstraint("status IN ('pending','processing','paid','cancelled')", name="ck_payroll_one_time_items_status"),
         CheckConstraint(PAYSLIP_RULE, name="ck_payroll_one_time_items_payslip"),
         CheckConstraint("status <> 'cancelled' OR cancel_reason_enc IS NOT NULL", name="ck_payroll_one_time_items_cancelled"),
@@ -117,6 +122,7 @@ class PayrollOneTimeItem(TimestampMixin, Base):
         Index("ix_payroll_one_time_items_period", "period", "status"),
         Index("ix_payroll_one_time_items_batch_id", "batch_id"),
         Index("ix_payroll_one_time_items_payslip_id", "payslip_id"),
+        Index("ix_payroll_one_time_items_fnf_id", "fnf_id"),
         Index("ix_payroll_one_time_items_created_by", "created_by"),
         Index("ix_payroll_one_time_items_updated_by", "updated_by"),
     )
@@ -129,6 +135,7 @@ class PayrollOneTimeItem(TimestampMixin, Base):
     amount: Mapped[str] = mapped_column("amount_enc", EncryptedString, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
     batch_id: Mapped[uuid.UUID | None] = fk_uuid("payroll_import_batches.id", nullable=True)
+    fnf_id: Mapped[uuid.UUID | None] = fk_uuid("fnf_settlements.id", nullable=True)  # migration 0025; write-once (trigger)
     payslip_id: Mapped[uuid.UUID | None] = fk_uuid("payslips.id", nullable=True)
     cancel_reason: Mapped[str | None] = mapped_column("cancel_reason_enc", EncryptedString)
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
@@ -191,6 +198,7 @@ class PayrollLoanInstallment(TimestampMixin, Base):
             "status IN ('pending','processing','paid','skipped','cancelled')", name="ck_payroll_loan_installments_status"
         ),
         CheckConstraint(PAYSLIP_RULE, name="ck_payroll_loan_installments_payslip"),
+        CheckConstraint("fnf_id IS NULL OR kind = 'foreclosure'", name="ck_payroll_loan_installments_fnf_kind"),
         CheckConstraint("version >= 1", name="ck_payroll_loan_installments_version"),
         Index(
             "uq_payroll_loan_installments_live",
@@ -208,6 +216,7 @@ class PayrollLoanInstallment(TimestampMixin, Base):
         ),  # fmt: skip  (migration 0023: numbers are unique among live installments only)
         Index("ix_payroll_loan_installments_user_period", "user_id", "period", "status"),
         Index("ix_payroll_loan_installments_payslip_id", "payslip_id"),
+        Index("ix_payroll_loan_installments_fnf_id", "fnf_id"),
         Index("ix_payroll_loan_installments_created_by", "created_by"),
         Index("ix_payroll_loan_installments_updated_by", "updated_by"),
     )
@@ -221,6 +230,7 @@ class PayrollLoanInstallment(TimestampMixin, Base):
     kind: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'emi'"))
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
     payslip_id: Mapped[uuid.UUID | None] = fk_uuid("payslips.id", nullable=True)
+    fnf_id: Mapped[uuid.UUID | None] = fk_uuid("fnf_settlements.id", nullable=True)  # migration 0025; write-once (trigger)
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     created_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
     updated_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
@@ -279,11 +289,13 @@ class LeaveEncashment(TimestampMixin, Base):
         CheckConstraint("source IN ('request','fnf')", name="ck_leave_encashments_source"),
         CheckConstraint("status IN ('pending','processing','paid','cancelled')", name="ck_leave_encashments_status"),
         CheckConstraint(PAYSLIP_RULE, name="ck_leave_encashments_payslip"),
+        CheckConstraint("fnf_id IS NULL OR source = 'fnf'", name="ck_leave_encashments_fnf_source"),
         CheckConstraint("version >= 1", name="ck_leave_encashments_version"),
         Index("ix_leave_encashments_user_year", "user_id", "year"),
         Index("ix_leave_encashments_user_period", "user_id", "period", "status"),
         Index("ix_leave_encashments_leave_type_id", "leave_type_id"),
         Index("ix_leave_encashments_payslip_id", "payslip_id"),
+        Index("ix_leave_encashments_fnf_id", "fnf_id"),
         Index("ix_leave_encashments_created_by", "created_by"),
         Index("ix_leave_encashments_updated_by", "updated_by"),
     )
@@ -300,6 +312,7 @@ class LeaveEncashment(TimestampMixin, Base):
     reason: Mapped[str | None] = mapped_column("reason_enc", EncryptedString)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
     payslip_id: Mapped[uuid.UUID | None] = fk_uuid("payslips.id", nullable=True)
+    fnf_id: Mapped[uuid.UUID | None] = fk_uuid("fnf_settlements.id", nullable=True)  # migration 0025; write-once (trigger)
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     created_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
     updated_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)

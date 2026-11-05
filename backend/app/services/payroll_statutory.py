@@ -110,7 +110,9 @@ class _Row:
         self.snap, self.result = p.employee_snapshot or {}, p.result or {}
         # CURRENT identifiers (not the frozen payslip identity): fixing the employee's details clears a blocker.
         self.ident = (
-            {"uan": details.uan, "esi_ip_number": details.esi_ip_number, "pan": details.pan} if details is not None else {}
+            {"uan": details.uan, "esi_ip_number": details.esi_ip_number, "pan": details.pan, "lwd": details.last_working_day}
+            if details is not None
+            else {}
         )
 
     @property
@@ -416,7 +418,11 @@ async def esi_contribution(session: AsyncSession, raw_period: str | None) -> tup
         wage = _esi_wage(r)
         days = _int(_d(r.p.paid_days))
         last = ""
-        if r.user is not None and r.user.deactivated_at is not None:
+        lwd = r.ident.get("lwd")
+        if lwd is not None:  # plan 16 F12: the last working day of an F&F decides, not the deactivation
+            if period <= lwd < nxt:
+                last = lwd.strftime("%d/%m/%Y")
+        elif r.user is not None and r.user.deactivated_at is not None:
             d0 = r.user.deactivated_at.date()
             if period <= d0 < nxt:
                 last = d0.strftime("%d/%m/%Y")

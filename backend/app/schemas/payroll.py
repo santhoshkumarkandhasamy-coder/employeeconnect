@@ -137,7 +137,8 @@ class DetailsIn(_Strict):
     designation: str | None = Field(default=None, max_length=60)
     payment_mode: Literal["bank_transfer", "cheque", "cash"] | None = None
     include_in_payroll: bool | None = None
-    overtime_eligible: bool | None = None  # plan 15 3b; the only key that needs no current_password when sent alone
+    overtime_eligible: bool | None = None  # plan 15 3b; needs no current_password when sent alone (like notice_period_days)
+    notice_period_days: int | None = Field(default=None, ge=0, le=365)  # plan 16 4b; null = the company default
     bank_name: str | None = Field(default=None, max_length=60)
     bank_account: str | None = Field(default=None, max_length=40)
     bank_ifsc: str | None = Field(default=None, max_length=20)
@@ -721,3 +722,135 @@ class CtcCalculateIn(_Strict):
         if self.frequency == "monthly" and self.amount > Decimal("10000000.00"):
             raise ValueError("a monthly amount must be at most 10000000.00")
         return self
+
+
+# ---------------------------------------------------------------------------------------------- full and final settlement (4b)
+ExitReason = Literal["resignation", "termination", "retirement", "death", "contract_end", "absconding", "other"]
+FNF_ITEM_CODES = Literal["BONUS", "INCENTIVE", "OTHER_EARNING", "OTHER_DEDUCTION"]  # NOTICE_RECOVERY is system-only
+
+
+def _remarks(v: str | None) -> str | None:
+    if v is None:
+        return None
+    v = clean_text(v, multiline=True)
+    if len(v) > 500:
+        raise ValueError("must be at most 500 characters")
+    return v or None
+
+
+class FnfCreate(_Strict):
+    resignation_date: dt.date | None = None
+    last_working_day: dt.date
+    exit_reason: ExitReason
+    notice_period_days: int | None = Field(default=None, ge=0, le=365, strict=True)
+    settlement_period: PeriodStr
+    remarks: str | None = None
+
+    _rm = field_validator("remarks")(_remarks)
+
+
+class FnfNoticeOverride(_Strict):
+    days: int = Field(ge=0, le=365, strict=True)
+    reason: str
+
+    _r = field_validator("reason")(_reason)
+
+
+class FnfNoticeIn(_Strict):
+    waived: bool = False
+    override: FnfNoticeOverride | None = None
+
+
+class FnfEncashmentIn(_Strict):
+    leave_type_id: uuid.UUID
+    year: int = Field(ge=2000, le=2200, strict=True)
+    days: Decimal = Field(allow_inf_nan=False, max_digits=4, decimal_places=1)
+
+    _d = field_validator("days")(_half_days)
+
+
+class FnfLoanIn(_Strict):
+    loan_id: uuid.UUID
+    mode: Literal["payroll", "outside"]
+    paid_on: dt.date | None = None
+    reference: str | None = Field(default=None, min_length=1, max_length=60)
+
+    @model_validator(mode="after")
+    def _by_mode(self) -> FnfLoanIn:
+        if self.mode == "payroll":
+            if self.paid_on is not None or self.reference is not None:
+                raise ValueError("paid_on and reference only apply to mode outside")
+        else:
+            if self.paid_on is None or self.reference is None:
+                raise ValueError("paid_on and reference are required for mode outside")
+            if not _SAFE_REF.match(self.reference):
+                raise ValueError("reference may only contain letters, digits, space and . _ / -")
+        return self
+
+
+class FnfItemIn(_Strict):
+    code: FNF_ITEM_CODES
+    label: str
+    amount: Money
+
+    _l = field_validator("label")(_item_label)
+    _a = field_validator("amount")(_positive)
+
+
+class FnfUpdate(_Strict):
+    expected_version: int = Field(ge=1)
+    resignation_date: dt.date | None = None
+    last_working_day: dt.date | None = None
+    exit_reason: ExitReason | None = None
+    notice_period_days: int | None = Field(default=None, ge=0, le=365, strict=True)
+    settlement_period: PeriodStr | None = None
+    notice: FnfNoticeIn | None = None
+    encashments: list[FnfEncashmentIn] | None = Field(default=None, max_length=10)
+    loans: list[FnfLoanIn] | None = Field(default=None, max_length=20)
+    items: list[FnfItemIn] | None = Field(default=None, max_length=20)
+    move_open_items: bool | None = None
+    remarks: str | None = None
+
+    _rm = field_validator("remarks")(_remarks)
+
+    @model_validator(mode="after")
+    def _shape(self) -> FnfUpdate:
+        # a null is only meaningful for the nullable fields; everything else must be left out instead
+        for name in ("last_working_day", "exit_reason", "settlement_period", "notice", "encashments", "loans", "items", "move_open_items"):
+            if name in self.model_fields_set and getattr(self, name) is None:
+                raise ValueError(f"{name} cannot be null")
+        if self.encashments is not None:
+            keys = [(e.leave_type_id, e.year) for e in self.encashments]
+            if len(set(keys)) != len(keys):
+                raise ValueError("encashments must name each leave type and year once")
+        if self.loans is not None:
+            ids = [x.loan_id for x in self.loans]
+            if len(set(ids)) != len(ids):
+                raise ValueError("loans must name each loan once")
+        return self
+
+
+class FnfApprove(_Strict):
+    expected_version: int = Field(ge=1)
+    comment: str | None = None
+    current_password: SecretStr = Field(min_length=1, max_length=128)
+
+    @field_validator("comment")
+    @classmethod
+    def _c(cls, v: str | None) -> str | None:
+        return _reason(v) if v is not None else None
+
+
+class FnfReject(_Strict):
+    expected_version: int = Field(ge=1)
+    comment: str
+
+    _c = field_validator("comment")(_reason)
+
+
+class FnfRevoke(_Strict):
+    expected_version: int = Field(ge=1)
+    reason: str
+    current_password: SecretStr = Field(min_length=1, max_length=128)
+
+    _r = field_validator("reason")(_reason)

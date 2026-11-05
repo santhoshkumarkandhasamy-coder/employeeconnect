@@ -146,7 +146,10 @@ def check_percent(pct: Decimal, cfg: Cfg, field_: str = "percent") -> Decimal:
     return pct
 
 
-def last_employed_day(user: User, tz: Any) -> dt.date | None:
+def last_employed_day(user: User, tz: Any, lwd: dt.date | None = None) -> dt.date | None:
+    """The last working day of an F&F when one is set (plan 16 F12), else the day before the deactivation."""
+    if lwd is not None:
+        return lwd
     gone = user.deactivated_at or user.deleted_at
     return as_utc(gone).astimezone(tz).date() - dt.timedelta(days=1) if gone is not None else None
 
@@ -173,6 +176,7 @@ class UserCtx:
     latest_published: dt.date | None
     live: dict[dt.date, uuid.UUID]  # effective_from -> id of a draft / submitted increment
     in_use: set[uuid.UUID] = field(default_factory=set)
+    lwd: dt.date | None = None  # last working day of an F&F (employee_payroll_details)
 
 
 def stored_form(s: SalaryStructure) -> dict[str, Any]:
@@ -258,7 +262,7 @@ def build_plan(
     if other is not None and other != exclude_id:
         raise AppError("INCREMENT_EXISTS", "A draft or submitted increment already exists for that employee and month")
     if kind != "remove":
-        last = last_employed_day(ctx.user, cfg.tz)
+        last = last_employed_day(ctx.user, cfg.tz, ctx.lwd)
         if last is not None and eff > last.replace(day=1):
             raise AppError("AFTER_EXIT", "The employee has left before that month")
 
@@ -329,6 +333,11 @@ async def _contexts(
     )
     for uid, eff, iid in (await session.execute(q3)).all():
         out[uid].live[eff] = iid
+    q4 = select(EmployeePayrollDetails.user_id, EmployeePayrollDetails.last_working_day).where(
+        EmployeePayrollDetails.user_id.in_(ids), EmployeePayrollDetails.last_working_day.is_not(None)
+    )
+    for uid, lwd in (await session.execute(q4)).all():
+        out[uid].lwd = lwd
     if with_in_use:
         used = await structs_svc._in_use_ids(session, [s.id for c in out.values() for s in c.structures])
         for c in out.values():
@@ -737,7 +746,7 @@ def check_approvable(inc: SalaryIncrement, ctx: UserCtx, cfg: Cfg) -> None:
         if target.id in ctx.in_use:
             raise AppError("STRUCTURE_IN_USE", "This structure is used by a processed or published payslip")
     if inc.kind != "remove":
-        last = last_employed_day(ctx.user, cfg.tz)
+        last = last_employed_day(ctx.user, cfg.tz, ctx.lwd)
         if last is not None and inc.effective_from > last.replace(day=1):
             raise AppError("AFTER_EXIT", "The employee has left before that month")
 

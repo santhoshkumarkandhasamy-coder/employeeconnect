@@ -23,13 +23,13 @@ _MONEY_RE = re.compile(r"^\d{1,8}(\.\d{1,2})?$")
 CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,15}$")
 
 EARNING_ADJUSTMENTS = ("BONUS", "ARREARS", "INCENTIVE", "REIMBURSEMENT", "OTHER_EARNING", "OVERTIME", "LEAVE_ENCASH")
-DEDUCTION_ADJUSTMENTS = ("ADVANCE_RECOVERY", "LOAN_EMI", "OTHER_DEDUCTION")
+DEDUCTION_ADJUSTMENTS = ("ADVANCE_RECOVERY", "LOAN_EMI", "OTHER_DEDUCTION", "NOTICE_RECOVERY")
 RESERVED_CODES = frozenset(
     {"BASIC", "HRA", "PF", "ESI", "PF_ER_REC", "ESI_ER_REC", "PT", "TDS", "LOP", *EARNING_ADJUSTMENTS, *DEDUCTION_ADJUSTMENTS}
 )
 ESI_ADJUSTMENTS = frozenset({"INCENTIVE", "OTHER_EARNING", "OVERTIME"})  # adjustment earnings that are ESI wages
 # Codes that only the component engine may produce (plan 15 P3): refused in manual adjustments, structures and fixed deductions.
-SYSTEM_ONLY_CODES = frozenset({"OVERTIME", "LEAVE_ENCASH"})
+SYSTEM_ONLY_CODES = frozenset({"OVERTIME", "LEAVE_ENCASH", "NOTICE_RECOVERY"})  # NOTICE_RECOVERY: written by the F&F approve only (plan 16)
 
 ERROR_CODES = frozenset({"STRUCTURE_MISSING", "NEGATIVE_NET_PAY"})
 WARNING_CODES = frozenset(
@@ -47,6 +47,8 @@ WARNING_CODES = frozenset(
         "OVERTIME_ATTENDANCE_CHANGED",
         "ARREARS_PROPOSED",
         "MANUAL_COMPONENT_OVERLAP",
+        "FNF_SETTLEMENT_ONLY",
+        "EXIT_IN_MONTH",
     }
 )
 

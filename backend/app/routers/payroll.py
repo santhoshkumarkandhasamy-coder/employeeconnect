@@ -34,6 +34,11 @@ from ..schemas.payroll import (
     DetailsIn,
     EmptyIn,
     EncashmentCreate,
+    FnfApprove,
+    FnfCreate,
+    FnfReject,
+    FnfRevoke,
+    FnfUpdate,
     IncrementApprove,
     IncrementCreate,
     IncrementReject,
@@ -61,9 +66,11 @@ from ..schemas.payroll import (
 )
 from ..services import (
     admin_security,
+    fnf_pdf,
     payroll_arrears,
     payroll_ctc_gratuity,
     payroll_encashment,
+    payroll_fnf,
     payroll_increments,
     payroll_items,
     payroll_loans,
@@ -1373,3 +1380,174 @@ async def gratuity(
     return await payroll_ctc_gratuity.gratuity_report(
         session, actor, raw_as_of=as_of, department_id=department_id, eligible_only=eligible_only, q=q, page=page
     )
+
+
+# ============================================================================================ plan 16 4b: full and final settlement
+@admin_router.get("/fnf")
+async def list_fnf(
+    status: Literal["draft", "submitted", "approved", "settled", "cancelled"] | None = None,
+    q: str | None = Query(None, max_length=100),
+    page: PageParams = Depends(),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "admin_read", (120, 60))
+    return await payroll_fnf.list_fnf(session, actor, status=status, q=q, page=page)
+
+
+@admin_router.post("/employees/{user_id}/fnf", status_code=201)
+async def create_fnf(
+    user_id: uuid.UUID,
+    body: FnfCreate,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "write", (60, 60), closed=True)
+    return await payroll_fnf.create_fnf(session, actor, user_id, body)
+
+
+@admin_router.get("/fnf/{fnf_id}")
+async def get_fnf(
+    fnf_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "admin_read", (120, 60))
+    return await payroll_fnf.get_fnf(session, actor, fnf_id)
+
+
+@admin_router.put("/fnf/{fnf_id}")
+async def update_fnf(
+    fnf_id: uuid.UUID,
+    body: FnfUpdate,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "write", (60, 60), closed=True)
+    return await payroll_fnf.update_fnf(session, actor, fnf_id, body)
+
+
+@admin_router.get("/fnf/{fnf_id}/preview")
+async def preview_fnf(
+    fnf_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "admin_read", (120, 60))
+    return await payroll_fnf.preview(session, actor, fnf_id)
+
+
+@admin_router.post("/fnf/{fnf_id}/submit")
+async def submit_fnf(
+    fnf_id: uuid.UUID,
+    body: VersionIn,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "write", (60, 60), closed=True)
+    return await payroll_fnf.submit_fnf(session, redis, actor, fnf_id, body)
+
+
+@admin_router.post("/fnf/{fnf_id}/withdraw")
+async def withdraw_fnf(
+    fnf_id: uuid.UUID,
+    body: VersionIn,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "write", (60, 60), closed=True)
+    return await payroll_fnf.withdraw_fnf(session, actor, fnf_id, body)
+
+
+@admin_router.post("/fnf/{fnf_id}/approve")
+async def approve_fnf(
+    fnf_id: uuid.UUID,
+    body: FnfApprove,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(APPROVE),
+):
+    await pc.limit(redis, actor, "action", (10, 60), closed=True)
+    return await payroll_fnf.approve_fnf(session, redis, actor, fnf_id, body)
+
+
+@admin_router.post("/fnf/{fnf_id}/reject")
+async def reject_fnf(
+    fnf_id: uuid.UUID,
+    body: FnfReject,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(APPROVE),
+):
+    await pc.limit(redis, actor, "action", (10, 60), closed=True)
+    return await payroll_fnf.reject_fnf(session, actor, fnf_id, body)
+
+
+@admin_router.post("/fnf/{fnf_id}/revoke")
+async def revoke_fnf(
+    fnf_id: uuid.UUID,
+    body: FnfRevoke,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(APPROVE),
+):
+    await pc.limit(redis, actor, "action", (10, 60), closed=True)
+    return await payroll_fnf.revoke_fnf(session, redis, actor, fnf_id, body)
+
+
+@admin_router.post("/fnf/{fnf_id}/cancel")
+async def cancel_fnf(
+    fnf_id: uuid.UUID,
+    body: ReasonIn,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "write", (60, 60), closed=True)
+    return await payroll_fnf.cancel_fnf(session, actor, fnf_id, body.reason)
+
+
+@admin_router.get("/fnf/{fnf_id}/statement")
+async def fnf_statement(
+    fnf_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "report", (10, 60), closed=True)
+    f = await payroll_fnf.out.or_404(session, fnf_id)
+    data, name = await fnf_pdf.build(session, f)
+    audit(session, action="payroll.fnf.statement", actor=actor, entity_type=payroll_fnf.ENTITY, entity_id=f.id)
+    await pc.commit(session)
+    return _pdf_response(data, name)
+
+
+@me_router.get("/fnf")
+async def my_fnf(
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_OWN),
+):
+    await pc.limit(redis, actor, "own_list", (60, 60))
+    return await payroll_fnf.my_fnf(session, actor)
+
+
+@me_router.get("/fnf/statement")
+async def my_fnf_statement(
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_OWN),
+):
+    await pc.limit(redis, actor, "own_detail", (30, 60), (200, 86400), closed=True)
+    f = await payroll_fnf.my_settled_or_404(session, actor)
+    data, name = await fnf_pdf.build(session, f)
+    audit(session, action="payroll.fnf.view_own", actor=actor, entity_type=payroll_fnf.ENTITY, entity_id=f.id)
+    await pc.commit(session)
+    return _pdf_response(data, name)

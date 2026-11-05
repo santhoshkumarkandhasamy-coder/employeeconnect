@@ -302,7 +302,9 @@ def render(view: dict[str, Any], footer: str, logo: bytes | None, watermark: str
     return bytes(pdf.output())
 
 
-async def build_pdf(view: dict[str, Any], footer: str, logo: bytes | None, watermark: str | None) -> bytes:
+async def build_pdf(
+    view: dict[str, Any], footer: str, logo: bytes | None, watermark: str | None, renderer: Any = None
+) -> bytes:
     """Bounded: 2 concurrent builds, 5 s to get a slot (else 503 + Retry-After), 10 s to build."""
     sem = _semaphore()
     try:
@@ -311,7 +313,7 @@ async def build_pdf(view: dict[str, Any], footer: str, logo: bytes | None, water
         raise AppError(
             "TEMPORARILY_UNAVAILABLE", "The PDF service is busy; try again shortly.", headers={"Retry-After": "10"}
         ) from None
-    fut = asyncio.ensure_future(asyncio.to_thread(render, view, footer, logo, watermark))
+    fut = asyncio.ensure_future(asyncio.to_thread(renderer or render, view, footer, logo, watermark))
 
     def _done(f: asyncio.Future) -> None:
         sem.release()  # only now is the worker thread really free

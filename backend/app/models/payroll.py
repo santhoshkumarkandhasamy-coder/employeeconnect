@@ -203,6 +203,13 @@ class EmployeePayrollDetails(TimestampMixin, Base):
     __table_args__ = (
         CheckConstraint("designation IS NULL OR char_length(designation) <= 60", name="ck_employee_payroll_details_designation"),
         CheckConstraint("payment_mode IN ('bank_transfer','cheque','cash')", name="ck_employee_payroll_details_payment_mode"),
+        CheckConstraint(
+            "last_working_day IS NULL OR last_working_day BETWEEN DATE '2000-01-01' AND DATE '2200-12-31'",
+            name="ck_employee_payroll_details_lwd_year",
+        ),
+        CheckConstraint(
+            "notice_period_days IS NULL OR notice_period_days BETWEEN 0 AND 365", name="ck_employee_payroll_details_notice_days"
+        ),
         Index("ix_employee_payroll_details_updated_by", "updated_by"),
     )
 
@@ -211,6 +218,8 @@ class EmployeePayrollDetails(TimestampMixin, Base):
     payment_mode: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'bank_transfer'"))
     include_in_payroll: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     overtime_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))  # migration 0023
+    last_working_day: Mapped[dt.date | None] = mapped_column(Date)  # migration 0025; written only by the F&F service
+    notice_period_days: Mapped[int | None] = mapped_column(SmallInteger)  # migration 0025
     bank_name: Mapped[str | None] = mapped_column("bank_name_enc", EncryptedString)
     bank_account: Mapped[str | None] = mapped_column("bank_account_enc", EncryptedString)
     bank_ifsc: Mapped[str | None] = mapped_column("bank_ifsc_enc", EncryptedString)
@@ -320,6 +329,94 @@ class Payslip(TimestampMixin, Base):
     published_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
     superseded_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     created_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+    updated_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+
+
+_LWD_MONTH = "make_date(extract(year from last_working_day)::int, extract(month from last_working_day)::int, 1)"
+
+
+class FnfSettlement(TimestampMixin, Base):
+    """Full and final settlement of one employee (maker-checker). Migration 0025; the DB repeats the maker-checker rule in
+    ck_fnf_settlements_checker / _checker_history and guards the lifecycle in fnf_settlements_lock.
+    `plan` = encrypted JSON (override reason, encashment lines, loan modes, other items, move_open_items); `summary` = approval snapshot."""
+
+    __tablename__ = "fnf_settlements"
+    __table_args__ = (
+        CheckConstraint(
+            "exit_reason IN ('resignation','termination','retirement','death','contract_end','absconding','other')",
+            name="ck_fnf_settlements_exit_reason",
+        ),
+        CheckConstraint("status IN ('draft','submitted','approved','settled','cancelled')", name="ck_fnf_settlements_status"),
+        CheckConstraint("last_working_day BETWEEN DATE '2000-01-01' AND DATE '2200-12-31'", name="ck_fnf_settlements_lwd_year"),
+        CheckConstraint("resignation_date IS NULL OR resignation_date <= last_working_day", name="ck_fnf_settlements_resignation"),
+        CheckConstraint("extract(day from settlement_period) = 1", name="ck_fnf_settlements_period_first"),
+        CheckConstraint(
+            f"settlement_period >= {_LWD_MONTH} AND settlement_period <= ({_LWD_MONTH} + INTERVAL '3 months')::date",
+            name="ck_fnf_settlements_period_window",
+        ),
+        CheckConstraint("notice_required_days BETWEEN 0 AND 365", name="ck_fnf_settlements_notice_required"),
+        CheckConstraint("shortfall_days BETWEEN 0 AND 365 AND shortfall_days <= notice_required_days", name="ck_fnf_settlements_shortfall"),
+        CheckConstraint("NOT notice_waived OR shortfall_days = 0", name="ck_fnf_settlements_shortfall_waived"),
+        CheckConstraint("exit_reason = 'resignation' OR shortfall_days = 0", name="ck_fnf_settlements_shortfall_reason"),
+        CheckConstraint("created_by <> user_id", name="ck_fnf_settlements_maker_not_employee"),
+        CheckConstraint("(submitted_by IS NULL) = (submitted_at IS NULL)", name="ck_fnf_settlements_submitted"),
+        CheckConstraint("(decided_by IS NULL) = (decided_at IS NULL)", name="ck_fnf_settlements_decided_pair"),
+        CheckConstraint("status NOT IN ('submitted','approved','settled') OR submitted_by IS NOT NULL", name="ck_fnf_settlements_live_submitted"),
+        CheckConstraint("status NOT IN ('approved','settled') OR decided_by IS NOT NULL", name="ck_fnf_settlements_decided_status"),
+        CheckConstraint("status NOT IN ('approved','settled') OR summary_enc IS NOT NULL", name="ck_fnf_settlements_summary"),
+        CheckConstraint("status <> 'cancelled' OR cancel_reason_enc IS NOT NULL", name="ck_fnf_settlements_cancelled"),
+        CheckConstraint("(status = 'settled') = (final_payslip_id IS NOT NULL)", name="ck_fnf_settlements_settled"),
+        CheckConstraint(
+            "decided_by IS NULL OR (decided_by <> user_id AND decided_by IS DISTINCT FROM created_by "
+            "AND decided_by IS DISTINCT FROM last_edited_by AND decided_by IS DISTINCT FROM submitted_by)",
+            name="ck_fnf_settlements_checker",
+        ),
+        CheckConstraint("decided_by IS NULL OR decided_by::text <> ALL (contributors)", name="ck_fnf_settlements_checker_history"),
+        CheckConstraint("version >= 1", name="ck_fnf_settlements_version"),
+        Index(
+            "uq_fnf_settlements_live", "user_id", unique=True,
+            postgresql_where=text("status IN ('draft','submitted','approved')"),
+        ),  # fmt: skip
+        Index("ix_fnf_settlements_status_created", "status", "created_at"),
+        Index("ix_fnf_settlements_user_created", "user_id", "created_at"),
+        Index("ix_fnf_settlements_period_status", "settlement_period", "status"),
+        Index("ix_fnf_settlements_final_payslip_id", "final_payslip_id"),
+        Index("ix_fnf_settlements_submitted_by", "submitted_by"),
+        Index("ix_fnf_settlements_decided_by", "decided_by"),
+        Index("ix_fnf_settlements_created_by", "created_by"),
+        Index("ix_fnf_settlements_last_edited_by", "last_edited_by"),
+        Index("ix_fnf_settlements_updated_by", "updated_by"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    user_id: Mapped[uuid.UUID] = fk_uuid("users.id")
+    resignation_date: Mapped[dt.date | None] = mapped_column(Date)
+    last_working_day: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    exit_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    settlement_period: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    notice_required_days: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    notice_waived: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    shortfall_days: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default=text("0"))
+    plan: Mapped[dict] = mapped_column("plan_enc", EncryptedJSON, nullable=False)
+    summary: Mapped[dict | None] = mapped_column("summary_enc", EncryptedJSON)
+    remarks: Mapped[str | None] = mapped_column("remarks_enc", EncryptedString)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'draft'"))
+    submitted_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+    submitted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    decided_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+    decided_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    decision_comment: Mapped[str | None] = mapped_column("decision_comment_enc", EncryptedString)
+    cancel_reason: Mapped[str | None] = mapped_column("cancel_reason_enc", EncryptedString)
+    final_payslip_id: Mapped[uuid.UUID | None] = fk_uuid("payslips.id", nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    created_by: Mapped[uuid.UUID] = fk_uuid("users.id")
+    # last actor who changed the plan (create / edit); never touched by submit, approve, reject or revoke
+    last_edited_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False,
+        default=lambda ctx: ctx.get_current_parameters()["created_by"],
+    )  # fmt: skip
+    # user ids (text) of everybody who created, edited, submitted or withdrew it; append-only (the trigger refuses a shrink)
+    contributors: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default=text("'{}'"))
     updated_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
 
 

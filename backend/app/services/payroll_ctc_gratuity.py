@@ -119,13 +119,19 @@ async def _rows(
         for st in (await session.execute(sq)).scalars():
             structures.setdefault(st.user_id, []).append((st.effective_from, st))
 
+    lwds: dict[uuid.UUID, dt.date] = {}
+    if users:
+        lq = select(EmployeePayrollDetails.user_id, EmployeePayrollDetails.last_working_day).where(
+            EmployeePayrollDetails.user_id.in_([u.id for u in users]), EmployeePayrollDetails.last_working_day.is_not(None)
+        )
+        lwds = {uid_: d for uid_, d in (await session.execute(lq)).all()}
     month_start = as_of.replace(day=1)
     items: list[dict[str, Any]] = []
     tot_accrued = tot_eligible = tot_monthly = Decimal("0.00")
     for u in users:
         if u.join_date is not None and u.join_date > as_of:
             continue  # not yet employed on that date
-        last = ig.last_employed_day(u, cfg.tz)
+        last = ig.last_employed_day(u, cfg.tz, lwds.get(u.id))
         if last is not None and last < month_start:
             continue  # left before the month of as_of
         flags: list[str] = []

@@ -460,6 +460,24 @@ async def _close_account_resources(session: AsyncSession, user_id: uuid.UUID) ->
     return tokens
 
 
+async def _fnf_activation_rule(session: AsyncSession, actor: Principal, u: User) -> None:
+    """409 FNF_OPEN while a final settlement is draft / submitted / approved; a settled one is over: the last working day is cleared."""
+    from ..models import EmployeePayrollDetails, FnfSettlement
+
+    live = (
+        await session.execute(
+            select(FnfSettlement.id).where(FnfSettlement.user_id == u.id, FnfSettlement.status.in_(("draft", "submitted", "approved"))).limit(1)
+        )
+    ).first()
+    if live is not None:
+        raise AppError("FNF_OPEN", "A final settlement is open for this employee; finish or cancel it first")
+    det = await session.get(EmployeePayrollDetails, u.id)
+    if det is not None and det.last_working_day is not None:
+        det.last_working_day, det.updated_by = None, actor.id
+        audit(session, action="payroll.details.update", actor=actor, entity_type="user", entity_id=u.id,
+              after={"fields": ["last_working_day"]})  # fmt: skip
+
+
 async def set_active(
     session: AsyncSession, actor: Principal, user_id: uuid.UUID, *, active: bool, reason: str = "other"
 ) -> dict[str, Any]:
@@ -476,6 +494,7 @@ async def set_active(
     tokens: list[str] = []
     if (u.status == "active") != active:
         if active:
+            await _fnf_activation_rule(session, actor, u)  # after the user row lock (plan 16 F12 / contract 9 [4b])
             await license_svc.check_seat(session, actor)
         u.status = "active" if active else "inactive"
         if not active:

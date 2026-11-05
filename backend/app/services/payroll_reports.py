@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.errors import AppError
-from ..models import PayrollRun, Payslip, User
+from ..models import EmployeePayrollDetails, FnfSettlement, PayrollLoan, PayrollRun, Payslip, User
 from . import payroll_calc as calc
 from . import payroll_runs as runs
 from . import payroll_settings, xlsx
@@ -100,6 +100,7 @@ async def calendar(session: AsyncSession, period: dt.date, run: PayrollRun | Non
         alerts.append("RUN_NOT_CREATED" if run is None else "RUN_NOT_PROCESSED")
     if run is not None and run.status == "processed" and today >= pay_date:
         alerts.append("RUN_NOT_PUBLISHED")
+    alerts.extend(await _fnf_alerts(session, today))
     return {
         "cutoff_day": int(s["payroll.cutoff_day"]),
         "process_by": process_by.isoformat(),
@@ -109,6 +110,59 @@ async def calendar(session: AsyncSession, period: dt.date, run: PayrollRun | Non
 
 
 # ================================================================================================== dashboard
+EXIT_ALERT_DAYS = 90  # a deactivation older than this without an F&F is history, not an alert
+
+
+async def _leavers(session: AsyncSession, period: dt.date, end: dt.date) -> list[dict[str, Any]]:
+    """Leavers of the month: the last working day of an F&F when one is set (plan 16 F12), else the deactivation date."""
+    out: list[tuple[dt.date, User]] = []
+    q = (
+        select(User, EmployeePayrollDetails.last_working_day)
+        .join(EmployeePayrollDetails, EmployeePayrollDetails.user_id == User.id)
+        .where(EmployeePayrollDetails.last_working_day >= period, EmployeePayrollDetails.last_working_day < end)
+    )  # fmt: skip
+    seen: set[Any] = set()
+    for u, lwd in (await session.execute(q)).unique().all():
+        out.append((lwd, u))
+        seen.add(u.id)
+    lo, hi = dt.datetime.combine(period, dt.time.min, tzinfo=dt.UTC), dt.datetime.combine(end, dt.time.min, tzinfo=dt.UTC)
+    q2 = select(User).where(User.deactivated_at >= lo, User.deactivated_at < hi)
+    for u in (await session.execute(q2)).unique().scalars():
+        if u.id in seen:
+            continue
+        det = await session.get(EmployeePayrollDetails, u.id)
+        if det is not None and det.last_working_day is not None:
+            continue  # the F&F decides: its last working day is in another month
+        out.append((u.deactivated_at.date(), u))
+    out.sort(key=lambda t: (t[0], t[1].employee_id))
+    return [{"employee_id": u.employee_id, "name": u.full_name, "date": d.isoformat()} for d, u in out]
+
+
+async def _fnf_alerts(session: AsyncSession, today: dt.date) -> list[str]:
+    """FNF_PENDING_APPROVAL: a settlement waits for a checker. EXIT_WITHOUT_FNF: an employee who left (deactivated, or last working
+    day passed) has an active loan, or was deactivated recently and has no settlement at all."""
+    alerts: list[str] = []
+    if (await session.execute(select(FnfSettlement.id).where(FnfSettlement.status == "submitted").limit(1))).first():
+        alerts.append("FNF_PENDING_APPROVAL")
+    live_fnf = select(FnfSettlement.id).where(
+        FnfSettlement.user_id == User.id, FnfSettlement.status.in_(("draft", "submitted", "approved", "settled"))
+    )
+    since = dt.datetime.combine(today - dt.timedelta(days=EXIT_ALERT_DAYS), dt.time.min, tzinfo=dt.UTC)
+    exited = (User.deactivated_at.is_not(None)) | (
+        select(EmployeePayrollDetails.user_id)
+        .where(EmployeePayrollDetails.user_id == User.id, EmployeePayrollDetails.last_working_day < today)
+        .exists()
+    )
+    no_fnf = select(User.id).where(User.deleted_at.is_(None), User.deactivated_at >= since, ~live_fnf.exists())
+    active_loan = select(User.id).where(
+        User.deleted_at.is_(None), exited,
+        select(PayrollLoan.id).where(PayrollLoan.user_id == User.id, PayrollLoan.status == "active").exists(),
+    )  # fmt: skip
+    if (await session.execute(no_fnf.limit(1))).first() or (await session.execute(active_loan.limit(1))).first():
+        alerts.append("EXIT_WITHOUT_FNF")
+    return alerts
+
+
 async def dashboard(session: AsyncSession, raw_period: str | None) -> dict[str, Any]:
     today = await runs._today(session)
     period = _period(raw_period, today)
@@ -139,17 +193,7 @@ async def dashboard(session: AsyncSession, raw_period: str | None) -> dict[str, 
         for u in (await session.execute(select(User).where(User.join_date >= period, User.join_date < end).order_by(User.join_date)))
         .unique().scalars()
     ]  # fmt: skip
-    leavers = [
-        {"employee_id": u.employee_id, "name": u.full_name, "date": u.deactivated_at.date().isoformat()}
-        for u in (
-            await session.execute(
-                select(User)
-                .where(User.deactivated_at >= dt.datetime.combine(period, dt.time.min, tzinfo=dt.UTC),
-                       User.deactivated_at < dt.datetime.combine(end, dt.time.min, tzinfo=dt.UTC))
-                .order_by(User.deactivated_at)
-            )  # fmt: skip
-        ).unique().scalars()
-    ]
+    leavers = await _leavers(session, period, end)
 
     return {
         "period": f"{period:%Y-%m}",

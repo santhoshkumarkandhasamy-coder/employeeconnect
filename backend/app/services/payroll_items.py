@@ -69,6 +69,7 @@ def item_out(i: PayrollOneTimeItem, people: dict, state: tuple[str, list[str]]) 
         "run_status": state[0],
         "flags": state[1],
         "batch_id": str(i.batch_id) if i.batch_id else None,
+        "fnf_id": str(i.fnf_id) if i.fnf_id else None,
         "payslip_id": str(i.payslip_id) if i.payslip_id else None,
         "version": i.version,
         "created_at": pc.iso(i.created_at),
@@ -125,6 +126,8 @@ async def _item_or_404(session: AsyncSession, item_id: uuid.UUID, *, lock: bool 
 
 
 def _require_pending(item: PayrollOneTimeItem) -> None:
+    if item.fnf_id is not None:
+        raise AppError("FNF_MANAGED", "This item belongs to a final settlement; change it there")
     if item.status != "pending":
         raise AppError("ITEM_LOCKED", f"The item is {item.status} and can no longer be changed")
 
