@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Literal
 
@@ -23,10 +24,18 @@ from ..core.rbac import Principal, require_permission
 from ..core.redis import get_redis
 from ..models import Payslip
 from ..schemas.payroll import (
+    ArrearsAccept,
     ChallanIn,
     DetailsIn,
+    EncashmentCreate,
+    LoanCancel,
+    LoanCreate,
+    LoanForeclose,
+    LoanReschedule,
+    LoanSkip,
     OneTimeItemCreate,
     OneTimeItemUpdate,
+    OptionalReasonIn,
     PayrollSettingsIn,
     PayslipUpdate,
     PublishIn,
@@ -39,7 +48,10 @@ from ..schemas.payroll import (
 )
 from ..services import (
     admin_security,
+    payroll_arrears,
+    payroll_encashment,
     payroll_items,
+    payroll_loans,
     payroll_register,
     payroll_reports,
     payroll_settings,
@@ -58,6 +70,7 @@ PDF_HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
 
 employee_router = APIRouter(prefix="/payslips", tags=["payslips"])
 admin_router = APIRouter(prefix="/admin/payroll", tags=["payroll-admin"])
+me_router = APIRouter(prefix="/me", tags=["payroll-own"])
 
 VIEW_OWN = require_permission("payroll.view_own")
 VIEW_ALL = require_permission("payroll.view_all")
@@ -734,3 +747,220 @@ async def cancel_item(
 ):
     await pc.limit(redis, actor, "write", (60, 60), closed=True)
     return await payroll_items.cancel_item(session, actor, item_id, body.reason)
+
+
+# ============================================================================================ plan 15: loans and advances (3a)
+@admin_router.get("/loans")
+async def list_loans(
+    user_id: uuid.UUID | None = None,
+    status: Literal["active", "closed", "cancelled"] | None = None,
+    kind: Literal["loan", "advance"] | None = None,
+    page: PageParams = Depends(),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "admin_read", (120, 60))
+    return await payroll_loans.list_loans(session, user_id=user_id, status=status, kind=kind, page=page)
+
+
+@admin_router.post("/loans", status_code=201)
+async def create_loan(
+    body: LoanCreate,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "action", (10, 60), closed=True)
+    return await payroll_loans.create_loan(session, redis, actor, body)
+
+
+@admin_router.get("/loans/{loan_id}")
+async def get_loan(
+    loan_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "admin_read", (120, 60))
+    return await payroll_loans.get_loan(session, actor, loan_id)
+
+
+@admin_router.post("/loans/{loan_id}/skip")
+async def skip_installment(
+    loan_id: uuid.UUID,
+    body: LoanSkip,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "action", (10, 60), closed=True)
+    return await payroll_loans.skip(session, actor, loan_id, body)
+
+
+@admin_router.post("/loans/{loan_id}/reschedule")
+async def reschedule_loan(
+    loan_id: uuid.UUID,
+    body: LoanReschedule,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "action", (10, 60), closed=True)
+    return await payroll_loans.reschedule(session, redis, actor, loan_id, body)
+
+
+@admin_router.post("/loans/{loan_id}/foreclose")
+async def foreclose_loan(
+    loan_id: uuid.UUID,
+    body: LoanForeclose,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "action", (10, 60), closed=True)
+    return await payroll_loans.foreclose(session, redis, actor, loan_id, body)
+
+
+@admin_router.post("/loans/{loan_id}/cancel")
+async def cancel_loan(
+    loan_id: uuid.UUID,
+    body: LoanCancel,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "action", (10, 60), closed=True)
+    return await payroll_loans.cancel(session, redis, actor, loan_id, body)
+
+
+@me_router.get("/loans")
+async def my_loans(
+    session: AsyncSession = Depends(get_session), redis: Redis = Depends(get_redis), actor: Principal = Depends(VIEW_OWN)
+):
+    await pc.limit(redis, actor, "own_list", (60, 60))
+    return await payroll_loans.my_loans(session, actor)
+
+
+@me_router.get("/loans/{loan_id}")
+async def my_loan(
+    loan_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_OWN),
+):
+    await pc.limit(redis, actor, "own_detail", (30, 60), (200, 86400))
+    return await payroll_loans.my_loan(session, actor, loan_id)
+
+
+# ============================================================================================ plan 15: auto arrears (3a)
+@admin_router.get("/arrears")
+async def list_arrears(
+    status: Literal["proposed", "pending", "processing", "paid", "dismissed"] | None = None,
+    user_id: uuid.UUID | None = None,
+    page: PageParams = Depends(),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "admin_read", (120, 60))
+    return await payroll_arrears.list_arrears(session, status=status, user_id=user_id, page=page)
+
+
+@admin_router.get("/arrears/{arrears_id}")
+async def get_arrears(
+    arrears_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "admin_read", (120, 60))
+    return await payroll_arrears.get_arrears(session, actor, arrears_id)
+
+
+@admin_router.post("/employees/{user_id}/arrears/recalculate")
+async def recalculate_arrears(
+    user_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "action", (10, 60), closed=True)
+    return await payroll_arrears.recalculate(session, actor, user_id)
+
+
+@admin_router.post("/arrears/{arrears_id}/accept")
+async def accept_arrears(
+    arrears_id: uuid.UUID,
+    body: ArrearsAccept,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "action", (10, 60), closed=True)
+    return await payroll_arrears.accept(session, redis, actor, arrears_id, body)
+
+
+@admin_router.post("/arrears/{arrears_id}/dismiss")
+async def dismiss_arrears(
+    arrears_id: uuid.UUID,
+    body: ReasonIn,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "write", (60, 60), closed=True)
+    return await payroll_arrears.dismiss(session, actor, arrears_id, body.reason)
+
+
+# ============================================================================================ plan 15: leave encashment (3a)
+@admin_router.get("/encashments")
+async def list_encashments(
+    user_id: uuid.UUID | None = None,
+    year: int | None = Query(None, ge=2000, le=2200),
+    status: Literal["pending", "processing", "paid", "cancelled"] | None = None,
+    page: PageParams = Depends(),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "admin_read", (120, 60))
+    return await payroll_encashment.list_encashments(session, user_id=user_id, year=year, status=status, page=page)
+
+
+@admin_router.get("/employees/{user_id}/encashment-quote")
+async def encashment_quote(
+    user_id: uuid.UUID,
+    leave_type_id: uuid.UUID,
+    year: int = Query(..., ge=2000, le=2200),
+    period: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
+    days: Decimal | None = Query(None, gt=0, le=Decimal("999.9"), max_digits=4, decimal_places=1),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "admin_read", (120, 60))
+    return await payroll_encashment.quote(session, user_id, leave_type_id, year, days, period)
+
+
+@admin_router.post("/encashments", status_code=201)
+async def create_encashment(
+    body: EncashmentCreate,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "action", (10, 60), closed=True)
+    return await payroll_encashment.create(session, redis, actor, body)
+
+
+@admin_router.post("/encashments/{enc_id}/cancel")
+async def cancel_encashment(
+    enc_id: uuid.UUID,
+    body: OptionalReasonIn | None = None,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "write", (60, 60), closed=True)
+    return await payroll_encashment.cancel(session, actor, enc_id, body.reason if body else None)

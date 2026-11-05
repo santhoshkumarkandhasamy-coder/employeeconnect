@@ -14,7 +14,9 @@ Decisions on the plan's open questions (also in docs/api-contract.md section 4):
 
 Locking order: user row (apply only) -> request row -> balance row. Balance math is
 `pending += days` on submit, `pending -= days; used += days` on approve, `pending -= days` on reject/cancel(pending),
-`used -= days` on cancel(approved); DB CHECKs (used,pending >= 0, used+pending <= quota) are the safety net.
+`used -= days` on cancel(approved); DB CHECKs (used,pending,encashed >= 0, used+pending+encashed <= quota) are the safety net.
+`encashed` (plan 15) is a third reservation: days turned into pay by a leave encashment. It changes only through
+`payroll_encashment` (create adds, cancel gives back); `remaining = quota - used - pending - encashed`.
 """
 
 from __future__ import annotations
@@ -212,7 +214,7 @@ async def _move(
     if new_used < 0 or new_pending < 0:
         log.error("balance %s would go negative (used=%s pending=%s)", bal.id, new_used, new_pending)
         raise AppError("CONFLICT", "Leave balance is inconsistent; contact HR")
-    if new_used + new_pending > d1(bal.quota):
+    if new_used + new_pending + d1(bal.encashed) > d1(bal.quota):
         raise _err("INSUFFICIENT_BALANCE", "Not enough leave balance", "days")
     bal.used, bal.pending = new_used, new_pending
     try:
@@ -370,12 +372,12 @@ async def balance(session: AsyncSession, actor: Principal, year: int | None) -> 
             .order_by(LeaveType.name)
         )
     ).all()
-    entries = [(b.quota, b.used, b.pending, lt) for b, lt in rows]
+    entries = [(b.quota, b.used, b.pending, b.encashed, lt) for b, lt in rows]
     if not persist:
-        have = {lt.id for _, _, _, lt in entries}
+        have = {e[4].id for e in entries}
         types = (await session.execute(select(LeaveType).where(LeaveType.is_active.is_(True)))).scalars().all()
-        entries += [(initial_quota(lt, user, year), d1(0), d1(0), lt) for lt in types if lt.id not in have]
-        entries.sort(key=lambda e: e[3].name)
+        entries += [(initial_quota(lt, user, year), d1(0), d1(0), d1(0), lt) for lt in types if lt.id not in have]
+        entries.sort(key=lambda e: e[4].name)
     leave = [
         {
             "leave_type_id": str(lt.id),
@@ -384,10 +386,11 @@ async def balance(session: AsyncSession, actor: Principal, year: int | None) -> 
             "quota": num(quota),
             "used": num(used),
             "pending": num(pending),
-            "remaining": num(d1(quota) - d1(used) - d1(pending)),
+            "encashed": num(encashed),
+            "remaining": num(d1(quota) - d1(used) - d1(pending) - d1(encashed)),
         }
-        for quota, used, pending, lt in entries
-        if lt.is_active or d1(used) + d1(pending) > 0
+        for quota, used, pending, encashed, lt in entries
+        if lt.is_active or d1(used) + d1(pending) + d1(encashed) > 0
     ]
     u = await permission_usage(session, user.id, today)
     lim_c, lim_m = int(cfg["permission.monthly_count_limit"]), int(cfg["permission.monthly_minutes_limit"])
@@ -586,7 +589,7 @@ async def apply_leave(session: AsyncSession, actor: Principal, body: Any, redis:
             "attachment_file_id",
         )
     bal = await get_balance(session, user, lt, body.from_date.year, lock=True)
-    remaining = d1(bal.quota) - d1(bal.used) - d1(bal.pending)
+    remaining = d1(bal.quota) - d1(bal.used) - d1(bal.pending) - d1(bal.encashed)
     if remaining < days:
         raise AppError(
             "INSUFFICIENT_BALANCE", "Not enough leave balance", details=[{"field": "remaining", "message": str(remaining)}]
@@ -1089,7 +1092,7 @@ async def recompute_prorata(session: AsyncSession, user: User, actor: Principal,
         if new_q == d1(b.quota):
             continue
         item = {"year": b.year, "type": lt.code, "quota": str(d1(b.quota)), "new_quota": str(new_q)}
-        if d1(b.used) == 0 and d1(b.pending) == 0:
+        if d1(b.used) == 0 and d1(b.pending) == 0 and d1(b.encashed) == 0:
             b.quota = new_q
             changed.append(item)
         else:

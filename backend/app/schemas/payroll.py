@@ -316,3 +316,112 @@ class ReasonIn(_Strict):
     reason: str
 
     _r = field_validator("reason")(_reason)
+
+
+# ---------------------------------------------------------------------------------------------- loans (3a step 2)
+LoanKind = Literal["loan", "advance"]
+_SAFE_REF = re.compile(r"^[A-Za-z0-9 ._/\-]{1,60}$")
+
+
+class LoanCreate(_Strict):
+    user_id: uuid.UUID
+    kind: LoanKind
+    principal: Money
+    emi: Money
+    start_period: PeriodStr
+    reason: str
+    current_password: SecretStr = Field(min_length=1, max_length=128)
+
+    _r = field_validator("reason")(_reason)
+
+
+class LoanSkip(_Strict):
+    installment_id: uuid.UUID
+    reason: str
+    expected_version: int = Field(ge=1)
+
+    _r = field_validator("reason")(_reason)
+
+
+class LoanReschedule(_Strict):
+    emi: Money
+    from_period: PeriodStr
+    reason: str
+    expected_version: int = Field(ge=1)
+    current_password: SecretStr = Field(min_length=1, max_length=128)
+
+    _r = field_validator("reason")(_reason)
+
+
+class LoanForeclose(_Strict):
+    mode: Literal["payroll", "outside"]
+    period: PeriodStr | None = None
+    paid_on: dt.date | None = None
+    reference: str | None = Field(default=None, min_length=1, max_length=60)
+    reason: str
+    expected_version: int = Field(ge=1)
+    current_password: SecretStr = Field(min_length=1, max_length=128)
+
+    _r = field_validator("reason")(_reason)
+
+    @model_validator(mode="after")
+    def _by_mode(self) -> LoanForeclose:
+        if self.mode == "payroll":
+            if self.period is None:
+                raise ValueError("period is required for mode payroll")
+            if self.paid_on is not None or self.reference is not None:
+                raise ValueError("paid_on and reference only apply to mode outside")
+        else:
+            if self.paid_on is None or self.reference is None:
+                raise ValueError("paid_on and reference are required for mode outside")
+            if self.period is not None:
+                raise ValueError("period only applies to mode payroll")
+            if not _SAFE_REF.match(self.reference):
+                raise ValueError("reference may only contain letters, digits, space and . _ / -")
+        return self
+
+
+class LoanCancel(_Strict):
+    reason: str
+    expected_version: int = Field(ge=1)
+    current_password: SecretStr = Field(min_length=1, max_length=128)
+
+    _r = field_validator("reason")(_reason)
+
+
+# ---------------------------------------------------------------------------------------------- arrears / encashment
+class ArrearsAccept(_Strict):
+    period: PeriodStr
+    expected_version: int = Field(ge=1)
+    current_password: SecretStr = Field(min_length=1, max_length=128)
+
+
+def _half_days(v: Decimal) -> Decimal:
+    if v <= 0 or v > Decimal("999.9") or (v * 2) != (v * 2).to_integral_value():
+        raise ValueError("must be greater than 0, in steps of 0.5")
+    return v
+
+
+class EncashmentCreate(_Strict):
+    user_id: uuid.UUID
+    leave_type_id: uuid.UUID
+    year: int = Field(ge=2000, le=2200)
+    days: Decimal = Field(allow_inf_nan=False, max_digits=4, decimal_places=1)
+    period: PeriodStr
+    source: Literal["request", "fnf"] = "request"
+    reason: str
+    current_password: SecretStr = Field(min_length=1, max_length=128)
+
+    _r = field_validator("reason")(_reason)
+    _d = field_validator("days")(_half_days)
+
+
+class OptionalReasonIn(_Strict):
+    """Optional body of encashment cancel (kept in the encrypted money history only)."""
+
+    reason: str | None = None
+
+    @field_validator("reason")
+    @classmethod
+    def _opt(cls, v: str | None) -> str | None:
+        return _reason(v) if v is not None else None

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import func, or_, select
@@ -23,6 +24,7 @@ from ..models import (
     AuditLog,
     Department,
     LeaveBalance,
+    LeaveEncashment,
     LeaveRequest,
     LeaveType,
     Shift,
@@ -247,6 +249,9 @@ def type_out(t: LeaveType) -> dict[str, Any]:
         "requires_attachment_after_days": t.requires_attachment_after_days,
         "max_consecutive_days": t.max_consecutive_days,
         "is_active": t.is_active,
+        "encashable": t.encashable,
+        "encash_max_days_per_year": leave_svc.num(t.encash_max_days_per_year) if t.encash_max_days_per_year is not None else None,
+        "encash_min_balance": leave_svc.num(t.encash_min_balance),
     }
 
 
@@ -280,6 +285,17 @@ def _apply_type(t: LeaveType, body: Any) -> None:
     t.code, t.name, t.annual_quota = body.code, body.name, body.annual_quota
     t.is_paid, t.allow_half_day, t.is_active = body.is_paid, body.allow_half_day, body.is_active
     t.requires_attachment_after_days, t.max_consecutive_days = body.requires_attachment_after_days, body.max_consecutive_days
+    sent = body.model_fields_set  # plan 15: keys that are not sent keep their stored value (older clients)
+    if "encashable" in sent:
+        t.encashable = body.encashable
+    elif t.encashable is None:
+        t.encashable = False
+    if "encash_max_days_per_year" in sent:
+        t.encash_max_days_per_year = body.encash_max_days_per_year
+    if "encash_min_balance" in sent:
+        t.encash_min_balance = body.encash_min_balance
+    elif t.encash_min_balance is None:
+        t.encash_min_balance = Decimal("0.0")
 
 
 async def create_leave_type(session: AsyncSession, actor: Principal, body: Any) -> dict[str, Any]:
@@ -324,8 +340,15 @@ async def delete_leave_type(session: AsyncSession, actor: Principal, type_id: uu
     """In use = any request references it, or any balance row has used/pending days. Untouched balance rows (the
     zero-usage rows created automatically for every employee) are removed together with the type."""
     t = await _type(session, type_id)
-    if await _count(session, LeaveRequest, LeaveRequest.leave_type_id == t.id) or await _count(
-        session, LeaveBalance, LeaveBalance.leave_type_id == t.id, or_(LeaveBalance.used > 0, LeaveBalance.pending > 0)
+    if (
+        await _count(session, LeaveRequest, LeaveRequest.leave_type_id == t.id)
+        or await _count(session, LeaveEncashment, LeaveEncashment.leave_type_id == t.id)
+        or await _count(
+            session,
+            LeaveBalance,
+            LeaveBalance.leave_type_id == t.id,
+            or_(LeaveBalance.used > 0, LeaveBalance.pending > 0, LeaveBalance.encashed > 0),
+        )
     ):
         raise _in_use("Leave type")
     before = type_out(t)
@@ -345,14 +368,15 @@ async def _target(session: AsyncSession, actor: Principal, user_id: uuid.UUID) -
     return u
 
 
-def _bal_out(t: LeaveType, quota: Any, used: Any, pending: Any) -> dict[str, Any]:
-    q, us, pe = leave_svc.d1(quota), leave_svc.d1(used), leave_svc.d1(pending)
+def _bal_out(t: LeaveType, quota: Any, used: Any, pending: Any, encashed: Any = 0) -> dict[str, Any]:
+    q, us, pe, en = leave_svc.d1(quota), leave_svc.d1(used), leave_svc.d1(pending), leave_svc.d1(encashed)
     return {
         "leave_type": {"id": str(t.id), "code": t.code, "name": t.name},
         "quota": float(q),
         "used": float(us),
         "pending": float(pe),
-        "remaining": float(q - us - pe),
+        "encashed": float(en),
+        "remaining": float(q - us - pe - en),
     }
 
 
@@ -372,7 +396,9 @@ async def get_balances(session: AsyncSession, actor: Principal, user_id: uuid.UU
     items = []
     for t in types:
         b = rows.get(t.id)
-        items.append(_bal_out(t, b.quota, b.used, b.pending) if b else _bal_out(t, leave_svc.initial_quota(t, u, year), 0, 0))
+        items.append(
+            _bal_out(t, b.quota, b.used, b.pending, b.encashed) if b else _bal_out(t, leave_svc.initial_quota(t, u, year), 0, 0)
+        )
     return {"year": year, "items": items}
 
 
@@ -399,11 +425,11 @@ async def set_balances(session: AsyncSession, actor: Principal, user_id: uuid.UU
         t = types[item.leave_type_id]
         bal = await leave_svc.get_balance(session, u, t, body.year, lock=True)
         new = leave_svc.d1(item.quota)
-        if new < leave_svc.d1(bal.used) + leave_svc.d1(bal.pending):
+        if new < leave_svc.d1(bal.used) + leave_svc.d1(bal.pending) + leave_svc.d1(bal.encashed):
             raise AppError(
                 "QUOTA_BELOW_USED",
-                "Quota cannot be lower than used plus pending days",
-                details=[{"field": t.code, "message": "below used + pending"}],
+                "Quota cannot be lower than used plus pending plus encashed days",
+                details=[{"field": t.code, "message": "below used + pending + encashed"}],
             )
         old = leave_svc.d1(bal.quota)
         if new != old:

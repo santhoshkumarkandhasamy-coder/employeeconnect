@@ -350,6 +350,23 @@ def pf_label(code: str, rules: Rules) -> str:
     return LABELS_SPLIT[code] if rules.employer_share_from_employee else LABELS[code]
 
 
+def structure_earnings(
+    structure: StructureData, rules: Rules, basis_days: Decimal, paid_days: Decimal
+) -> tuple[Decimal, Decimal]:
+    """(basic, total) of the structure lines BASIC + HRA + allowances for the given days, rounded exactly like
+    `calculate` (used by the auto arrears, plan 15)."""
+    factor = (paid_days / basis_days) if basis_days > 0 else Decimal(0)
+
+    def earned(monthly: Decimal, prorate: bool = True) -> Decimal:
+        if prorate:
+            return rnd(monthly * factor, rules.rounding)
+        return rnd(monthly, rules.rounding) if paid_days > 0 else Decimal("0.00")
+
+    basic = earned(structure.basic)
+    total = basic + earned(structure.hra) + sum((earned(a.amount, a.prorate) for a in structure.allowances), Decimal(0))
+    return basic, q2(total)
+
+
 # ---------------------------------------------------------------------------------------------- main calculation
 def calculate(
     structure: StructureData,

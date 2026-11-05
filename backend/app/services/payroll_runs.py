@@ -220,6 +220,7 @@ def recompute(
     system_codes = {c["code"] for c in (ps.inputs or {}).get("components", [])}
     if system_codes & {a["code"] for a in (ps.inputs or {}).get("adjustments", [])}:
         warns.append("MANUAL_COMPONENT_OVERLAP")  # likely double counting: a manual line and a system line share a code
+    warns.extend((ps.inputs or {}).get("component_warnings", []))  # e.g. ARREARS_PROPOSED, set by the component providers
     snap, ident = ps.employee_snapshot or {}, ps.identity or {}
     if snap.get("payment_mode", "bank_transfer") == "bank_transfer" and not (
         ident.get("bank_account") and ident.get("bank_ifsc")

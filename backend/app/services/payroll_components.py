@@ -23,7 +23,7 @@ from __future__ import annotations
 import copy
 import datetime as dt
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -50,6 +50,15 @@ class Provider:
     model: Any
     build: Callable[[list[Any]], list[dict]]  # rows (stable order) -> component lines
     live: tuple[str, ...] = LIVE
+    # optional hooks (all keep the global lock order of P7):
+    #   prepare      async, before `build`: may load extra data and set plain attributes on the rows (e.g. a line label)
+    #   lock_parents async, before this table's rows are locked in attach / publish: lock the parent rows first (loans)
+    #   after_paid   async, after rows moved processing -> paid in a publish (e.g. close a fully recovered loan)
+    #   warn         async, per user warning codes for the month (stored in inputs["component_warnings"])
+    prepare: Callable[[AsyncSession, list[Any]], Awaitable[None]] | None = None
+    lock_parents: Callable[[AsyncSession, list[uuid.UUID]], Awaitable[None]] | None = None
+    after_paid: Callable[[AsyncSession, list[Any], uuid.UUID], Awaitable[None]] | None = None
+    warn: Callable[[AsyncSession, list[uuid.UUID], dt.date], Awaitable[dict[uuid.UUID, list[str]]]] | None = None
 
 
 def _money(x: str | Decimal) -> str:
@@ -69,6 +78,12 @@ def _one_time_lines(rows: list[PayrollOneTimeItem]) -> list[dict]:
 
 
 PROVIDERS: list[Provider] = [Provider("one_time", PayrollOneTimeItem, _one_time_lines)]
+
+
+def ensure_providers() -> None:
+    """Import the provider modules (they call `register` on import). Done lazily because they import the payroll services
+    that import this module; every entry point below calls it first, so no process can run the engine without them."""
+    from . import payroll_arrears, payroll_encashment, payroll_loans  # noqa: F401
 
 
 def register(provider: Provider) -> None:
@@ -188,6 +203,7 @@ async def row_states(session: AsyncSession, rows: list[Any]) -> dict[uuid.UUID, 
 # ============================================================================================ caps
 async def live_counts(session: AsyncSession, user_ids: list[uuid.UUID], period: dt.date) -> dict[uuid.UUID, dict[str, int]]:
     """Per user: live one-time items and live component rows in total for the month (row counts, no money)."""
+    ensure_providers()
     out = {u: {"one_time": 0, "total": 0} for u in user_ids}
     if not user_ids:
         return out
@@ -218,12 +234,14 @@ def _sort_key(r: Any) -> tuple:
 async def pull_for(session: AsyncSession, payslips: list[Payslip], period: dt.date, *, lock: bool) -> None:
     """(Re)build `inputs['components']` of the given open payslips of ONE run month from the source tables (P2 / P5).
     `lock=True` (process) locks the pulled rows FOR UPDATE; the caller must already hold the run and payslip locks."""
+    ensure_providers()
     by_user = {p.user_id: p for p in payslips}
     if not by_user:
         return
     own_ids = [p.id for p in payslips if p.id is not None]
     sup_ids = [p.supersedes_id for p in payslips if p.supersedes_id is not None]
     lines: dict[uuid.UUID, list[dict]] = {u: [] for u in by_user}
+    warnings: dict[uuid.UUID, list[str]] = {u: [] for u in by_user}
     for prov in PROVIDERS:
         m = prov.model
         cond = [m.status == "pending"]
@@ -242,12 +260,21 @@ async def pull_for(session: AsyncSession, payslips: list[Payslip], period: dt.da
             if r.status == "processing" and r.payslip_id != p.id:
                 continue
             grouped.setdefault(r.user_id, []).append(r)
+        if prov.prepare is not None and grouped:
+            await prov.prepare(session, [r for rs in grouped.values() for r in rs])
         for uid, rs in grouped.items():
             rs.sort(key=_sort_key)
             lines[uid].extend(prov.build(rs))
+        if prov.warn is not None:
+            for uid, codes in (await prov.warn(session, list(by_user), period)).items():
+                warnings[uid].extend(codes)
     for uid, p in by_user.items():
         inputs = copy.deepcopy(p.inputs or {})
         inputs["components"] = lines[uid]
+        if warnings[uid]:
+            inputs["component_warnings"] = sorted(set(warnings[uid]))
+        else:
+            inputs.pop("component_warnings", None)
         p.inputs = inputs
 
 
@@ -277,6 +304,7 @@ def _changed() -> AppError:
 async def attach_processing(session: AsyncSession, payslips: list[Payslip], actor_id: uuid.UUID) -> None:
     """Process: the pulled rows become `processing` and point at their payslip. A row that is not in the state the pull
     left it in is COMPONENTS_CHANGED (cannot happen while the rows were locked by the same transaction)."""
+    ensure_providers()
     sources = _source_ids(payslips)
     for prov in PROVIDERS:
         want = sources.get(prov.type, {})
@@ -298,6 +326,7 @@ async def attach_processing(session: AsyncSession, payslips: list[Payslip], acto
 
 async def release_processing(session: AsyncSession, payslip_ids: list[uuid.UUID], actor_id: uuid.UUID) -> None:
     """Reopen: `processing` rows of these payslips go back to `pending` (`paid` rows are never touched)."""
+    ensure_providers()
     if not payslip_ids:
         return
     for prov in PROVIDERS:
@@ -311,10 +340,14 @@ async def release_processing(session: AsyncSession, payslip_ids: list[uuid.UUID]
 async def mark_paid(session: AsyncSession, payslips: list[Payslip], actor_id: uuid.UUID) -> None:
     """Publish: `processing` rows of the payslip become `paid`; `paid` rows of the superseded copy are carried over to the new
     payslip (`payslip_id` moves). Anything else is 409 COMPONENTS_CHANGED and the whole publish rolls back."""
+    ensure_providers()
     sources = _source_ids(payslips)
     for prov in PROVIDERS:
         want = sources.get(prov.type, {})
+        if prov.lock_parents is not None and want:
+            await prov.lock_parents(session, sorted(want))
         rows = await _lock_rows(session, prov, sorted(want))
+        paid_now: list[Any] = []
         for rid, p in want.items():
             row = rows.get(rid)
             if row is None or row.user_id != p.user_id:
@@ -322,6 +355,7 @@ async def mark_paid(session: AsyncSession, payslips: list[Payslip], actor_id: uu
             if row.status == "processing" and row.payslip_id == p.id:
                 row.status, row.updated_by, row.version = "paid", actor_id, row.version + 1
                 add_event(session, item_type=prov.type, item=row, action="pay", actor_id=actor_id)
+                paid_now.append(row)
             elif row.status == "paid" and p.supersedes_id is not None and row.payslip_id == p.supersedes_id:
                 row.payslip_id, row.updated_by, row.version = p.id, actor_id, row.version + 1
                 add_event(session, item_type=prov.type, item=row, action="carry", actor_id=actor_id)
@@ -329,3 +363,5 @@ async def mark_paid(session: AsyncSession, payslips: list[Payslip], actor_id: uu
                 continue
             else:
                 raise _changed()
+        if paid_now and prov.after_paid is not None:
+            await prov.after_paid(session, paid_now, actor_id)

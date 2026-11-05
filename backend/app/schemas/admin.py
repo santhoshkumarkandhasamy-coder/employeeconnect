@@ -68,6 +68,14 @@ class LeaveTypeIn(_Strict):
     requires_attachment_after_days: int | None = Field(default=None, ge=0, le=366)
     max_consecutive_days: int | None = Field(default=None, ge=1, le=366)
     is_active: StrictBool = True
+    # leave encashment (plan 15); keys that are not sent keep their stored value
+    encashable: StrictBool = False
+    encash_max_days_per_year: Decimal | None = Field(
+        default=None, gt=0, le=Decimal("999.9"), max_digits=4, decimal_places=1, allow_inf_nan=False
+    )
+    encash_min_balance: Decimal = Field(
+        default=Decimal("0.0"), ge=0, le=Decimal("999.9"), max_digits=4, decimal_places=1, allow_inf_nan=False
+    )
 
     _n = field_validator("name")(_name)
 
@@ -75,6 +83,13 @@ class LeaveTypeIn(_Strict):
     @classmethod
     def _code(cls, v: str) -> str:
         return v.upper()
+
+    @field_validator("encash_max_days_per_year", "encash_min_balance")
+    @classmethod
+    def _half_steps(cls, v: Decimal | None) -> Decimal | None:
+        if v is not None and (v * 2) != (v * 2).to_integral_value():
+            raise ValueError("must be in steps of 0.5")
+        return v
 
 
 class RoleIn(_Strict):

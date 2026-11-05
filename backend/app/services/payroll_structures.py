@@ -184,12 +184,20 @@ async def create_structure(session: AsyncSession, actor: Principal, user_id: uui
     except IntegrityError:
         await session.rollback()
         raise AppError("STRUCTURE_EXISTS", "A structure with this effective date already exists") from None
+    await _arrears_hook(session, actor, user_id, [body.effective_from])
     audit(
         session, action="payroll.structure.create", actor=actor, entity_type="salary_structure", entity_id=s.id,
         after={"user_id": str(user_id), "effective_from": body.effective_from.isoformat()},
     )  # fmt: skip
     await pc.commit(session)
     return await _one_out(session, s)
+
+
+async def _arrears_hook(session: AsyncSession, actor: Principal, user_id: uuid.UUID, dates: list[dt.date]) -> None:
+    """Plan 15 auto arrears: a structure change that reaches a published month recomputes the employee's proposal."""
+    from . import payroll_arrears  # imported here: payroll_arrears uses this module
+
+    await payroll_arrears.on_structure_change(session, actor, user_id, dates)
 
 
 async def _structure_or_404(session: AsyncSession, structure_id: uuid.UUID) -> SalaryStructure:
@@ -227,11 +235,14 @@ async def update_structure(session: AsyncSession, actor: Principal, structure_id
     for flag in ("pf_applicable", "pf_on_full_basic", "esi_applicable", "pt_applicable"):
         if getattr(s, flag) != getattr(body, flag):
             changed.append(flag)
+    old_effective = s.effective_from
     s.effective_from = body.effective_from
     s.components = new_components
     s.pf_applicable, s.pf_on_full_basic = body.pf_applicable, body.pf_on_full_basic
     s.esi_applicable, s.pt_applicable = body.esi_applicable, body.pt_applicable
     s.updated_by = actor.id
+    if changed:
+        await _arrears_hook(session, actor, s.user_id, [old_effective, body.effective_from])
     audit(
         session, action="payroll.structure.update", actor=actor, entity_type="salary_structure", entity_id=s.id,
         after={"user_id": str(s.user_id), "effective_from": body.effective_from.isoformat(), "fields": changed},
@@ -251,7 +262,9 @@ async def delete_structure(session: AsyncSession, actor: Principal, structure_id
             update(Payslip).where(Payslip.structure_id == s.id, Payslip.status == "draft").values(structure_id=None)
         )
     info = {"user_id": str(s.user_id), "effective_from": s.effective_from.isoformat()}
+    owner, effective = s.user_id, s.effective_from
     await session.delete(s)
+    await _arrears_hook(session, actor, owner, [effective])
     audit(
         session,
         action="payroll.structure.delete",

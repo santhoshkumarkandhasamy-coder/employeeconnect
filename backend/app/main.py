@@ -114,4 +114,5 @@ def create_app() -> FastAPI:
     app.include_router(admin_roles.router, prefix="/api")
     app.include_router(payroll.employee_router, prefix="/api")
     app.include_router(payroll.admin_router, prefix="/api")
+    app.include_router(payroll.me_router, prefix="/api")
     return app
