@@ -38,6 +38,8 @@ class _PayrollDetailsScreenState extends ConsumerState<PayrollDetailsScreen> {
   late String _mode = widget.initial.paymentMode;
   late bool _include = widget.initial.includeInPayroll;
   late bool _overtime = widget.initial.overtimeEligible;
+  late final _notice = TextEditingController(text: widget.initial.noticePeriodDays?.toString() ?? '');
+  bool _savingNotice = false;
   bool _saving = false;
   bool _savingOvertime = false;
 
@@ -45,7 +47,7 @@ class _PayrollDetailsScreenState extends ConsumerState<PayrollDetailsScreen> {
 
   @override
   void dispose() {
-    for (final c in [_designation, _bankName, _account, _ifsc, _pan, _uan, _esi]) {
+    for (final c in [_designation, _bankName, _account, _ifsc, _pan, _uan, _esi, _notice]) {
       c.dispose();
     }
     super.dispose();
@@ -123,6 +125,32 @@ class _PayrollDetailsScreenState extends ConsumerState<PayrollDetailsScreen> {
     }
   }
 
+  String? _validateNotice(String? v) {
+    final t = (v ?? '').trim();
+    if (t.isEmpty) return null;
+    final n = int.tryParse(t);
+    return n == null || n < 0 || n > 365 ? 'Enter whole days from 0 to 365, or leave empty' : null;
+  }
+
+  /// `notice_period_days` is saved on its own, with no password (contract 13.4).
+  Future<void> _saveNotice() async {
+    if (_savingNotice || _validateNotice(_notice.text) != null) {
+      setState(() {});
+      return;
+    }
+    setState(() => _savingNotice = true);
+    final repo = ref.read(payrollRepositoryProvider);
+    final t = _notice.text.trim();
+    try {
+      await repo.saveNoticePeriod(widget.employee.id, days: t.isEmpty ? null : int.parse(t));
+      if (mounted) payrollSnack(context, 'Notice period saved.');
+    } on ApiException catch (e) {
+      if (mounted) payrollSnack(context, payrollErrorMessage(e));
+    } finally {
+      if (mounted) setState(() => _savingNotice = false);
+    }
+  }
+
   InputDecoration _dec(String label, {String? helper}) => InputDecoration(
         labelText: label,
         helperText: helper,
@@ -175,6 +203,35 @@ class _PayrollDetailsScreenState extends ConsumerState<PayrollDetailsScreen> {
                 ),
                 value: _overtime,
                 onChanged: _savingOvertime ? null : _setOvertime,
+              ),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: TextFormField(
+                      key: const ValueKey('notice-days'),
+                      controller: _notice,
+                      keyboardType: TextInputType.number,
+                      decoration: _dec(
+                        'Notice period (days)',
+                        helper: d.lastWorkingDay == null
+                            ? 'Empty = company default. Saved straight away.'
+                            : 'Last working day ${d.lastWorkingDay}. Empty = company default.',
+                      ),
+                      validator: _validateNotice,
+                      autovalidateMode: AutovalidateMode.onUserInteraction,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: OutlinedButton(
+                      key: const ValueKey('save-notice'),
+                      onPressed: _savingNotice ? null : _saveNotice,
+                      child: const Text('Save'),
+                    ),
+                  ),
+                ],
               ),
               gap,
               TextFormField(controller: _bankName, maxLength: 60, decoration: _dec('Bank name')),

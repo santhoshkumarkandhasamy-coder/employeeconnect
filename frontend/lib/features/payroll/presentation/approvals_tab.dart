@@ -4,6 +4,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/widgets/state_views.dart';
 import '../../admin/presentation/admin_widgets.dart' show adminSelfIdProvider;
 import 'batch_screens.dart';
+import 'fnf_detail_screen.dart';
+import 'fnf_widgets.dart';
 import 'increment_detail_screen.dart';
 import 'increment_widgets.dart';
 import 'payroll_providers.dart';
@@ -47,6 +49,22 @@ class ApprovalsTab extends ConsumerWidget {
                         onTap: () async {
                           await Navigator.of(context).push<void>(
                             MaterialPageRoute<void>(builder: (_) => BatchDetailScreen(batchId: b.id)),
+                          );
+                          ref.invalidate(approvalQueueProvider);
+                        },
+                      ),
+                  ],
+                  if (q.fnfs.isNotEmpty) ...[
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      child: Text('Final settlements', style: Theme.of(context).textTheme.titleSmall),
+                    ),
+                    for (final f in q.fnfs)
+                      FnfTile(
+                        item: f,
+                        onTap: () async {
+                          await Navigator.of(context).push<void>(
+                            MaterialPageRoute<void>(builder: (_) => FnfDetailScreen(fnfId: f.id)),
                           );
                           ref.invalidate(approvalQueueProvider);
                         },

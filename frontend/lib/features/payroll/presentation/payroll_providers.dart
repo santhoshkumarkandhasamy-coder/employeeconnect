@@ -8,6 +8,7 @@ import '../domain/claims_models.dart';
 import '../domain/gross_split.dart';
 import '../domain/pay_items_models.dart';
 import '../domain/phase4a_models.dart';
+import '../domain/phase4b_models.dart';
 import '../domain/payroll_models.dart';
 
 /// All payroll state is autoDispose and in memory only: it is never written to
@@ -299,14 +300,43 @@ final gratuityProvider = FutureProvider.autoDispose.family<GratuityPage, Gratuit
   (ref, key) => ref.watch(payrollRepositoryProvider).gratuity(key.$1, page: key.$2),
 );
 
-/// Submitted increments (outside bulk batches) and batches waiting for a
-/// decision: the Approvals queue and its badge. The batch endpoint has no
-/// status filter, so the first page of batches is filtered here.
+// ---- phase 4b: full and final settlement (contract 18.8, 18.9) -------------------------
+
+class FnfListNotifier extends AdminPagedNotifier<FnfListItem, FnfQuery> {
+  @override
+  Future<Paged<FnfListItem>> fetchPage(FnfQuery arg, int page) =>
+      ref.read(payrollRepositoryProvider).fnfList(arg, page: page);
+
+  @override
+  String idOf(FnfListItem item) => item.id;
+}
+
+final fnfListProvider = AsyncNotifierProvider.autoDispose
+    .family<FnfListNotifier, PagedList<FnfListItem>, FnfQuery>(FnfListNotifier.new);
+
+final fnfProvider = FutureProvider.autoDispose.family<Fnf, String>(
+  (ref, id) => ref.watch(payrollRepositoryProvider).fnf(id),
+);
+
+/// Estimate of the final payslip; reloaded whenever the settlement is invalidated.
+final fnfPreviewProvider = FutureProvider.autoDispose.family<FnfPreview, String>(
+  (ref, id) => ref.watch(payrollRepositoryProvider).fnfPreview(id),
+);
+
+/// Employee: own settlement, or null. In memory only.
+final myFnfProvider = FutureProvider.autoDispose<MyFnf?>(
+  (ref) => ref.watch(payrollRepositoryProvider).myFnf(),
+);
+
+/// Submitted increments (outside bulk batches), batches and F&F settlements
+/// waiting for a decision: the Approvals queue and its badge. The batch endpoint
+/// has no status filter, so the first page of batches is filtered here.
 class ApprovalQueue {
-  const ApprovalQueue({required this.increments, required this.batches});
+  const ApprovalQueue({required this.increments, required this.batches, this.fnfs = const []});
   final List<Increment> increments;
   final List<IncrementBatch> batches;
-  int get count => increments.length + batches.length;
+  final List<FnfListItem> fnfs;
+  int get count => increments.length + batches.length + fnfs.length;
 }
 
 final approvalQueueProvider = FutureProvider.autoDispose<ApprovalQueue>((ref) async {
@@ -314,11 +344,14 @@ final approvalQueueProvider = FutureProvider.autoDispose<ApprovalQueue>((ref) as
   final results = await Future.wait([
     repo.increments(const IncrementQuery(status: 'submitted')),
     repo.incrementBatches(),
+    repo.fnfList(const FnfQuery(status: 'submitted')),
   ]);
   final incs = (results[0] as Paged<Increment>).items;
   final batches = (results[1] as Paged<IncrementBatch>).items;
+  final fnfs = (results[2] as Paged<FnfListItem>).items;
   return ApprovalQueue(
     increments: [for (final i in incs) if (!i.isInBatch) i],
     batches: [for (final b in batches) if (!b.isCancelled && b.submittedCount > 0) b],
+    fnfs: [for (final f in fnfs) if (f.status == 'submitted') f],
   );
 });

@@ -18,6 +18,7 @@ import 'increment_detail_screen.dart';
 import 'increment_form_screen.dart';
 import 'increment_widgets.dart' show effectiveLabel;
 import 'payroll_details_screen.dart';
+import 'record_exit_screen.dart';
 import 'payroll_providers.dart';
 import 'payroll_widgets.dart';
 import 'structure_form_screen.dart';
@@ -171,6 +172,17 @@ class _EmployeePayrollScreenState extends ConsumerState<EmployeePayrollScreen> {
                       label: const Text('New increment'),
                     ),
                     TextButton.icon(
+                      key: const ValueKey('record-exit'),
+                      onPressed: () async {
+                        await Navigator.of(context).push<void>(
+                          MaterialPageRoute<void>(builder: (_) => RecordExitScreen(employee: widget.employee)),
+                        );
+                        ref.invalidate(payrollDetailsProvider);
+                      },
+                      icon: const Icon(Icons.logout),
+                      label: const Text('Record exit'),
+                    ),
+                    TextButton.icon(
                       key: const ValueKey('recalc-arrears'),
                       onPressed: _recalculateArrears,
                       icon: const Icon(Icons.calculate_outlined),
@@ -266,6 +278,8 @@ class _EmployeePayrollScreenState extends ConsumerState<EmployeePayrollScreen> {
                         _row('Designation', d.designation),
                         _row('Payment mode', paymentModeLabel(d.paymentMode)),
                         _row('In payroll', d.includeInPayroll ? 'Yes' : 'No'),
+                        _row('Notice period', d.noticePeriodDays == null ? 'Company default' : '${d.noticePeriodDays} days'),
+                        if (d.lastWorkingDay != null) _row('Last working day', d.lastWorkingDay),
                         _row('Bank', d.bankName),
                         _row('Account', d.bankAccount),
                         _row('IFSC', d.bankIfsc),

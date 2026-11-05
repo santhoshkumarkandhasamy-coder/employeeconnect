@@ -32,6 +32,8 @@ const _alertText = <String, String>{
   'RUN_NOT_CREATED': 'The payroll run for this month has not been created and the process day has passed.',
   'RUN_NOT_PROCESSED': 'The payroll run is not processed yet and the process day has passed.',
   'RUN_NOT_PUBLISHED': 'The run is processed but not published and the pay date has arrived.',
+  'FNF_PENDING_APPROVAL': 'A final settlement is waiting for approval.',
+  'EXIT_WITHOUT_FNF': 'Someone has left without a final settlement, or with an active loan. Record the exit in Pay items.',
 };
 
 /// Payroll dashboard (plan 14 phase 1): month totals, department cost, 12-month

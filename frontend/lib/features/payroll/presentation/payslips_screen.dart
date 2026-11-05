@@ -12,6 +12,7 @@ import '../domain/claims_models.dart';
 import 'my_claims_screen.dart';
 import 'my_loans_screen.dart';
 import 'my_overtime_screen.dart';
+import 'my_fnf_card.dart';
 import 'payslip_detail_screen.dart';
 
 /// "Payslips" under More: the signed-in user's published payslips, one row per
@@ -71,6 +72,7 @@ class _PayslipsScreenState extends ConsumerState<PayslipsScreen> {
         ),
         body: Column(
           children: [
+            const MyFnfCard(),
             YearSelector(
               year: _year,
               maxYear: now.year,
@@ -86,7 +88,9 @@ class _PayslipsScreenState extends ConsumerState<PayslipsScreen> {
                 ),
                 data: (items) => RefreshIndicator(
                   onRefresh: () async {
-                    ref.invalidate(myPayslipsProvider(_year));
+                    ref
+                      ..invalidate(myFnfProvider)
+                      ..invalidate(myPayslipsProvider(_year));
                     await ref.read(myPayslipsProvider(_year).future).then((_) {}, onError: (Object _) {});
                   },
                   child: items.isEmpty
@@ -140,6 +144,13 @@ class PayslipTile extends StatelessWidget {
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (item.isFinal)
+              const Chip(
+                key: ValueKey('final-chip'),
+                label: Text('Final settlement'),
+                visualDensity: VisualDensity.compact,
+                padding: EdgeInsets.zero,
+              ),
             if (item.revised)
               const Chip(
                 label: Text('Revised'),

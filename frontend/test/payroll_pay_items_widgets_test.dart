@@ -89,7 +89,16 @@ void main() {
       await tester.tap(find.text('Pay items'));
       await tester.pumpAndSettle();
       for (final s in PaySection.values.where((s) => s != PaySection.overtime)) {
-        expect(find.byKey(ValueKey('pay-section-${s.name}')), findsOneWidget);
+        final chip = find.byKey(ValueKey('pay-section-${s.name}'));
+        if (chip.evaluate().isEmpty) {
+          // the chip row scrolls sideways; later chips are built on demand
+          await tester.scrollUntilVisible(
+            chip,
+            200,
+            scrollable: find.descendant(of: find.byType(PayItemsTab), matching: find.byType(Scrollable)).first,
+          );
+        }
+        expect(chip, findsOneWidget);
       }
       expect(find.byKey(const ValueKey('pay-section-overtime')), findsNothing);
       expect(find.text('One-time'), findsOneWidget);

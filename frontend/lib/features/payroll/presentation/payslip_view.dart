@@ -36,6 +36,16 @@ class PayslipView extends StatelessWidget {
           '${p.revision > 1 ? ' (revision ${p.revision})' : ''}',
           style: theme.textTheme.titleMedium,
         ),
+        if (p.isFinalSettlement)
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: Chip(
+              key: ValueKey('final-payslip-chip'),
+              avatar: Icon(Icons.logout, size: 16),
+              label: Text('Final settlement'),
+              visualDensity: VisualDensity.compact,
+            ),
+          ),
         SectionCard(
           title: 'Employee',
           children: [

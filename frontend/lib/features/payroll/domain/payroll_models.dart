@@ -57,11 +57,15 @@ class PayslipListItem {
     required this.revised,
     this.publishedAt,
     this.payDate,
+    this.isFinal = false,
   });
   final String id;
   final String period;
   final int revision;
   final bool revised;
+
+  /// Contract 18.1 (4b): the payslip of a full and final settlement.
+  final bool isFinal;
   final DateTime? publishedAt;
   final String? payDate;
 
@@ -72,6 +76,7 @@ class PayslipListItem {
         revised: j['revised'] == true,
         publishedAt: parseTimestamp(j['published_at']),
         payDate: _opt(j['pay_date']),
+        isFinal: j['is_final'] == true,
       );
 
   static List<PayslipListItem> parseList(Map<String, dynamic> j) =>
@@ -306,12 +311,20 @@ class Payslip {
     this.inputs,
     this.errors = const [],
     this.warnings = const [],
+    this.isFinal = false,
+    this.finalSettlement,
   });
 
   final String id;
   final String period;
   final int revision;
   final String status;
+
+  /// Employee shape (4b): this is the final settlement payslip.
+  final bool isFinal;
+
+  /// Admin shape (4b): the F&F that this payslip settles, or null.
+  final PayslipFinalSettlement? finalSettlement;
   final DateTime? publishedAt;
   final String? payDate;
   final String companyName;
@@ -370,8 +383,27 @@ class Payslip {
       inputs: j['inputs'] is Map ? PayslipInputs.fromJson(_m(j['inputs'])) : null,
       errors: _strings(j['errors']),
       warnings: _strings(j['warnings']),
+      isFinal: j['is_final'] == true,
+      finalSettlement: j['final_settlement'] is Map
+          ? PayslipFinalSettlement(
+              fnfId: _s(_m(j['final_settlement'])['fnf_id']),
+              status: _s(_m(j['final_settlement'])['status']),
+            )
+          : null,
     );
   }
+
+  /// A final settlement payslip, in either shape.
+  bool get isFinalSettlement => isFinal || finalSettlement != null;
+}
+
+/// `final_settlement` of an AdminPayslip (contract 18.1).
+class PayslipFinalSettlement {
+  const PayslipFinalSettlement({required this.fnfId, required this.status});
+  final String fnfId;
+
+  /// `approved` | `settled`.
+  final String status;
 }
 
 // ---- admin: runs ----------------------------------------------------------------------
@@ -788,6 +820,8 @@ class PayrollDetails {
     this.esiIpNumber,
     this.updatedAt,
     this.overtimeEligible = false,
+    this.noticePeriodDays,
+    this.lastWorkingDay,
   });
   final String userId;
   final String? designation;
@@ -805,6 +839,12 @@ class PayrollDetails {
   /// Contract 17.1 (3b): counts for overtime when the switch is on.
   final bool overtimeEligible;
 
+  /// Contract 13.4 (4b): null = the company default.
+  final int? noticePeriodDays;
+
+  /// Read-only, written by the full and final settlement.
+  final String? lastWorkingDay;
+
   factory PayrollDetails.fromJson(Map<String, dynamic> j) => PayrollDetails(
         userId: _s(j['user_id']),
         designation: _opt(j['designation']),
@@ -819,6 +859,8 @@ class PayrollDetails {
         revealed: j['revealed'] == true,
         updatedAt: parseTimestamp(j['updated_at']),
         overtimeEligible: j['overtime_eligible'] == true,
+        noticePeriodDays: j['notice_period_days'] is num ? (j['notice_period_days'] as num).toInt() : null,
+        lastWorkingDay: _opt(j['last_working_day']),
       );
 }
 
@@ -958,6 +1000,8 @@ const Map<String, String> payrollWarningLabels = {
   'NO_BANK_DETAILS': 'No bank details',
   'NO_PAN': 'No PAN',
   'STRUCTURE_CHANGED': 'Structure changed',
+  'FNF_SETTLEMENT_ONLY': 'Settlement only: no salary for this month',
+  'EXIT_IN_MONTH': 'Employee leaves this month',
   'NOT_ELIGIBLE': 'No longer eligible',
   ...payItemWarningLabels,
 };
@@ -1085,7 +1129,8 @@ String payrollErrorMessage(ApiException e) {
           'set up to 12 months ahead.';
     case 'SECOND_PERSON_REQUIRED':
       return 'A different person must do this: the person who processed the run, last edited a payslip '
-          'in it, verified a claim, or made or submitted an increment cannot also publish or approve it.';
+          'in it, verified a claim, or made, edited or submitted an increment or final settlement '
+          'cannot also publish or approve it.';
     case 'APPROVAL_REQUIRED':
       return 'This salary change needs approval. Use an increment: create it, submit it, '
           'and another person approves it.';
@@ -1097,7 +1142,7 @@ String payrollErrorMessage(ApiException e) {
     case 'LATER_STRUCTURE_EXISTS':
       return 'A salary structure starting after that month already exists, so this increment would be overridden.';
     case 'NOT_SUBMITTED':
-      return 'This increment is no longer waiting for approval. Reload to see its state.';
+      return 'This record is no longer waiting for approval. Reload to see its state.';
     case 'NOT_DRAFT':
       return 'Only a draft can be changed or submitted. Reload to see its state.';
     case 'AFTER_EXIT':
@@ -1108,6 +1153,22 @@ String payrollErrorMessage(ApiException e) {
       return 'The percent is above the allowed maximum or not a valid percent.';
     case 'TOO_MANY_ROWS':
       return 'More than 500 employees are in scope. Narrow it by department or employee.';
+    case 'FNF_EXISTS':
+      return 'This employee already has a final settlement that is not cancelled. Open it instead.';
+    case 'FNF_OPEN':
+      return 'This employee has a final settlement in progress. Cancel it or finish it before activating the account.';
+    case 'FNF_NOT_REVOCABLE':
+      return 'This settlement cannot be revoked because a pay item of it is already being paid.';
+    case 'FNF_NEGATIVE':
+      return 'The employee would owe the company money. Record a loan as paid outside payroll or reduce the items, '
+          'then submit again.';
+    case 'FNF_NOT_INCLUDED':
+      return 'This payslip does not carry every line of the final settlement. Reopen the payroll run, '
+          'refresh it and process it again, then publish.';
+    case 'FNF_MANAGED':
+      return 'This item belongs to a final settlement. Change it from the settlement instead.';
+    case 'LOAN_UNRESOLVED':
+      return 'Choose how each active loan is settled (through payroll or paid outside) before submitting.';
     case 'IMPORT_NOT_CHECKED':
       return 'This file has not been checked in the last 15 minutes. Check it again, then import.';
     case 'FORBIDDEN':

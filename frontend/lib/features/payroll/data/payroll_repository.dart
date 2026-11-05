@@ -11,6 +11,7 @@ import '../../../core/files/file_service.dart' show fileIdFromUrl;
 import '../domain/claims_models.dart';
 import '../domain/pay_items_models.dart';
 import '../domain/phase4a_models.dart';
+import '../domain/phase4b_models.dart';
 import '../domain/payroll_models.dart';
 
 /// A downloaded file held in memory (a payslip PDF or the register workbook).
@@ -766,6 +767,89 @@ class PayrollRepository {
           if (e is Map && e['encashable'] == true) LeaveTypeRef.fromJson(e),
     ];
   }
+
+  // ---- full and final settlement, admin (18.8) ------------------------------------
+
+  Future<Paged<FnfListItem>> fnfList(FnfQuery q, {int page = 1}) async => Paged.parse(
+        await _json('GET', '$_a/fnf', query: {
+          if (q.status != null) 'status': q.status,
+          if (q.q.trim().isNotEmpty) 'q': q.q.trim(),
+          'page': page,
+          'page_size': 20,
+        },),
+        FnfListItem.fromJson,
+      );
+
+  Future<Fnf> fnf(String id) async => Fnf.fromJson(await _json('GET', '$_a/fnf/$id'));
+
+  Future<Fnf> createFnf(String userId, Map<String, Object?> body) async =>
+      Fnf.fromJson(await _json('POST', '$_a/employees/$userId/fnf', body: body));
+
+  Future<Fnf> updateFnf(String id, FnfEdit edit, {required int expectedVersion}) async =>
+      Fnf.fromJson(await _json('PUT', '$_a/fnf/$id', body: edit.toJson(expectedVersion)));
+
+  Future<FnfPreview> fnfPreview(String id) async =>
+      FnfPreview.fromJson(await _json('GET', '$_a/fnf/$id/preview'));
+
+  Future<Fnf> submitFnf(String id, {required int expectedVersion}) async => Fnf.fromJson(
+        await _json('POST', '$_a/fnf/$id/submit', body: {'expected_version': expectedVersion}),
+      );
+
+  Future<Fnf> withdrawFnf(String id, {required int expectedVersion}) async => Fnf.fromJson(
+        await _json('POST', '$_a/fnf/$id/withdraw', body: {'expected_version': expectedVersion}),
+      );
+
+  /// Needs `payroll.approve` and the caller's own password (step-up, never kept).
+  Future<Fnf> approveFnf(
+    String id, {
+    required int expectedVersion,
+    required String currentPassword,
+    String? comment,
+  }) async =>
+      Fnf.fromJson(await _json('POST', '$_a/fnf/$id/approve', body: {
+        'expected_version': expectedVersion,
+        'comment': (comment == null || comment.trim().isEmpty) ? null : comment.trim(),
+        'current_password': currentPassword,
+      },),);
+
+  Future<Fnf> rejectFnf(String id, {required int expectedVersion, required String comment}) async =>
+      Fnf.fromJson(await _json('POST', '$_a/fnf/$id/reject', body: {
+        'expected_version': expectedVersion,
+        'comment': comment.trim(),
+      },),);
+
+  /// Needs `payroll.approve` and the caller's own password (step-up, never kept).
+  Future<Fnf> revokeFnf(
+    String id, {
+    required int expectedVersion,
+    required String reason,
+    required String currentPassword,
+  }) async =>
+      Fnf.fromJson(await _json('POST', '$_a/fnf/$id/revoke', body: {
+        'expected_version': expectedVersion,
+        'reason': reason.trim(),
+        'current_password': currentPassword,
+      },),);
+
+  Future<Fnf> cancelFnf(String id, String reason) async =>
+      Fnf.fromJson(await _json('POST', '$_a/fnf/$id/cancel', body: {'reason': reason.trim()}));
+
+  Future<PayrollFile> fnfStatement(String id) =>
+      _file('GET', '$_a/fnf/$id/statement', fallbackName: 'fnf-statement.pdf', ext: '.pdf');
+
+  /// Notice period of the employee's payroll details, sent alone (no password,
+  /// contract 13.4). Null = the company default.
+  Future<PayrollDetails> saveNoticePeriod(String userId, {required int? days}) async =>
+      PayrollDetails.fromJson(
+        await _json('PUT', '$_a/employees/$userId/details', body: {'notice_period_days': days}),
+      );
+
+  // ---- full and final settlement, employee (18.9) -----------------------------------
+
+  Future<MyFnf?> myFnf() async => MyFnf.parse(await _json('GET', '/me/fnf'));
+
+  Future<PayrollFile> myFnfStatement() =>
+      _file('GET', '/me/fnf/statement', fallbackName: 'fnf-statement.pdf', ext: '.pdf');
 
   // ---- admin payslips -------------------------------------------------------------
 

@@ -14,6 +14,7 @@ import '../domain/payroll_logic.dart';
 import '../domain/payroll_models.dart';
 import '../domain/payroll_money.dart';
 import 'payroll_providers.dart';
+import 'fnf_detail_screen.dart';
 import 'payroll_widgets.dart';
 import 'payslip_view.dart';
 
@@ -328,6 +329,20 @@ class _PayslipEditorState extends ConsumerState<PayslipEditor> {
           const SizedBox(height: 8),
           if (_p.errors.isNotEmpty || _p.warnings.isNotEmpty || _p.hold)
             FlagChips(errors: _p.errors, warnings: _p.warnings, hold: _p.hold),
+          if (_p.finalSettlement != null)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: ActionChip(
+                key: const ValueKey('final-settlement-chip'),
+                avatar: const Icon(Icons.logout, size: 16),
+                label: Text(
+                  _p.finalSettlement!.status == 'settled' ? 'Final settlement (settled)' : 'Final settlement (approved)',
+                ),
+                onPressed: () => Navigator.of(context).push<void>(
+                  MaterialPageRoute<void>(builder: (_) => FnfDetailScreen(fnfId: _p.finalSettlement!.fnfId)),
+                ),
+              ),
+            ),
           if (self)
             const Padding(
               padding: EdgeInsets.only(top: 8),

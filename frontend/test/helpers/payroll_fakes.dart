@@ -11,6 +11,7 @@ import 'package:employee_connect/features/payroll/data/payroll_repository.dart';
 import 'package:employee_connect/features/payroll/domain/claims_models.dart';
 import 'package:employee_connect/features/payroll/domain/pay_items_models.dart';
 import 'package:employee_connect/features/payroll/domain/payroll_models.dart';
+import 'package:employee_connect/features/payroll/domain/phase4b_models.dart';
 import 'package:employee_connect/features/payroll/presentation/payroll_providers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -129,6 +130,14 @@ class FakeDelivery implements PayrollFileDelivery {
 
 class FakeRepo extends PayrollRepository {
   FakeRepo() : super(Dio());
+
+  // phase 4b defaults: nothing to approve, no own settlement
+  @override
+  Future<Paged<FnfListItem>> fnfList(FnfQuery q, {int page = 1}) async =>
+      const Paged(items: [], page: 1, total: 0, pageSize: 20);
+
+  @override
+  Future<MyFnf?> myFnf() async => null;
 
   @override
   Future<Map<String, dynamic>> dashboard(String period) async => dashboardJson;
