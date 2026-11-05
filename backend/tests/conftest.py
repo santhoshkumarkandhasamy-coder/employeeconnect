@@ -93,6 +93,11 @@ TABLES = [
     "payroll_runs",
     "payslips",
     "fnf_settlements",
+    "payroll_publish_requests",
+    "payslip_deliveries",
+    "company_bank_accounts",
+    "payroll_payment_batches",
+    "payroll_payment_lines",
     "statutory_challans",
     "statutory_challan_events",
     "payroll_import_batches",
@@ -145,6 +150,7 @@ def _adapt_metadata_for_sqlite() -> None:
                 "::" in str(c.sqltext)
                 or "<@" in str(c.sqltext)
                 or "ALL (" in str(c.sqltext)
+                or "ANY (" in str(c.sqltext)
                 or "btrim" in str(c.sqltext)
                 or "char_length" in str(c.sqltext)
                 or "extract(" in str(c.sqltext)
@@ -175,6 +181,17 @@ def _adapt_metadata_for_sqlite() -> None:
     fnf_contrib.type = JSON()
     fnf_contrib.server_default = None
     fnf_contrib.default = ColumnDefault(list)
+    for tname, cname in (  # migration 0026: text[] in Postgres
+        ("payroll_runs", "contributors"),
+        ("payslips", "contributors"),
+        ("payroll_publish_requests", "makers"),
+        ("payroll_payment_batches", "contributors"),
+        ("payroll_payment_lines", "flags"),
+    ):
+        arr = Base.metadata.tables[tname].c[cname]
+        arr.type = JSON()
+        arr.server_default = None
+        arr.default = ColumnDefault(list)
     wd = Base.metadata.tables["shifts"].c.working_days
     wd.type = JSON()
     wd.server_default = None

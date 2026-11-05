@@ -210,7 +210,9 @@ class EmployeePayrollDetails(TimestampMixin, Base):
         CheckConstraint(
             "notice_period_days IS NULL OR notice_period_days BETWEEN 0 AND 365", name="ck_employee_payroll_details_notice_days"
         ),
+        CheckConstraint("(bank_changed_by IS NULL) = (bank_changed_at IS NULL)", name="ck_employee_payroll_details_bank_changed"),
         Index("ix_employee_payroll_details_updated_by", "updated_by"),
+        Index("ix_employee_payroll_details_bank_changed_by", "bank_changed_by"),
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), primary_key=True)
@@ -226,6 +228,9 @@ class EmployeePayrollDetails(TimestampMixin, Base):
     pan: Mapped[str | None] = mapped_column("pan_enc", EncryptedString)
     uan: Mapped[str | None] = mapped_column("uan_enc", EncryptedString)
     esi_ip_number: Mapped[str | None] = mapped_column("esi_ip_number_enc", EncryptedString)
+    # migration 0026: set by the details service whenever payment mode / bank name / account / IFSC change; can never be cleared
+    bank_changed_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+    bank_changed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     updated_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
 
 
@@ -260,6 +265,8 @@ class PayrollRun(TimestampMixin, Base):
     published_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
     processed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    # migration 0026: user ids (text) of everybody who created, refreshed, processed or reopened the run; append-only (trigger)
+    contributors: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default=text("'{}'"))
 
 
 class Payslip(TimestampMixin, Base):
@@ -330,6 +337,8 @@ class Payslip(TimestampMixin, Base):
     superseded_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     created_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
     updated_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+    # migration 0026: everybody who edited, processed, revised, refreshed or reopened it; append-only, frozen once published
+    contributors: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default=text("'{}'"))
 
 
 _LWD_MONTH = "make_date(extract(year from last_working_day)::int, extract(month from last_working_day)::int, 1)"

@@ -109,6 +109,12 @@ DEFAULTS: dict[str, Any] = {
     "payroll.notice_period_days": 30,
     "payroll.notice_recovery_basis": "gross",
     "payroll.notice_recovery_divisor": 30,
+    # plan 17, work package 5a (publish requests, bank payment file)
+    "payroll.publish_request_ttl_hours": 72,
+    "payroll.bank_file_requires_second_person": True,
+    "payroll.bank_file_format": "generic_neft_csv",
+    "payroll.bank_payment_type": "NEFT",
+    "payroll.bank_change_alert_days": 30,
 }
 
 _ENUMS = {
@@ -118,6 +124,8 @@ _ENUMS = {
     "payroll.encashment_basis": ("basic", "gross"),
     "payroll.gratuity_wage_basis": ("basic", "basic_or_half_gross"),
     "payroll.notice_recovery_basis": ("gross", "basic"),
+    "payroll.bank_file_format": ("generic_neft_csv",),
+    "payroll.bank_payment_type": ("NEFT", "RTGS", "IMPS"),
 }
 _BOOLS = {
     "payroll.lop_absent_days",
@@ -131,6 +139,7 @@ _BOOLS = {
     "payroll.overtime_include_auto_closed",
     APPROVAL_KEY,
     "payroll.ctc_include_gratuity",
+    "payroll.bank_file_requires_second_person",
 }
 _NUMBERS = {  # key -> (min, max), at most 2 decimals
     "payroll.pf_employee_rate_pct": (0, 20),
@@ -159,6 +168,8 @@ _INTS = {  # key -> (min, max), whole numbers
     "payroll.gratuity_min_years": (0, 10),
     "payroll.notice_period_days": (0, 365),
     "payroll.notice_recovery_divisor": (1, 31),
+    "payroll.publish_request_ttl_hours": (1, 336),
+    "payroll.bank_change_alert_days": (0, 90),
 }
 _TEXTS = {"payroll.company_address": (0, 300), "payroll.payslip_footer": (0, 200)}
 

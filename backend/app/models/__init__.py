@@ -20,6 +20,13 @@ from .payroll import (
     StatutoryChallan,
     StatutoryChallanEvent,
 )
+from .payroll_controls import (
+    CompanyBankAccount,
+    PayrollPaymentBatch,
+    PayrollPaymentLine,
+    PayrollPublishRequest,
+    PayslipDelivery,
+)
 from .payroll_items import (
     LeaveEncashment,
     OvertimeDay,
@@ -41,5 +48,6 @@ __all__ = [
     "DutyLocation", "DutyLocationAssignment", "OnDutyRequest", "OnDutyVisit",
     "Company", "License", "SalaryStructure", "SalaryIncrement", "SalaryIncrementBatch", "EmployeePayrollDetails", "FnfSettlement", "PayrollRun", "Payslip", "StatutoryChallan", "StatutoryChallanEvent",
     "PayrollItemEvent", "PayrollImportBatch", "PayrollOneTimeItem", "PayrollLoan", "PayrollLoanInstallment", "PayrollArrears", "LeaveEncashment", "ReimbursementClaim", "OvertimeDay",
+    "PayrollPublishRequest", "PayslipDelivery", "CompanyBankAccount", "PayrollPaymentBatch", "PayrollPaymentLine",
     "FoodEnrollment", "Announcement", "AnnouncementDepartment", "AnnouncementRead",
 ]
