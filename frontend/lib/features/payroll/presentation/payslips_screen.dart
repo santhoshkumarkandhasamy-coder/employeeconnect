@@ -8,6 +8,7 @@ import '../../admin/presentation/admin_widgets.dart' show NoPermissionScreen, ad
 import '../domain/payroll_models.dart';
 import 'payroll_providers.dart';
 import 'payroll_widgets.dart';
+import 'my_loans_screen.dart';
 import 'payslip_detail_screen.dart';
 
 /// "Payslips" under More: the signed-in user's published payslips, one row per
@@ -31,7 +32,19 @@ class _PayslipsScreenState extends ConsumerState<PayslipsScreen> {
     final async = ref.watch(myPayslipsProvider(_year));
     return SecureScreen(
       child: Scaffold(
-        appBar: AppBar(title: const Text('Payslips')),
+        appBar: AppBar(
+          title: const Text('Payslips'),
+          actions: [
+            IconButton(
+              key: const ValueKey('open-my-loans'),
+              tooltip: 'My loans',
+              icon: const Icon(Icons.account_balance_wallet_outlined),
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(builder: (_) => const MyLoansScreen()),
+              ),
+            ),
+          ],
+        ),
         body: Column(
           children: [
             YearSelector(

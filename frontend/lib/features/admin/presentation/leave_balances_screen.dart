@@ -41,7 +41,7 @@ class _LeaveBalancesScreenState extends ConsumerState<LeaveBalancesScreen> {
             keyboardType: const TextInputType.numberWithOptions(decimal: true),
             decoration: InputDecoration(
               labelText: 'Quota (days)',
-              helperText: 'At least ${r.minQuota} (used + pending)',
+              helperText: 'At least ${r.minQuota} (used + pending + encashed)',
             ),
             validator: (s) => validateQuota(s, r.minQuota),
           ),
@@ -133,7 +133,9 @@ class _LeaveBalancesScreenState extends ConsumerState<LeaveBalancesScreen> {
                           for (final r in rows)
                             ListTile(
                               title: Text(r.label),
-                              subtitle: Text('Used ${r.used}, pending ${r.pending}'),
+                              subtitle: Text(
+                                'Used ${r.used}, pending ${r.pending}${r.encashed > 0 ? ', encashed ${r.encashed}' : ''}',
+                              ),
                               trailing: Text(
                                 '${_edited[r.leaveTypeId] ?? r.quota} days',
                                 style: TextStyle(
@@ -165,11 +167,11 @@ class _LeaveBalancesScreenState extends ConsumerState<LeaveBalancesScreen> {
   }
 }
 
-/// Quota must be a number between [min] (used + pending) and 366.
+/// Quota must be a number between [min] (used + pending + encashed) and 366.
 String? validateQuota(String? raw, double min) {
   final n = double.tryParse((raw ?? '').trim());
   if (n == null || n.isNaN || n.isInfinite) return 'Enter a number';
-  if (n < min) return 'Cannot be below $min (used + pending)';
+  if (n < min) return 'Cannot be below $min (used + pending + encashed)';
   if (n > 366) return 'Cannot be more than 366';
   return null;
 }

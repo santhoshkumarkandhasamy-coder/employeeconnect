@@ -75,3 +75,11 @@ int sumPaise(Iterable<String?> amounts) {
   }
   return total;
 }
+
+/// Like [formatRupees] for a value that may carry a leading minus
+/// (arrears differences): `"-1600.00"` -> `-₹1,600.00`.
+String formatSignedRupees(String? money) {
+  if (money == null) return '-';
+  if (money.startsWith('-')) return '-${formatRupees(money.substring(1))}';
+  return formatRupees(money);
+}

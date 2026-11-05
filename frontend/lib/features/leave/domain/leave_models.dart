@@ -93,6 +93,7 @@ class LeaveBalanceItem {
     required this.used,
     required this.pending,
     required this.remaining,
+    this.encashed = 0,
   });
   final String leaveTypeId;
   final String code;
@@ -100,6 +101,9 @@ class LeaveBalanceItem {
   final double quota;
   final double used;
   final double pending;
+
+  /// Days paid out as leave encashment (contract 17.5); 0 on older servers.
+  final double encashed;
   final double remaining;
 
   factory LeaveBalanceItem.fromJson(Map<String, dynamic> j) {
@@ -111,6 +115,7 @@ class LeaveBalanceItem {
       quota: n('quota'),
       used: n('used'),
       pending: n('pending'),
+      encashed: n('encashed'),
       remaining: n('remaining'),
     );
   }

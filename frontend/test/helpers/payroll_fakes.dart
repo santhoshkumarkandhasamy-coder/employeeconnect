@@ -4,8 +4,10 @@ import 'package:dio/dio.dart';
 import 'package:employee_connect/core/api/api_exception.dart';
 import 'package:employee_connect/features/admin/presentation/admin_widgets.dart';
 import 'package:employee_connect/features/attendance/domain/attendance_models.dart' show Paged;
+import 'package:employee_connect/features/payroll/data/import_file_picker.dart';
 import 'package:employee_connect/features/payroll/data/payroll_delivery.dart';
 import 'package:employee_connect/features/payroll/data/payroll_repository.dart';
+import 'package:employee_connect/features/payroll/domain/pay_items_models.dart';
 import 'package:employee_connect/features/payroll/domain/payroll_models.dart';
 import 'package:employee_connect/features/payroll/presentation/payroll_providers.dart';
 import 'package:flutter/material.dart';
@@ -103,6 +105,14 @@ Map<String, dynamic> rowJson({String id = 'p1', List<String> errors = const [], 
       'errors': errors,
       'warnings': <String>[],
     };
+
+class FakePicker implements PayrollImportPicker {
+  FakePicker(this.file);
+  PickedWorkbook? file;
+
+  @override
+  Future<PickedWorkbook?> pickWorkbook() async => file;
+}
 
 class FakeDelivery implements PayrollFileDelivery {
   final List<PayrollFile> files = [];
@@ -387,6 +397,313 @@ class FakeRepo extends PayrollRepository {
   @override
   Future<Paged<PayrollEmployee>> employees(PayrollEmployeeQuery q, {int page = 1}) async =>
       Paged(items: employeeList, page: 1, total: employeeList.length, pageSize: 20);
+
+  // ---- pay items (section 17) ---------------------------------------------------
+
+  List<OneTimeItem> itemList = [];
+  ApiException? itemsError;
+  ApiException? writeError;
+  int pwRejects = 0;
+  final List<Map<String, Object?>> itemCalls = [];
+  final List<ItemQuery> itemQueries = [];
+  ImportReport? dryReport;
+  ApiException? importError;
+  ImportCommit commitResult = const ImportCommit(batchId: 'b2', period: '2026-10', created: 2);
+  final List<Map<String, Object?>> importCalls = [];
+  List<ImportBatch> batchList = [];
+  final List<String> batchCancels = [];
+  List<Loan> loanList = [];
+  Loan? loanDetail;
+  final List<Map<String, Object?>> loanCalls = [];
+  List<MyLoan> myLoanList = [];
+  MyLoan? myLoanDetail;
+  ApiException? myLoansError;
+  List<Arrears> arrearsList = [];
+  Arrears? recalcResult;
+  final List<Map<String, Object?>> arrearsCalls = [];
+  List<Encashment> encashmentList = [];
+  EncashmentQuote? quote;
+  ApiException? quoteError;
+  List<LeaveTypeRef> encashableTypes = const [LeaveTypeRef(id: 'lt1', code: 'EL', name: 'Earned Leave')];
+  final List<Map<String, Object?>> encashCalls = [];
+
+  void _writeCheck(String? pw) {
+    if (pw != null && pwRejects > 0) {
+      pwRejects--;
+      throw const ApiException(code: 'REAUTH_FAILED', message: 'no', status: 403);
+    }
+    if (writeError != null) throw writeError!;
+  }
+
+  @override
+  Future<Paged<OneTimeItem>> oneTimeItems(ItemQuery q, {int page = 1}) async {
+    itemQueries.add(q);
+    if (itemsError != null) throw itemsError!;
+    return Paged(items: itemList, page: 1, total: itemList.length, pageSize: 20);
+  }
+
+  @override
+  Future<OneTimeItem> createItem({
+    required String userId,
+    required String period,
+    required String code,
+    required String label,
+    required String amount,
+  }) async {
+    _writeCheck(null);
+    itemCalls.add({'op': 'create', 'user': userId, 'period': period, 'code': code, 'label': label, 'amount': amount});
+    return itemList.isEmpty ? OneTimeItem.fromJson({'id': 'x', 'version': 1}) : itemList.first;
+  }
+
+  @override
+  Future<OneTimeItem> updateItem(
+    String id, {
+    required int expectedVersion,
+    String? period,
+    String? label,
+    String? amount,
+  }) async {
+    _writeCheck(null);
+    itemCalls.add({'op': 'update', 'id': id, 'v': expectedVersion, 'period': period, 'label': label, 'amount': amount});
+    return itemList.first;
+  }
+
+  @override
+  Future<OneTimeItem> cancelItem(String id, String reason) async {
+    _writeCheck(null);
+    itemCalls.add({'op': 'cancel', 'id': id, 'reason': reason});
+    return itemList.first;
+  }
+
+  @override
+  Future<PayrollFile> itemsTemplate() async {
+    calls.add('template');
+    return PayrollFile(Uint8List.fromList([1]), 'payroll-items-template.xlsx');
+  }
+
+  @override
+  Future<ImportReport> importDryRun({
+    required List<int> bytes,
+    required String filename,
+    required String period,
+  }) async {
+    importCalls.add({'op': 'dry', 'name': filename, 'period': period, 'len': bytes.length});
+    if (importError != null) throw importError!;
+    return dryReport!;
+  }
+
+  @override
+  Future<ImportCommit> importCommit({
+    required List<int> bytes,
+    required String filename,
+    required String period,
+    required String fileSha256,
+    required String currentPassword,
+  }) async {
+    importCalls.add({'op': 'commit', 'period': period, 'sha': fileSha256, 'pw': currentPassword});
+    _writeCheck(currentPassword);
+    return commitResult;
+  }
+
+  @override
+  Future<List<ImportBatch>> importBatches({String? period}) async => batchList;
+
+  @override
+  Future<BatchCancelResult> cancelBatch(String id, String reason) async {
+    batchCancels.add('$id:$reason');
+    return const BatchCancelResult(cancelled: 3, notCancelled: 1);
+  }
+
+  @override
+  Future<Paged<Loan>> loans(LoanQuery q, {int page = 1}) async =>
+      Paged(items: loanList, page: 1, total: loanList.length, pageSize: 20);
+
+  @override
+  Future<Loan> loan(String id) async => loanDetail!;
+
+  @override
+  Future<Loan> createLoan({
+    required String userId,
+    required String kind,
+    required String principal,
+    required String emi,
+    required String startPeriod,
+    required String reason,
+    required String currentPassword,
+  }) async {
+    loanCalls.add({
+      'op': 'create',
+      'user': userId,
+      'kind': kind,
+      'principal': principal,
+      'emi': emi,
+      'start': startPeriod,
+      'reason': reason,
+      'pw': currentPassword,
+    });
+    _writeCheck(currentPassword);
+    return loanDetail ?? Loan.fromJson({'id': 'l9', 'reference': 'L-0009', 'version': 1});
+  }
+
+  @override
+  Future<Loan> skipInstallment(
+    String loanId, {
+    required String installmentId,
+    required String reason,
+    required int expectedVersion,
+  }) async {
+    loanCalls.add({'op': 'skip', 'inst': installmentId, 'reason': reason, 'v': expectedVersion});
+    _writeCheck(null);
+    return loanDetail!;
+  }
+
+  @override
+  Future<Loan> rescheduleLoan(
+    String loanId, {
+    required String emi,
+    required String fromPeriod,
+    required String reason,
+    required int expectedVersion,
+    required String currentPassword,
+  }) async {
+    loanCalls.add({
+      'op': 'reschedule',
+      'emi': emi,
+      'from': fromPeriod,
+      'reason': reason,
+      'v': expectedVersion,
+      'pw': currentPassword,
+    });
+    _writeCheck(currentPassword);
+    return loanDetail!;
+  }
+
+  @override
+  Future<Loan> forecloseLoan(
+    String loanId, {
+    required String mode,
+    required String reason,
+    required int expectedVersion,
+    required String currentPassword,
+    String? period,
+    String? paidOn,
+    String? reference,
+  }) async {
+    loanCalls.add({
+      'op': 'foreclose',
+      'mode': mode,
+      'period': period,
+      'paid_on': paidOn,
+      'reference': reference,
+      'reason': reason,
+      'v': expectedVersion,
+      'pw': currentPassword,
+    });
+    _writeCheck(currentPassword);
+    return loanDetail!;
+  }
+
+  @override
+  Future<Loan> cancelLoan(
+    String loanId, {
+    required String reason,
+    required int expectedVersion,
+    required String currentPassword,
+  }) async {
+    loanCalls.add({'op': 'cancel', 'reason': reason, 'v': expectedVersion, 'pw': currentPassword});
+    _writeCheck(currentPassword);
+    return loanDetail!;
+  }
+
+  @override
+  Future<List<MyLoan>> myLoans() async {
+    if (myLoansError != null) throw myLoansError!;
+    return myLoanList;
+  }
+
+  @override
+  Future<MyLoan> myLoan(String id) async => myLoanDetail!;
+
+  @override
+  Future<Paged<Arrears>> arrears(ArrearsQuery q, {int page = 1}) async =>
+      Paged(items: arrearsList, page: 1, total: arrearsList.length, pageSize: 20);
+
+  @override
+  Future<Arrears?> recalculateArrears(String userId) async {
+    arrearsCalls.add({'op': 'recalc', 'user': userId});
+    _writeCheck(null);
+    return recalcResult;
+  }
+
+  @override
+  Future<Arrears> acceptArrears(
+    String id, {
+    required String period,
+    required int expectedVersion,
+    required String currentPassword,
+  }) async {
+    arrearsCalls.add({'op': 'accept', 'id': id, 'period': period, 'v': expectedVersion, 'pw': currentPassword});
+    _writeCheck(currentPassword);
+    return arrearsList.first;
+  }
+
+  @override
+  Future<Arrears> dismissArrears(String id, String reason) async {
+    arrearsCalls.add({'op': 'dismiss', 'id': id, 'reason': reason});
+    _writeCheck(null);
+    return arrearsList.first;
+  }
+
+  @override
+  Future<Paged<Encashment>> encashments(EncashmentQuery q, {int page = 1}) async =>
+      Paged(items: encashmentList, page: 1, total: encashmentList.length, pageSize: 20);
+
+  @override
+  Future<EncashmentQuote> encashmentQuote(
+    String userId, {
+    required String leaveTypeId,
+    required int year,
+    required String period,
+    double? days,
+  }) async {
+    encashCalls.add({'op': 'quote', 'user': userId, 'type': leaveTypeId, 'year': year, 'period': period, 'days': days});
+    if (quoteError != null) throw quoteError!;
+    return quote!;
+  }
+
+  @override
+  Future<Encashment> createEncashment({
+    required String userId,
+    required String leaveTypeId,
+    required int year,
+    required double days,
+    required String period,
+    required String reason,
+    required String currentPassword,
+  }) async {
+    encashCalls.add({
+      'op': 'create',
+      'user': userId,
+      'type': leaveTypeId,
+      'year': year,
+      'days': days,
+      'period': period,
+      'reason': reason,
+      'pw': currentPassword,
+    });
+    _writeCheck(currentPassword);
+    return encashmentList.first;
+  }
+
+  @override
+  Future<Encashment> cancelEncashment(String id, {String? reason}) async {
+    encashCalls.add({'op': 'cancel', 'id': id});
+    _writeCheck(null);
+    return encashmentList.first;
+  }
+
+  @override
+  Future<List<LeaveTypeRef>> encashableLeaveTypes() async => encashableTypes;
 }
 
 /// Pumps [child] with the fake repo, permissions and a fixed clock.
@@ -397,6 +714,7 @@ Future<void> pumpPayroll(
   List<String> perms = const [],
   String? selfId = 'me',
   FakeDelivery? delivery,
+  PayrollImportPicker? picker,
   Size size = const Size(800, 2400),
 }) async {
   tester.view.physicalSize = size;
@@ -409,6 +727,7 @@ Future<void> pumpPayroll(
         adminPermissionsProvider.overrideWithValue(perms),
         adminSelfIdProvider.overrideWithValue(selfId),
         payrollDeliveryProvider.overrideWithValue(delivery ?? FakeDelivery()),
+        if (picker != null) payrollImportPickerProvider.overrideWithValue(picker),
         payrollClockProvider.overrideWithValue(() => DateTime(2026, 10, 25)),
       ],
       child: MaterialApp(home: child),

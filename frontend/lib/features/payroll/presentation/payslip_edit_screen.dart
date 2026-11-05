@@ -9,8 +9,10 @@ import '../../../core/widgets/state_views.dart';
 import '../../admin/presentation/admin_widgets.dart'
     show adminPermissionsProvider, adminSelfIdProvider, confirmAction, runWithReauth;
 import '../data/payroll_repository.dart';
+import '../domain/pay_items_models.dart' show PayslipComponent, componentSourceLabel, shortId;
 import '../domain/payroll_logic.dart';
 import '../domain/payroll_models.dart';
+import '../domain/payroll_money.dart';
 import 'payroll_providers.dart';
 import 'payroll_widgets.dart';
 import 'payslip_view.dart';
@@ -338,6 +340,7 @@ class _PayslipEditorState extends ConsumerState<PayslipEditor> {
             ),
           const SizedBox(height: 8),
           if (_p.lop != null) _lopCard(editable),
+          if ((_p.inputs?.components ?? const []).isNotEmpty) _componentsCard(_p.inputs!.components),
           if (editable) ..._inputCards(),
           if (_p.totals != null || _p.earnings.isNotEmpty) PayslipView(payslip: _p),
           const SizedBox(height: 12),
@@ -462,6 +465,30 @@ class _PayslipEditorState extends ConsumerState<PayslipEditor> {
       ],
     );
   }
+
+  /// Read-only system lines pulled from pay items, loans, arrears and
+  /// encashments (contract 17.1). They are never sent back on save.
+  Widget _componentsCard(List<PayslipComponent> lines) => SectionCard(
+        title: 'Automatic lines',
+        children: [
+          const Text(
+            'Added from Pay items. To change one, edit or cancel its source; '
+            'then refresh the run.',
+          ),
+          for (final c in lines)
+            Padding(
+              key: ValueKey('component-${c.code}-${c.sources.isEmpty ? '' : c.sources.first.id}'),
+              padding: const EdgeInsets.only(top: 6),
+              child: AmountRow(
+                label: c.label.isEmpty ? c.code : c.label,
+                value: formatRupees(c.amount),
+                caption: [
+                  for (final s in c.sources) '${componentSourceLabel(s.type)} ${shortId(s.id)}',
+                ].join(', '),
+              ),
+            ),
+        ],
+      );
 
   List<Widget> _inputCards() => [
         SectionCard(

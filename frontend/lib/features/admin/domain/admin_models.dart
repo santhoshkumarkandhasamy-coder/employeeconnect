@@ -439,6 +439,7 @@ class LeaveBalanceRow {
     required this.quota,
     this.used = 0,
     this.pending = 0,
+    this.encashed = 0,
   });
   final String leaveTypeId;
   final String label;
@@ -446,7 +447,10 @@ class LeaveBalanceRow {
   final double used;
   final double pending;
 
-  double get minQuota => used + pending;
+  /// Days paid out as leave encashment (contract 17.1); counts like used days.
+  final double encashed;
+
+  double get minQuota => used + pending + encashed;
 
   LeaveBalanceRow withQuota(double q) => LeaveBalanceRow(
         leaveTypeId: leaveTypeId,
@@ -454,6 +458,7 @@ class LeaveBalanceRow {
         quota: q,
         used: used,
         pending: pending,
+        encashed: encashed,
       );
 
   /// Tolerant of both `leave_type:{id,code,name}` and flat ids (the contract
@@ -471,6 +476,7 @@ class LeaveBalanceRow {
       quota: n(j['quota'] ?? j['total']),
       used: n(j['used']),
       pending: n(j['pending']),
+      encashed: n(j['encashed']),
     );
   }
 }
@@ -492,7 +498,11 @@ class FieldSpec {
     this.createOnly = false,
     this.defaultValue,
     this.code = false,
+    this.halfSteps = false,
   });
+
+  /// Decimal in steps of 0.5 (leave encashment days) instead of one decimal.
+  final bool halfSteps;
 
   /// Short code: letters, digits, dash, underscore (the server upper-cases it).
   final bool code;
@@ -641,9 +651,30 @@ final leaveTypeSpec = MasterSpec(
       min: 1,
       max: 366,
     ),
+    FieldSpec('encashable', 'Can be encashed (paid out)', FieldKind.boolean, defaultValue: false),
+    FieldSpec(
+      'encash_max_days_per_year',
+      'Encashment cap per year (days, empty = no cap)',
+      FieldKind.decimal,
+      required: false,
+      nullable: true,
+      min: 0.5,
+      max: 999.5,
+      halfSteps: true,
+    ),
+    FieldSpec(
+      'encash_min_balance',
+      'Days that must stay unencashed',
+      FieldKind.decimal,
+      min: 0,
+      max: 999.5,
+      defaultValue: 0,
+      halfSteps: true,
+    ),
     FieldSpec('is_active', 'Active', FieldKind.boolean, defaultValue: true),
   ],
   subtitle: (d) => '${_s(d['code'])}, quota ${_s(d['annual_quota'])} days'
+      '${d['encashable'] == true ? ', encashable' : ''}'
       '${d['is_active'] == false ? '  (inactive)' : ''}',
 );
 
@@ -674,7 +705,11 @@ String? validateField(FieldSpec f, String? raw) {
       if (n == null || n.isNaN || n.isInfinite) return 'Enter a number';
       if (f.min != null && n < f.min!) return 'Must be at least ${f.min}';
       if (f.max != null && n > f.max!) return 'Must be at most ${f.max}';
-      if ((n * 10 - (n * 10).roundToDouble()).abs() > 1e-9) return 'At most one decimal place';
+      if (f.halfSteps) {
+        if ((n * 2 - (n * 2).roundToDouble()).abs() > 1e-9) return 'Use steps of 0.5';
+      } else if ((n * 10 - (n * 10).roundToDouble()).abs() > 1e-9) {
+        return 'At most one decimal place';
+      }
       return null;
     case FieldKind.time:
       return isValidTime(s) ? null : 'Use HH:MM (24 hour)';

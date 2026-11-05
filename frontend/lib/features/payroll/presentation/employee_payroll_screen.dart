@@ -76,6 +76,25 @@ class _EmployeePayrollScreenState extends ConsumerState<EmployeePayrollScreen> {
     }
   }
 
+  /// Compares published months with the structures now in force (contract 17.4).
+  Future<void> _recalculateArrears() async {
+    final repo = ref.read(payrollRepositoryProvider);
+    try {
+      final a = await repo.recalculateArrears(_userId);
+      ref.invalidate(arrearsProvider);
+      if (mounted) {
+        payrollSnack(
+          context,
+          a == null
+              ? 'No arrears difference found.'
+              : 'Arrears proposed for ${a.rangeLabel}. Review them in Pay items.',
+        );
+      }
+    } on ApiException catch (e) {
+      if (mounted) payrollSnack(context, payrollErrorMessage(e));
+    }
+  }
+
   Future<void> _openStructure({SalaryStructure? existing, SalaryStructure? copyFrom}) async {
     final saved = await Navigator.of(context).push<bool>(
       MaterialPageRoute<bool>(
@@ -125,6 +144,16 @@ class _EmployeePayrollScreenState extends ConsumerState<EmployeePayrollScreen> {
                   ),
               ],
             ),
+            if (canEdit)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  key: const ValueKey('recalc-arrears'),
+                  onPressed: _recalculateArrears,
+                  icon: const Icon(Icons.calculate_outlined),
+                  label: const Text('Recalculate arrears'),
+                ),
+              ),
             structures.when(
               skipLoadingOnReload: true,
               loading: () => const Padding(

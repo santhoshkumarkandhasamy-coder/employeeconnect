@@ -4,6 +4,7 @@ import '../../admin/presentation/admin_providers.dart' show AdminPagedNotifier;
 import '../../announcements/presentation/announcement_providers.dart' show PagedList;
 import '../../attendance/domain/attendance_models.dart' show Paged;
 import '../data/payroll_repository.dart';
+import '../domain/pay_items_models.dart';
 import '../domain/payroll_models.dart';
 
 /// All payroll state is autoDispose and in memory only: it is never written to
@@ -91,4 +92,76 @@ final payrollVarianceProvider = FutureProvider.autoDispose.family<Map<String, dy
 /// Statutory dues for one month (contract section 16). In memory only.
 final statutoryDuesProvider = FutureProvider.autoDispose.family<List<StatutoryMonth>, String>(
   (ref, period) => ref.watch(payrollRepositoryProvider).statutoryDues(period),
+);
+
+// ---- pay items (contract section 17) -----------------------------------------------
+
+class OneTimeItemsNotifier extends AdminPagedNotifier<OneTimeItem, ItemQuery> {
+  @override
+  Future<Paged<OneTimeItem>> fetchPage(ItemQuery arg, int page) =>
+      ref.read(payrollRepositoryProvider).oneTimeItems(arg, page: page);
+
+  @override
+  String idOf(OneTimeItem item) => item.id;
+}
+
+final oneTimeItemsProvider = AsyncNotifierProvider.autoDispose
+    .family<OneTimeItemsNotifier, PagedList<OneTimeItem>, ItemQuery>(OneTimeItemsNotifier.new);
+
+/// Import batches of one month.
+final importBatchesProvider = FutureProvider.autoDispose.family<List<ImportBatch>, String>(
+  (ref, period) => ref.watch(payrollRepositoryProvider).importBatches(period: period),
+);
+
+class LoansNotifier extends AdminPagedNotifier<Loan, LoanQuery> {
+  @override
+  Future<Paged<Loan>> fetchPage(LoanQuery arg, int page) =>
+      ref.read(payrollRepositoryProvider).loans(arg, page: page);
+
+  @override
+  String idOf(Loan item) => item.id;
+}
+
+final loansProvider = AsyncNotifierProvider.autoDispose
+    .family<LoansNotifier, PagedList<Loan>, LoanQuery>(LoansNotifier.new);
+
+final loanDetailProvider = FutureProvider.autoDispose.family<Loan, String>(
+  (ref, id) => ref.watch(payrollRepositoryProvider).loan(id),
+);
+
+class ArrearsNotifier extends AdminPagedNotifier<Arrears, ArrearsQuery> {
+  @override
+  Future<Paged<Arrears>> fetchPage(ArrearsQuery arg, int page) =>
+      ref.read(payrollRepositoryProvider).arrears(arg, page: page);
+
+  @override
+  String idOf(Arrears item) => item.id;
+}
+
+final arrearsProvider = AsyncNotifierProvider.autoDispose
+    .family<ArrearsNotifier, PagedList<Arrears>, ArrearsQuery>(ArrearsNotifier.new);
+
+class EncashmentsNotifier extends AdminPagedNotifier<Encashment, EncashmentQuery> {
+  @override
+  Future<Paged<Encashment>> fetchPage(EncashmentQuery arg, int page) =>
+      ref.read(payrollRepositoryProvider).encashments(arg, page: page);
+
+  @override
+  String idOf(Encashment item) => item.id;
+}
+
+final encashmentsProvider = AsyncNotifierProvider.autoDispose
+    .family<EncashmentsNotifier, PagedList<Encashment>, EncashmentQuery>(EncashmentsNotifier.new);
+
+final encashableLeaveTypesProvider = FutureProvider.autoDispose<List<LeaveTypeRef>>(
+  (ref) => ref.watch(payrollRepositoryProvider).encashableLeaveTypes(),
+);
+
+/// Employee: own loans (read-only). In memory only.
+final myLoansProvider = FutureProvider.autoDispose<List<MyLoan>>(
+  (ref) => ref.watch(payrollRepositoryProvider).myLoans(),
+);
+
+final myLoanProvider = FutureProvider.autoDispose.family<MyLoan, String>(
+  (ref, id) => ref.watch(payrollRepositoryProvider).myLoan(id),
 );

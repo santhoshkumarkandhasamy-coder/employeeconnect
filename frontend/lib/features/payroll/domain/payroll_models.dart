@@ -1,6 +1,7 @@
 import '../../../core/api/api_exception.dart';
 import '../../../core/utils/dates.dart';
 import '../../admin/domain/admin_models.dart' show EmployeeRef;
+import 'pay_items_models.dart' show PayslipComponent, payItemWarningLabels;
 import 'payroll_money.dart';
 
 /// api-contract.md section 13 (payroll and payslips). Nothing here is cached or
@@ -253,17 +254,27 @@ class Adjustment {
 }
 
 class PayslipInputs {
-  const PayslipInputs({this.tds, this.ptOverride, this.adjustments = const [], this.note});
+  const PayslipInputs({
+    this.tds,
+    this.ptOverride,
+    this.adjustments = const [],
+    this.note,
+    this.components = const [],
+  });
   final String? tds;
   final String? ptOverride;
   final List<Adjustment> adjustments;
   final String? note;
+
+  /// Read-only system lines pulled from section 17 sources (never sent back).
+  final List<PayslipComponent> components;
 
   factory PayslipInputs.fromJson(Map<String, dynamic> j) => PayslipInputs(
         tds: _opt(j['tds']),
         ptOverride: _opt(j['pt_override']),
         adjustments: [for (final a in _list(j['adjustments'])) Adjustment.fromJson(a)],
         note: _opt(j['note']),
+        components: [for (final c in _list(j['components'])) PayslipComponent.fromJson(c)],
       );
 }
 
@@ -934,6 +945,7 @@ const Map<String, String> payrollWarningLabels = {
   'NO_PAN': 'No PAN',
   'STRUCTURE_CHANGED': 'Structure changed',
   'NOT_ELIGIBLE': 'No longer eligible',
+  ...payItemWarningLabels,
 };
 
 const Map<String, String> payrollErrorLabels = {
@@ -956,6 +968,66 @@ String payrollStatusLabel(String s) => payrollStatusLabels[s] ?? s;
 /// User-facing text for payroll errors (contract 13.7 and section 0).
 String payrollErrorMessage(ApiException e) {
   switch (e.code) {
+    case 'PERIOD_LOCKED':
+      return 'That month is locked: its payroll is published and has no open revision. '
+          'Choose a later month, or revise the payslip first.';
+    case 'ITEM_LOCKED':
+      return 'This item is already in a payslip and can no longer be changed. '
+          'Reopen the payroll run first if it has to change.';
+    case 'TOO_MANY_ITEMS':
+      return 'This employee already has the maximum number of pay items for that month.';
+    case 'COMPONENTS_CHANGED':
+      return 'A pay item changed after the payslips were prepared. Reload, refresh the run and process it again.';
+    case 'IMPORT_DUPLICATE':
+      return 'This file was already imported for this month.';
+    case 'IMPORT_FILE_CHANGED':
+      return 'The file is not the one that was checked. Choose it again and run the check again.';
+    case 'IMPORT_INVALID':
+      final first = e.details.isEmpty ? null : e.details.first;
+      if (first != null && first.field == 'file') {
+        return 'The file does not match the template (check the header row) or has more than 500 rows.';
+      }
+      return 'The file has errors. Fix the rows listed and check it again.';
+    case 'FILE_TYPE_NOT_ALLOWED':
+      return 'Use the .xlsx template without macros, links to other files or unusual structure.';
+    case 'FILE_TOO_LARGE':
+      return 'The file is too large (1 MB at most).';
+    case 'LOAN_NOT_ACTIVE':
+      return 'This loan is no longer active.';
+    case 'LOAN_HAS_RECOVERIES':
+      return 'This loan already has instalments in a payslip, so it cannot be cancelled. '
+          'Foreclose it instead.';
+    case 'LOAN_LIMIT_REACHED':
+      return 'This employee already has the maximum number of active loans and advances.';
+    case 'ARREARS_STALE':
+      return 'These arrears were recalculated. Reload the list and review the new amount.';
+    case 'NOT_PROPOSED':
+      return 'These arrears are no longer waiting for a decision. Reload the list.';
+    case 'NOT_PENDING':
+      return 'This item is no longer pending. Reload to see its current state.';
+    case 'NOT_ENCASHABLE':
+      return 'This leave type cannot be encashed. Turn on "Encashable" in the leave type first.';
+    case 'INSUFFICIENT_BALANCE':
+      final avail = e.detail('available_days');
+      return avail == null || avail.isEmpty
+          ? 'Not enough leave balance to encash.'
+          : 'Not enough leave balance: $avail days are available to encash.';
+    case 'STRUCTURE_MISSING':
+      return 'This employee has no salary structure for that month.';
+    case 'DUPLICATE_BILL':
+      return 'This bill was already used in another claim.';
+    case 'CLAIM_LIMIT_REACHED':
+      return 'The monthly limit of claims has been reached.';
+    case 'OVERTIME_DISABLED':
+      return 'Overtime is switched off in the payroll settings.';
+    case 'INVALID_CATEGORY':
+      return 'Choose a valid category.';
+    case 'AMOUNT_ABOVE_LIMIT':
+      return 'The amount is above the limit for this category.';
+    case 'BILL_REQUIRED':
+      return 'A bill is required for this category.';
+    case 'REQUESTER_INACTIVE':
+      return 'The employee is no longer active.';
     case 'PAYROLL_RUN_EXISTS':
       return 'A payroll run for this month already exists.';
     case 'PAYROLL_LOCKED':
@@ -979,7 +1051,7 @@ String payrollErrorMessage(ApiException e) {
     case 'CHALLAN_NOT_PAID':
       return 'This payment is not marked as paid. Reload to see it.';
     case 'INVALID_DATE':
-      return 'Choose a paid date that is not before the month starts and not in the future.';
+      return 'Choose a date that is valid and not in the future (a challan date also not before the month starts).';
     case 'NOTHING_TO_PUBLISH':
       return 'There is nothing to publish. Process the payroll first.';
     case 'STRUCTURE_EXISTS':
@@ -988,9 +1060,10 @@ String payrollErrorMessage(ApiException e) {
       return 'This structure is already used by a processed or published payslip. '
           'Add a new structure with a later start month instead.';
     case 'VERSION_CONFLICT':
-      return 'Someone else changed this payslip. Reload it and try again.';
+      return 'Someone else changed this record. Reload it and try again.';
     case 'INVALID_PERIOD':
-      return 'Choose a valid month (not in the future) that starts on the 1st.';
+      return 'Choose a valid month. A payroll run cannot be in the future; pay items can be '
+          'set up to 12 months ahead.';
     case 'SECOND_PERSON_REQUIRED':
       return 'A different person must publish this: you processed the run or last edited a payslip in it.';
     case 'FORBIDDEN':

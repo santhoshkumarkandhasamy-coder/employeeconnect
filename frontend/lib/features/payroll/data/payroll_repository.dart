@@ -7,6 +7,7 @@ import '../../../core/api/api_exception.dart';
 import '../../../core/api/dio_client.dart';
 import '../../attendance/domain/attendance_models.dart' show Paged;
 import '../../export/data/export_repository.dart' show decodeErrorBody;
+import '../domain/pay_items_models.dart';
 import '../domain/payroll_models.dart';
 
 /// A downloaded file held in memory (a payslip PDF or the register workbook).
@@ -278,6 +279,312 @@ class PayrollRepository {
       if (paid && amount != null && amount.isNotEmpty) 'amount': amount,
       'current_password': currentPassword,
     },);
+  }
+
+  // ---- pay items: one-time items and bulk import (contract 17.2) ---------------------
+
+  Future<Paged<OneTimeItem>> oneTimeItems(ItemQuery q, {int page = 1}) async => Paged.parse(
+        await _json('GET', '$_a/items', query: {
+          'period': q.period,
+          if (q.userId != null) 'user_id': q.userId,
+          if (q.code != null) 'code': q.code,
+          if (q.status != null) 'status': q.status,
+          if (q.batchId != null) 'batch_id': q.batchId,
+          'page': page,
+          'page_size': 20,
+        },),
+        OneTimeItem.fromJson,
+      );
+
+  Future<OneTimeItem> createItem({
+    required String userId,
+    required String period,
+    required String code,
+    required String label,
+    required String amount,
+  }) async =>
+      OneTimeItem.fromJson(await _json('POST', '$_a/items', body: {
+        'user_id': userId,
+        'period': period,
+        'code': code,
+        'label': label,
+        'amount': amount,
+      },),);
+
+  /// Only the given keys are sent (the server needs at least one).
+  Future<OneTimeItem> updateItem(
+    String id, {
+    required int expectedVersion,
+    String? period,
+    String? label,
+    String? amount,
+  }) async =>
+      OneTimeItem.fromJson(await _json('PUT', '$_a/items/$id', body: {
+        'expected_version': expectedVersion,
+        if (period != null) 'period': period,
+        if (label != null) 'label': label,
+        if (amount != null) 'amount': amount,
+      },),);
+
+  Future<OneTimeItem> cancelItem(String id, String reason) async =>
+      OneTimeItem.fromJson(await _json('POST', '$_a/items/$id/cancel', body: {'reason': reason}));
+
+  Future<PayrollFile> itemsTemplate() => _file(
+        'GET',
+        '$_a/items/template',
+        fallbackName: 'payroll-items-template.xlsx',
+        ext: '.xlsx',
+      );
+
+  FormData _importForm(List<int> bytes, String filename, String period, Map<String, String> extra) =>
+      FormData.fromMap({
+        'file': MultipartFile.fromBytes(bytes, filename: filename),
+        'period': period,
+        ...extra,
+      });
+
+  /// Dry run: nothing is written. Needs `payroll.manage`.
+  Future<ImportReport> importDryRun({
+    required List<int> bytes,
+    required String filename,
+    required String period,
+  }) async =>
+      ImportReport.fromJson(await _json(
+        'POST',
+        '$_a/items/import',
+        query: {'dry_run': true},
+        body: _importForm(bytes, filename, period, const {}),
+      ),);
+
+  /// Commit: re-sends the same file with the dry run's [fileSha256] and the
+  /// caller's own password (step-up). The password is never kept.
+  Future<ImportCommit> importCommit({
+    required List<int> bytes,
+    required String filename,
+    required String period,
+    required String fileSha256,
+    required String currentPassword,
+  }) async =>
+      ImportCommit.fromJson(await _json(
+        'POST',
+        '$_a/items/import',
+        query: {'dry_run': false},
+        body: _importForm(bytes, filename, period, {
+          'file_sha256': fileSha256,
+          'current_password': currentPassword,
+        },),
+      ),);
+
+  Future<List<ImportBatch>> importBatches({String? period}) async => ImportBatch.parseList(
+        await _json('GET', '$_a/items/batches', query: {if (period != null) 'period': period}),
+      );
+
+  Future<BatchCancelResult> cancelBatch(String id, String reason) async =>
+      BatchCancelResult.fromJson(
+        await _json('POST', '$_a/items/batches/$id/cancel', body: {'reason': reason}),
+      );
+
+  // ---- loans (17.3) ------------------------------------------------------------------
+
+  Future<Paged<Loan>> loans(LoanQuery q, {int page = 1}) async => Paged.parse(
+        await _json('GET', '$_a/loans', query: {
+          if (q.status != null) 'status': q.status,
+          if (q.kind != null) 'kind': q.kind,
+          'page': page,
+          'page_size': 20,
+        },),
+        Loan.fromJson,
+      );
+
+  Future<Loan> loan(String id) async => Loan.fromJson(await _json('GET', '$_a/loans/$id'));
+
+  Future<Loan> createLoan({
+    required String userId,
+    required String kind,
+    required String principal,
+    required String emi,
+    required String startPeriod,
+    required String reason,
+    required String currentPassword,
+  }) async =>
+      Loan.fromJson(await _json('POST', '$_a/loans', body: {
+        'user_id': userId,
+        'kind': kind,
+        'principal': principal,
+        'emi': emi,
+        'start_period': startPeriod,
+        'reason': reason,
+        'current_password': currentPassword,
+      },),);
+
+  /// No step-up for skip (contract 17.3 note 11).
+  Future<Loan> skipInstallment(
+    String loanId, {
+    required String installmentId,
+    required String reason,
+    required int expectedVersion,
+  }) async =>
+      Loan.fromJson(await _json('POST', '$_a/loans/$loanId/skip', body: {
+        'installment_id': installmentId,
+        'reason': reason,
+        'expected_version': expectedVersion,
+      },),);
+
+  Future<Loan> rescheduleLoan(
+    String loanId, {
+    required String emi,
+    required String fromPeriod,
+    required String reason,
+    required int expectedVersion,
+    required String currentPassword,
+  }) async =>
+      Loan.fromJson(await _json('POST', '$_a/loans/$loanId/reschedule', body: {
+        'emi': emi,
+        'from_period': fromPeriod,
+        'reason': reason,
+        'expected_version': expectedVersion,
+        'current_password': currentPassword,
+      },),);
+
+  /// [mode] `payroll` needs [period]; `outside` needs [paidOn] (YYYY-MM-DD)
+  /// and [reference].
+  Future<Loan> forecloseLoan(
+    String loanId, {
+    required String mode,
+    required String reason,
+    required int expectedVersion,
+    required String currentPassword,
+    String? period,
+    String? paidOn,
+    String? reference,
+  }) async =>
+      Loan.fromJson(await _json('POST', '$_a/loans/$loanId/foreclose', body: {
+        'mode': mode,
+        if (mode == 'payroll') 'period': period,
+        if (mode == 'outside') ...{'paid_on': paidOn, 'reference': reference},
+        'reason': reason,
+        'expected_version': expectedVersion,
+        'current_password': currentPassword,
+      },),);
+
+  Future<Loan> cancelLoan(
+    String loanId, {
+    required String reason,
+    required int expectedVersion,
+    required String currentPassword,
+  }) async =>
+      Loan.fromJson(await _json('POST', '$_a/loans/$loanId/cancel', body: {
+        'reason': reason,
+        'expected_version': expectedVersion,
+        'current_password': currentPassword,
+      },),);
+
+  // ---- employee loans (read-only) ----------------------------------------------------
+
+  Future<List<MyLoan>> myLoans() async => MyLoan.parseList(await _json('GET', '/me/loans'));
+
+  Future<MyLoan> myLoan(String id) async => MyLoan.fromJson(await _json('GET', '/me/loans/$id'));
+
+  // ---- arrears (17.4) ----------------------------------------------------------------
+
+  Future<Paged<Arrears>> arrears(ArrearsQuery q, {int page = 1}) async => Paged.parse(
+        await _json('GET', '$_a/arrears', query: {
+          if (q.status != null) 'status': q.status,
+          'page': page,
+          'page_size': 20,
+        },),
+        Arrears.fromJson,
+      );
+
+  Future<Arrears> arrearsDetail(String id) async =>
+      Arrears.fromJson(await _json('GET', '$_a/arrears/$id'));
+
+  /// Null = no difference (an open proposal is then dismissed by the system).
+  Future<Arrears?> recalculateArrears(String userId) async {
+    final j = await _json('POST', '$_a/employees/$userId/arrears/recalculate');
+    final a = j['arrears'];
+    return a is Map ? Arrears.fromJson(a.cast<String, dynamic>()) : null;
+  }
+
+  Future<Arrears> acceptArrears(
+    String id, {
+    required String period,
+    required int expectedVersion,
+    required String currentPassword,
+  }) async =>
+      Arrears.fromJson(await _json('POST', '$_a/arrears/$id/accept', body: {
+        'period': period,
+        'expected_version': expectedVersion,
+        'current_password': currentPassword,
+      },),);
+
+  Future<Arrears> dismissArrears(String id, String reason) async =>
+      Arrears.fromJson(await _json('POST', '$_a/arrears/$id/dismiss', body: {'reason': reason}));
+
+  // ---- leave encashment (17.5) -------------------------------------------------------
+
+  Future<Paged<Encashment>> encashments(EncashmentQuery q, {int page = 1}) async => Paged.parse(
+        await _json('GET', '$_a/encashments', query: {
+          'year': q.year,
+          if (q.status != null) 'status': q.status,
+          'page': page,
+          'page_size': 20,
+        },),
+        Encashment.fromJson,
+      );
+
+  Future<EncashmentQuote> encashmentQuote(
+    String userId, {
+    required String leaveTypeId,
+    required int year,
+    required String period,
+    double? days,
+  }) async =>
+      EncashmentQuote.fromJson(await _json(
+        'GET',
+        '$_a/employees/$userId/encashment-quote',
+        query: {
+          'leave_type_id': leaveTypeId,
+          'year': year,
+          'period': period,
+          if (days != null) 'days': days,
+        },
+      ),);
+
+  Future<Encashment> createEncashment({
+    required String userId,
+    required String leaveTypeId,
+    required int year,
+    required double days,
+    required String period,
+    required String reason,
+    required String currentPassword,
+  }) async =>
+      Encashment.fromJson(await _json('POST', '$_a/encashments', body: {
+        'user_id': userId,
+        'leave_type_id': leaveTypeId,
+        'year': year,
+        'days': days,
+        'period': period,
+        'source': 'request',
+        'reason': reason,
+        'current_password': currentPassword,
+      },),);
+
+  Future<Encashment> cancelEncashment(String id, {String? reason}) async =>
+      Encashment.fromJson(await _json('POST', '$_a/encashments/$id/cancel',
+          body: reason == null ? null : {'reason': reason},),);
+
+  /// Active leave types that can be encashed (`GET /admin/leave-types` is open
+  /// to every signed-in user; filtered here on `encashable`).
+  Future<List<LeaveTypeRef>> encashableLeaveTypes() async {
+    final j = await _json('GET', '/admin/leave-types', query: {'is_active': true, 'page_size': 100});
+    final items = j['items'];
+    return [
+      if (items is List)
+        for (final e in items)
+          if (e is Map && e['encashable'] == true) LeaveTypeRef.fromJson(e),
+    ];
   }
 
   // ---- admin payslips -------------------------------------------------------------

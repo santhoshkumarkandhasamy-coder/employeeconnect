@@ -6,11 +6,12 @@ import '../../admin/presentation/admin_widgets.dart' show NoPermissionScreen, ad
 import '../domain/payroll_models.dart';
 import 'dashboard_tab.dart';
 import 'employees_tab.dart';
+import 'pay_items_tab.dart';
 import 'payroll_settings_tab.dart';
 import 'runs_tab.dart';
 import 'statutory_tab.dart';
 
-/// HR / Admin payroll area: Dashboard | Runs | Employees | Statutory | Settings. Shown with
+/// HR / Admin payroll area: Dashboard | Runs | Employees | Pay items | Statutory | Settings. Shown with
 /// `payroll.view_all`; write actions need `payroll.manage` / `payroll.publish`
 /// (the server enforces all of it again). FLAG_SECURE is on for every payroll
 /// admin screen.
@@ -23,7 +24,7 @@ class PayrollHomeScreen extends ConsumerWidget {
     if (!canOpenPayroll(perms)) return const NoPermissionScreen(title: 'Payroll');
     return SecureScreen(
       child: DefaultTabController(
-        length: 5,
+        length: 6,
         child: Scaffold(
           appBar: AppBar(
             title: const Text('Payroll'),
@@ -34,6 +35,7 @@ class PayrollHomeScreen extends ConsumerWidget {
                 Tab(text: 'Dashboard'),
                 Tab(text: 'Runs'),
                 Tab(text: 'Employees'),
+                Tab(text: 'Pay items'),
                 Tab(text: 'Statutory'),
                 Tab(text: 'Settings'),
               ],
@@ -44,6 +46,7 @@ class PayrollHomeScreen extends ConsumerWidget {
               PayrollDashboardTab(),
               RunsTab(),
               PayrollEmployeesTab(),
+              PayItemsTab(),
               StatutoryTab(),
               PayrollSettingsTab(),
             ],

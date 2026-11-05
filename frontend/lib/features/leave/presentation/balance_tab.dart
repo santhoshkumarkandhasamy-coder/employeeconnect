@@ -65,8 +65,9 @@ class LeaveBalanceCard extends StatelessWidget {
     final unlimited = b.quota >= 365;
     final label = '${b.name}: ${daysLabel(b.remaining)} remaining'
         '${unlimited ? '' : ' of ${formatDays(b.quota)}'}, '
-        '${formatDays(b.used)} used, ${formatDays(b.pending)} pending';
-    final frac = b.quota <= 0 ? 0.0 : ((b.used + b.pending) / b.quota).clamp(0.0, 1.0);
+        '${formatDays(b.used)} used, ${formatDays(b.pending)} pending'
+        '${b.encashed > 0 ? ', ${formatDays(b.encashed)} encashed' : ''}';
+    final frac = b.quota <= 0 ? 0.0 : ((b.used + b.pending + b.encashed) / b.quota).clamp(0.0, 1.0);
     return Card(
       child: Semantics(
         label: label,
@@ -96,6 +97,7 @@ class LeaveBalanceCard extends StatelessWidget {
                   if (!unlimited) Text('Quota ${formatDays(b.quota)}'),
                   Text('Used ${formatDays(b.used)}'),
                   Text('Pending ${formatDays(b.pending)}'),
+                  if (b.encashed > 0) Text('Encashed ${formatDays(b.encashed)}'),
                 ],
               ),
             ],
