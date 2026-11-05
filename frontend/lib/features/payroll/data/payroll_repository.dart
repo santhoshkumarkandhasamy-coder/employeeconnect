@@ -248,13 +248,15 @@ class PayrollRepository {
       );
 
   /// [kind]: pf_ecr (text) | esi | pt (workbooks). Needs `payroll.view_all`.
+  /// `pf_ecr` and `esi` contain UAN / ESI IP numbers and need [currentPassword]
+  /// (step-up, `REAUTH_FAILED` when wrong); `pt` does not.
   /// 409 STATUTORY_BLOCKERS / RUN_NOT_PUBLISHED surface as [ApiException].
-  Future<PayrollFile> statutoryFile(String kind, String period) => _file(
+  Future<PayrollFile> statutoryFile(String kind, String period, {String? currentPassword}) => _file(
         'POST',
         '$_st/$kind?period=$period',
         fallbackName: kind == 'pf_ecr' ? 'pf-ecr-$period.txt' : 'statutory-$kind-$period.xlsx',
         ext: kind == 'pf_ecr' ? '.txt' : '.xlsx',
-        body: const <String, Object?>{},
+        body: {if (currentPassword != null) 'current_password': currentPassword},
       );
 
   /// Marks a challan paid / unpaid. [currentPassword] is always required.

@@ -302,10 +302,39 @@ void main() {
       final repo = FakeRepo()..duesList = dues();
       final delivery = FakeDelivery();
       await pumpPayroll(tester, const Scaffold(body: StatutoryTab()), repo: repo, perms: _view, delivery: delivery);
-      await _tapKey(tester, 'stat-dl-pf_ecr');
-      await _tapKey(tester, 'stat-dl-pt');
-      expect(repo.statutoryFileCalls, ['pf_ecr:2026-10', 'pt:2026-10']);
+      await _tapKey(tester, 'stat-dl-pt'); // no identifiers: no password
+      expect(repo.statutoryFilePasswords, [null]);
+      await _tapKey(tester, 'stat-dl-pf_ecr'); // UAN file: step-up
+      expect(find.byKey(const ValueKey('reauth-password')), findsOneWidget);
+      await tester.enterText(find.byKey(const ValueKey('reauth-password')), 'right');
+      await tester.tap(find.text('Confirm'));
+      await tester.pumpAndSettle();
+      expect(repo.statutoryFileCalls, ['pt:2026-10', 'pf_ecr:2026-10']);
+      expect(repo.statutoryFilePasswords, [null, 'right']);
       expect(delivery.files, hasLength(2));
+    });
+
+    testWidgets('ECR / ESI downloads retry a wrong password and do nothing when cancelled', (tester) async {
+      final repo = FakeRepo()
+        ..duesList = dues()
+        ..fileWrongPasswords = 1;
+      final delivery = FakeDelivery();
+      await pumpPayroll(tester, const Scaffold(body: StatutoryTab()), repo: repo, perms: _view, delivery: delivery);
+      await _tapKey(tester, 'stat-dl-esi');
+      await tester.enterText(find.byKey(const ValueKey('reauth-password')), 'wrong');
+      await tester.tap(find.text('Confirm'));
+      await tester.pumpAndSettle();
+      expect(find.text('That password is not correct.'), findsOneWidget);
+      await tester.enterText(find.byKey(const ValueKey('reauth-password')), 'right');
+      await tester.tap(find.text('Confirm'));
+      await tester.pumpAndSettle();
+      expect(repo.statutoryFilePasswords, ['wrong', 'right']);
+      expect(delivery.files, hasLength(1));
+      await _tapKey(tester, 'stat-dl-pf_ecr');
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(repo.statutoryFileCalls, hasLength(2)); // cancelled: no request
+      expect(delivery.files, hasLength(1));
     });
 
     testWidgets('STATUTORY_BLOCKERS and RUN_NOT_PUBLISHED show readable messages', (tester) async {
@@ -315,10 +344,16 @@ void main() {
       final delivery = FakeDelivery();
       await pumpPayroll(tester, const Scaffold(body: StatutoryTab()), repo: repo, perms: _view, delivery: delivery);
       await _tapKey(tester, 'stat-dl-esi');
+      await tester.enterText(find.byKey(const ValueKey('reauth-password')), 'right');
+      await tester.tap(find.text('Confirm'));
+      await tester.pumpAndSettle();
       expect(find.textContaining('missing a valid UAN'), findsOneWidget);
       expect(delivery.files, isEmpty);
       repo.fileError = const ApiException(code: 'RUN_NOT_PUBLISHED', message: 'x', status: 409);
       await _tapKey(tester, 'stat-dl-pf_ecr');
+      await tester.enterText(find.byKey(const ValueKey('reauth-password')), 'right');
+      await tester.tap(find.text('Confirm'));
+      await tester.pumpAndSettle();
       expect(find.textContaining('Publish this month'), findsOneWidget);
     });
 

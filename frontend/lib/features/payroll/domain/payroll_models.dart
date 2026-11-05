@@ -919,6 +919,7 @@ String statutoryFieldLabel(String field) => switch (field) {
       'UAN' => 'UAN',
       'ESI_IP' => 'ESI IP number',
       'PAN' => 'PAN',
+      'NAME' => 'Name (letters only, no accents)',
       _ => field,
     };
 
@@ -968,10 +969,13 @@ String payrollErrorMessage(ApiException e) {
     case 'RUN_NOT_PUBLISHED':
       return "Publish this month's payroll run first. Statutory files use published payslips only.";
     case 'STATUTORY_BLOCKERS':
-      return 'Some employees are missing a valid UAN, ESI IP number or PAN. '
-          'Fix them (see Blockers) and try again.';
+      return 'Some employees are missing a valid UAN, ESI IP number, PAN or a usable name. '
+          'Correct them in the employee payroll details (see Blockers) and try again. '
+          'No need to re-run payroll.';
     case 'CHALLAN_ALREADY_PAID':
       return 'This payment is already marked as paid. Reload to see it.';
+    case 'NOTHING_DUE':
+      return 'Nothing is due for this month. Enter the amount actually paid to record a payment.';
     case 'CHALLAN_NOT_PAID':
       return 'This payment is not marked as paid. Reload to see it.';
     case 'INVALID_DATE':

@@ -137,6 +137,8 @@ class FakeRepo extends PayrollRepository {
   ApiException? challanError;
   int challanWrongPasswords = 0;
   final List<String> statutoryFileCalls = [];
+  final List<String?> statutoryFilePasswords = [];
+  int fileWrongPasswords = 0;
   final List<Map<String, Object?>> challanCalls = [];
 
   @override
@@ -146,8 +148,13 @@ class FakeRepo extends PayrollRepository {
   }
 
   @override
-  Future<PayrollFile> statutoryFile(String kind, String period) async {
+  Future<PayrollFile> statutoryFile(String kind, String period, {String? currentPassword}) async {
     statutoryFileCalls.add('$kind:$period');
+    statutoryFilePasswords.add(currentPassword);
+    if (fileWrongPasswords > 0) {
+      fileWrongPasswords--;
+      throw const ApiException(code: 'REAUTH_FAILED', message: 'no', status: 403);
+    }
     if (fileError != null) throw fileError!;
     return PayrollFile(Uint8List.fromList([1]), 'statutory-$kind-$period.xlsx');
   }

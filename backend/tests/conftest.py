@@ -80,6 +80,7 @@ TABLES = [
     "payroll_runs",
     "payslips",
     "statutory_challans",
+    "statutory_challan_events",
     "duty_locations",
     "duty_location_assignments",
     "on_duty_requests",

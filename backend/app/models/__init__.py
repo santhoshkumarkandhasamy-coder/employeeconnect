@@ -9,7 +9,7 @@ from .food import FoodEnrollment
 from .leave import LeaveBalance, LeaveRequest, LeaveType, PermissionRequest
 from .on_duty import DutyLocation, DutyLocationAssignment, OnDutyRequest, OnDutyVisit
 from .org import Department, Shift
-from .payroll import EmployeePayrollDetails, PayrollRun, Payslip, SalaryStructure, StatutoryChallan
+from .payroll import EmployeePayrollDetails, PayrollRun, Payslip, SalaryStructure, StatutoryChallan, StatutoryChallanEvent
 from .security import AuditLog, DeviceToken, PasswordResetRequest, RefreshToken, Setting
 from .users import EmployeeProfile, File, User
 
@@ -18,5 +18,5 @@ __all__ = [
     "RefreshToken", "DeviceToken", "PasswordResetRequest", "AuditLog", "Setting",
     "Holiday", "Attendance", "LateRecord", "LeaveType", "LeaveBalance", "LeaveRequest", "PermissionRequest",
     "DutyLocation", "DutyLocationAssignment", "OnDutyRequest", "OnDutyVisit",
-    "Company", "License", "SalaryStructure", "EmployeePayrollDetails", "PayrollRun", "Payslip", "StatutoryChallan", "FoodEnrollment", "Announcement", "AnnouncementDepartment", "AnnouncementRead",
+    "Company", "License", "SalaryStructure", "EmployeePayrollDetails", "PayrollRun", "Payslip", "StatutoryChallan", "StatutoryChallanEvent", "FoodEnrollment", "Announcement", "AnnouncementDepartment", "AnnouncementRead",
 ]

@@ -429,10 +429,19 @@ void main() {
     test('file downloads use POST with the period and sensible names', () async {
       final a = _FileAdapter(200, [1, 2]);
       final repo = PayrollRepository(Dio(BaseOptions(baseUrl: 'http://x/api'))..httpClientAdapter = a);
-      final f = await repo.statutoryFile('pf_ecr', '2026-10');
+      final f = await repo.statutoryFile('pf_ecr', '2026-10', currentPassword: 'pw1');
       expect(f.filename, 'pf-ecr-2026-10.txt');
       expect(a.lastPath, '/admin/payroll/statutory/pf_ecr?period=2026-10');
-      expect((await repo.statutoryFile('esi', '2026-10')).filename, 'statutory-esi-2026-10.xlsx');
+      expect((await repo.statutoryFile('esi', '2026-10', currentPassword: 'pw1')).filename, 'statutory-esi-2026-10.xlsx');
+    });
+
+    test('ECR / ESI downloads send current_password, PT sends none', () async {
+      final a = _FileAdapter(200, [1, 2]);
+      final repo = PayrollRepository(Dio(BaseOptions(baseUrl: 'http://x/api'))..httpClientAdapter = a);
+      await repo.statutoryFile('pf_ecr', '2026-10', currentPassword: 'pw1');
+      expect(jsonDecode(a.lastBody!), {'current_password': 'pw1'});
+      await repo.statutoryFile('pt', '2026-10');
+      expect(jsonDecode(a.lastBody!), isEmpty);
     });
 
     test('captured errors map to readable messages', () async {

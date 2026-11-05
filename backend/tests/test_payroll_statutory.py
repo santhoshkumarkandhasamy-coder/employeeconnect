@@ -12,6 +12,7 @@ from tests.payroll_fixtures import PERIOD, add_structure, exclude_from_payroll, 
 
 B = "/api/admin/payroll"
 S = f"{B}/statutory"
+PW = {"current_password": PASSWORD}
 
 
 @pytest_asyncio.fixture
@@ -69,11 +70,11 @@ async def test_non_hr_forbidden(client, H, role, method, path):
 
 
 async def test_unpublished_run_is_refused(client, stat):
-    r = await client.post(f"{S}/pf_ecr", params={"period": PERIOD}, headers=stat["hr"])
+    r = await client.post(f"{S}/pf_ecr", params={"period": PERIOD}, json=PW, headers=stat["hr"])
     assert r.status_code == 404
     run = await new_run(client, stat["hr"])
     assert (await client.post(f"{B}/runs/{run['id']}/process", headers=stat["hr"])).status_code == 200
-    r = await client.post(f"{S}/pf_ecr", params={"period": PERIOD}, headers=stat["hr"])
+    r = await client.post(f"{S}/pf_ecr", params={"period": PERIOD}, json=PW, headers=stat["hr"])
     assert r.status_code == 409 and r.json()["error"]["code"] == "RUN_NOT_PUBLISHED"
     d = await _dues(client, stat)
     assert d["run_status"] == "processed" and d["items"] == []
@@ -82,7 +83,7 @@ async def test_unpublished_run_is_refused(client, stat):
 async def test_missing_uan_blocks_ecr_and_is_listed(client, stat, uid):
     await _ids(client, stat, uid, mgr=False)  # the manager has no UAN / PAN
     await _publish(client, stat)
-    r = await client.post(f"{S}/pf_ecr", params={"period": PERIOD}, headers=stat["hr"])
+    r = await client.post(f"{S}/pf_ecr", params={"period": PERIOD}, json=PW, headers=stat["hr"])
     assert r.status_code == 409 and r.json()["error"]["code"] == "STATUTORY_BLOCKERS"
     assert [d["field"] for d in r.json()["error"]["details"]] == ["MGR001"]
     assert "100200300400" not in r.text
@@ -108,7 +109,7 @@ async def test_invalid_uan_counts_as_blocker_never_skipped(client, stat, uid):
 async def test_pf_ecr_content(client, stat, uid):
     await _ids(client, stat, uid)
     await _publish(client, stat)
-    r = await client.post(f"{S}/pf_ecr", params={"period": PERIOD}, headers=stat["hr"])
+    r = await client.post(f"{S}/pf_ecr", params={"period": PERIOD}, json=PW, headers=stat["hr"])
     assert r.status_code == 200, r.text
     assert r.headers["cache-control"] == "no-store" and "payroll-pf-ecr-2025-06.txt" in r.headers["content-disposition"]
     lines = {ln.split("#~#")[0]: ln.split("#~#") for ln in r.text.strip().split("\r\n")}
@@ -123,7 +124,7 @@ async def test_pf_ecr_content(client, stat, uid):
 async def test_esi_file_only_eligible_employees(client, stat, uid):
     await _ids(client, stat, uid)
     await _publish(client, stat)
-    r = await client.post(f"{S}/esi", params={"period": PERIOD}, headers=stat["hr"])
+    r = await client.post(f"{S}/esi", params={"period": PERIOD}, json=PW, headers=stat["hr"])
     assert r.status_code == 200, r.text
     wb = load_workbook(io.BytesIO(r.content))
     assert wb.sheetnames == ["ESI Contribution", "Reconciliation"]
@@ -135,7 +136,7 @@ async def test_esi_missing_ip_blocks(client, stat, uid):
     await _details(client, stat["hr"], uid["employee"], uan="100200300400")
     await _ids(client, stat, uid, emp=False)
     await _publish(client, stat)
-    r = await client.post(f"{S}/esi", params={"period": PERIOD}, headers=stat["hr"])
+    r = await client.post(f"{S}/esi", params={"period": PERIOD}, json=PW, headers=stat["hr"])
     assert r.status_code == 409 and r.json()["error"]["details"][0]["field"] == "EMP001"
 
 

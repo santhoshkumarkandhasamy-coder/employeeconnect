@@ -1481,5 +1481,64 @@ CREATE TRIGGER trg_statutory_challans_updated_at BEFORE UPDATE ON statutory_chal
 
 UPDATE alembic_version SET version_num='0020' WHERE alembic_version.version_num = '0019';
 
+-- Running upgrade 0020 -> 0021
+
+CREATE TABLE statutory_challan_events (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  challan_id uuid NOT NULL REFERENCES statutory_challans(id) ON DELETE RESTRICT,
+  type text NOT NULL,
+  period date NOT NULL,
+  action text NOT NULL,
+  status text NOT NULL,
+  paid_on date,
+  reference_enc bytea,
+  amount_enc bytea,
+  prev_status text,
+  prev_paid_on date,
+  prev_reference_enc bytea,
+  prev_amount_enc bytea,
+  actor_id uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT ck_statutory_challan_events_type CHECK (type IN ('pf','esi','pt','tds')),
+  CONSTRAINT ck_statutory_challan_events_action CHECK (action IN ('paid','unpaid')),
+  CONSTRAINT ck_statutory_challan_events_status CHECK (status IN ('unpaid','paid')),
+  CONSTRAINT ck_statutory_challan_events_prev_status CHECK (prev_status IS NULL OR prev_status IN ('unpaid','paid'))
+);
+
+CREATE INDEX ix_statutory_challan_events_challan ON statutory_challan_events (challan_id, created_at);
+
+CREATE INDEX ix_statutory_challan_events_actor_id ON statutory_challan_events (actor_id);
+
+CREATE INDEX ix_statutory_challan_events_period ON statutory_challan_events (period, type);
+
+CREATE FUNCTION statutory_challan_events_lock() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'UPDATE'
+     AND current_setting('app.key_rotation', true) = 'on'
+     AND payroll_strip_enc(to_jsonb(NEW)) IS NOT DISTINCT FROM payroll_strip_enc(to_jsonb(OLD)) THEN
+    RETURN NEW;  -- key rotation: only *_enc columns changed
+  END IF;
+  RAISE EXCEPTION 'statutory_challan_events is append-only' USING ERRCODE = 'insufficient_privilege', DETAIL = TG_OP;
+END
+$$;
+
+CREATE TRIGGER trg_statutory_challan_events_no_update_delete BEFORE UPDATE OR DELETE ON statutory_challan_events
+  FOR EACH ROW EXECUTE FUNCTION statutory_challan_events_lock();
+
+CREATE TRIGGER trg_statutory_challan_events_no_truncate BEFORE TRUNCATE ON statutory_challan_events
+  FOR EACH STATEMENT EXECUTE FUNCTION statutory_challan_events_lock();
+
+DO $$
+BEGIN
+  REVOKE UPDATE, DELETE, TRUNCATE ON statutory_challan_events FROM app_user;
+  GRANT UPDATE (reference_enc, amount_enc, prev_reference_enc, prev_amount_enc) ON statutory_challan_events TO app_user;
+  REVOKE DELETE, TRUNCATE ON statutory_challans FROM app_user;
+EXCEPTION WHEN undefined_object OR insufficient_privilege THEN
+  RAISE NOTICE 'revoke on statutory tables skipped';
+END
+$$;
+
+UPDATE alembic_version SET version_num='0021' WHERE alembic_version.version_num = '0020';
+
 COMMIT;
 

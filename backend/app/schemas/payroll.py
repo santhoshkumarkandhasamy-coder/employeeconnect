@@ -242,6 +242,12 @@ class ChallanIn(_Strict):
             raise ValueError("paid_on is required when status is paid")
         if self.status == "unpaid" and (self.paid_on is not None or self.reference is not None or self.amount is not None):
             raise ValueError("paid_on, reference and amount only apply to status paid")
-        if self.amount is not None:
-            _money(self.amount)
+        if self.amount is not None and _money(self.amount) <= 0:
+            raise ValueError("amount must be greater than 0")
         return self
+
+
+class StatutoryFileIn(_Strict):
+    """Body of the statutory file downloads. `current_password` (step-up) is required for pf_ecr and esi, ignored for pt."""
+
+    current_password: SecretStr | None = Field(default=None, min_length=1, max_length=128)

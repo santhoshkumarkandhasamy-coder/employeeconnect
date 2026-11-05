@@ -30,6 +30,7 @@ from ..schemas.payroll import (
     RegisterIn,
     ReviseIn,
     RunCreate,
+    StatutoryFileIn,
     StructureIn,
 )
 from ..services import (
@@ -512,7 +513,11 @@ async def extra_report(
     return StreamingResponse(
         xlsx.iter_file(built),
         media_type=xlsx.XLSX_MIME,
-        headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        headers={
+            "Content-Disposition": f'attachment; filename="{name}"',
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
         background=BackgroundTask(built.close),
     )
 
@@ -529,7 +534,7 @@ async def statutory_dues(
     redis: Redis = Depends(get_redis),
     actor: Principal = Depends(VIEW_ALL),
 ):
-    await pc.limit(redis, actor, "statutory", (30, 60))
+    await pc.limit(redis, actor, "statutory", (30, 60), (500, 86400), closed=True)
     out = await payroll_statutory.dues(session, period, months)
     audit(session, action="payroll.statutory.dues_view", actor=actor, entity_type="statutory_challan",
           after={"period": period, "months": months})  # fmt: skip
@@ -540,18 +545,29 @@ async def statutory_dues(
 @admin_router.post("/statutory/{kind}")
 async def statutory_file(
     kind: Literal["pf_ecr", "esi", "pt"],
+    body: StatutoryFileIn | None = None,
     period: str | None = Query(None, pattern=r"^\d{4}-\d{2}$"),
     session: AsyncSession = Depends(get_session),
     redis: Redis = Depends(get_redis),
     actor: Principal = Depends(VIEW_ALL),
 ):
-    """PF ECR (.txt), ESI contribution (.xlsx), PT summary (.xlsx). 409 STATUTORY_BLOCKERS when an employee lacks UAN / ESI IP."""
-    await pc.limit(redis, actor, "report", (10, 60), closed=True)
+    """PF ECR (.txt), ESI contribution (.xlsx), PT summary (.xlsx). 409 STATUTORY_BLOCKERS when an employee lacks UAN / ESI IP.
+    pf_ecr and esi carry UAN / ESI IP numbers: they need the caller's own password (`current_password`, step-up), a daily cap
+    and raise an admin alert; pt carries no identifiers and is unchanged."""
+    sensitive = kind != "pt"
+    if sensitive:
+        await pc.limit(redis, actor, "statutory_file", (10, 60), (30, 86400), closed=True)
+        await admin_security.require_reauth(
+            session, redis, actor, body.current_password if body else None, action=f"payroll.statutory.{kind}"
+        )
+    else:
+        await pc.limit(redis, actor, "report", (10, 60), closed=True)
     if kind == "pf_ecr":
         data, name, rows, meta = await payroll_statutory.pf_ecr(session, period)
         audit(session, action="payroll.statutory.export", actor=actor, entity_type="statutory_challan",
               after={"kind": kind, "period": meta["period"], "rows": rows})  # fmt: skip
         await pc.commit(session)
+        await _notify_identifier_export(session, actor, kind, meta["period"])
         return Response(content=data, media_type="text/plain; charset=us-ascii",
                         headers={**_NOSTORE, "Content-Disposition": f'attachment; filename="{name}"'})  # fmt: skip
     built, name, rows, meta = await (payroll_statutory.esi_contribution if kind == "esi" else payroll_statutory.pt_summary)(
@@ -564,12 +580,23 @@ async def statutory_file(
     except BaseException:
         built.close()
         raise
+    if sensitive:
+        await _notify_identifier_export(session, actor, kind, meta["period"])
     return StreamingResponse(
         xlsx.iter_file(built),
         media_type=xlsx.XLSX_MIME,
         headers={**_NOSTORE, "Content-Disposition": f'attachment; filename="{name}"'},
         background=BackgroundTask(built.close),
     )
+
+
+async def _notify_identifier_export(session: AsyncSession, actor: Principal, kind: str, period: str) -> None:
+    """Best effort push to the admins (names / ids only) after a file with UAN / ESI IP numbers left the system."""
+    label = "PF ECR" if kind == "pf_ecr" else "ESI contribution"
+    await admin_security.notify_admins(
+        session, entity_id=actor.id, title=f"{label} file downloaded",
+        body=f"{actor.user.full_name} ({actor.employee_id}) downloaded the {label} file for {period}.",
+    )  # fmt: skip
 
 
 @admin_router.put("/statutory/challans")

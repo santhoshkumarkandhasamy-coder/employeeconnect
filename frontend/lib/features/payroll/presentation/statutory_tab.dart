@@ -48,7 +48,17 @@ class _StatutoryTabState extends ConsumerState<StatutoryTab> {
 
   Future<void> _download(String kind) async {
     final period = _period;
-    await downloadPayrollFile(context, ref, (repo) => repo.statutoryFile(kind, period));
+    await downloadPayrollFile(context, ref, (repo) async {
+      // PF ECR and ESI files contain UAN / ESI IP numbers: the server wants the admin's own password.
+      if (kind == 'pt') return repo.statutoryFile(kind, period);
+      PayrollFile? file;
+      final done = await runWithReauth(
+        context,
+        reason: 'This file contains employee identifiers and needs your password.',
+        action: (pw) async => file = await repo.statutoryFile(kind, period, currentPassword: pw),
+      );
+      return done ? file : null;
+    });
   }
 
   Future<void> _mark(StatutoryDueItem item, {required bool paid}) async {
@@ -239,7 +249,7 @@ class _StatutoryTabState extends ConsumerState<StatutoryTab> {
               'Blockers (${m.blockers.length})',
               style: Theme.of(context).textTheme.titleSmall,
             ),
-            const Text('PF and ESI files cannot be made until these are fixed in the employee payroll details.'),
+            const Text('PF and ESI files cannot be made until these are fixed in the employee payroll details. Payroll does not need to be run again.'),
             const SizedBox(height: 4),
             for (final b in m.blockers)
               ListTile(

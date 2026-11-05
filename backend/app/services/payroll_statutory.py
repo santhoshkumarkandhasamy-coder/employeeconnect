@@ -1,8 +1,10 @@
 """Statutory reports and dues tracking (plan 14 phase 2): PF ECR text file, ESI contribution xlsx, PT summary xlsx,
 monthly dues (PF, ESI, PT, TDS) and challan paid / unpaid marking.
 
-Only PUBLISHED runs are used (one published copy per employee, `runs._live`). Employees whose statutory identifier is missing or
-malformed (UAN for PF, ESI IP number for ESI, PAN for TDS) are returned as `blockers`; a file is never produced with such an
+Only PUBLISHED runs are used (one published copy per employee, `runs._live`). Amounts come from the frozen payslip, but the
+statutory identifiers (UAN, ESI IP number, PAN) are read from the employee's CURRENT payroll details, so correcting an employee's
+details clears a blocker without re-running payroll. Employees whose identifier is missing or
+malformed (UAN for PF, ESI IP number for ESI, PAN for TDS, a usable ASCII name for the ECR) are returned as `blockers`; a file is never produced with such an
 employee silently left out (409 STATUTORY_BLOCKERS carries the list). Money is never logged and never written to the audit log.
 
 !! The ECR / ESI column layouts below follow the formats known at the time of writing and MUST be verified by the user against
@@ -25,7 +27,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.audit import audit
 from ..core.errors import AppError
 from ..core.rbac import Principal
-from ..models import PayrollRun, Payslip, SalaryStructure, StatutoryChallan, User
+from ..models import (
+    EmployeePayrollDetails,
+    PayrollRun,
+    Payslip,
+    SalaryStructure,
+    StatutoryChallan,
+    StatutoryChallanEvent,
+    User,
+)
 from . import admin_security, xlsx
 from . import payroll_calc as calc
 from . import payroll_common as pc
@@ -42,6 +52,9 @@ UAN_RE = re.compile(r"^\d{12}$")
 ESI_IP_RE = re.compile(r"^\d{10,17}$")
 PAN_RE = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")
 SEP = "#~#"
+ECR_NAME_MAX = 85
+_NAME_BAD_RE = re.compile(r"[^A-Za-z .'-]")
+_SPACES_RE = re.compile(r"\s+")
 ECR_HEADER = (
     "UAN", "MEMBER NAME", "GROSS WAGES", "EPF WAGES", "EPS WAGES", "EDLI WAGES", "EPF CONTRI REMITTED",
     "EPS CONTRI REMITTED", "EPF EPS DIFF REMITTED", "NCP DAYS", "REFUND OF ADVANCES",
@@ -76,13 +89,29 @@ def _name(snap: dict, user: User | None) -> str:
     )
 
 
+def ecr_name(name: str) -> str | None:
+    """Name as written to the ECR: letters, space, dot, apostrophe and hyphen only (ASCII), spaces collapsed, max 85 chars.
+    None when the name cannot be written faithfully (contains non-ASCII characters, or nothing is left after cleaning); the
+    caller reports that as a blocker instead of writing '?' characters. Digits and other symbols are replaced by a space."""
+    if not name.isascii():
+        return None
+    cleaned = _SPACES_RE.sub(" ", _NAME_BAD_RE.sub(" ", name)).strip()[:ECR_NAME_MAX].strip()
+    return cleaned or None
+
+
 # ================================================================================================== data
 class _Row:
     __slots__ = ("p", "user", "snap", "ident", "result", "structure")
 
-    def __init__(self, p: Payslip, user: User | None, structure: SalaryStructure | None):
+    def __init__(
+        self, p: Payslip, user: User | None, structure: SalaryStructure | None, details: EmployeePayrollDetails | None = None
+    ):
         self.p, self.user, self.structure = p, user, structure
-        self.snap, self.ident, self.result = p.employee_snapshot or {}, p.identity or {}, p.result or {}
+        self.snap, self.result = p.employee_snapshot or {}, p.result or {}
+        # CURRENT identifiers (not the frozen payslip identity): fixing the employee's details clears a blocker.
+        self.ident = (
+            {"uan": details.uan, "esi_ip_number": details.esi_ip_number, "pan": details.pan} if details is not None else {}
+        )
 
     @property
     def employee_id(self) -> str | None:
@@ -115,7 +144,19 @@ async def _load(session: AsyncSession, period: dt.date, *, missing_ok: bool = Fa
         if sids
         else {}
     )
-    rows = [_Row(p, users.get(p.user_id), structs.get(p.structure_id)) for p in slips]
+    dets = (
+        {
+            d.user_id: d
+            for d in (
+                await session.execute(
+                    select(EmployeePayrollDetails).where(EmployeePayrollDetails.user_id.in_([p.user_id for p in slips]))
+                )
+            ).scalars()
+        }
+        if slips
+        else {}
+    )
+    rows = [_Row(p, users.get(p.user_id), structs.get(p.structure_id), dets.get(p.user_id)) for p in slips]
     rows.sort(key=lambda r: ((r.name or "").lower(), r.employee_id or ""))
     return run, rows
 
@@ -137,12 +178,15 @@ def _check(missing: list[dict[str, str]], label: str, value: Any, rx: re.Pattern
 
 
 def _blockers(rows: list[_Row], kinds: tuple[str, ...]) -> list[dict[str, Any]]:
-    """Employees with a statutory amount but a missing / malformed identifier. Identifier values are never returned."""
+    """Employees with a statutory amount but a missing / malformed identifier (read from the CURRENT payroll details), or, for
+    PF, a name that cannot be written to the ECR. Identifier values are never returned."""
     out: list[dict[str, Any]] = []
     for r in rows:
         missing: list[dict[str, str]] = []
         if "pf" in kinds and any(a > 0 for a in _pf_amounts(r)):
             _check(missing, "UAN", r.ident.get("uan"), UAN_RE)
+            if ecr_name(r.name) is None:
+                missing.append({"field": "NAME", "reason": "invalid" if r.name else "missing"})
         if "esi" in kinds and any(a > 0 for a in _esi_amounts(r)):
             _check(missing, "ESI_IP", r.ident.get("esi_ip_number"), ESI_IP_RE)
         if "tds" in kinds and _ded(r.result, "TDS") > 0:
@@ -156,7 +200,7 @@ def _raise_blockers(blockers: list[dict[str, Any]]) -> None:
     if blockers:
         raise AppError(
             "STATUTORY_BLOCKERS",
-            f"{len(blockers)} employee(s) have a missing or invalid statutory identifier",
+            f"{len(blockers)} employee(s) have a missing or invalid statutory identifier or name",
             status=409,
             details=[
                 {"field": b["employee_id"], "message": ", ".join(m["field"] + " " + m["reason"] for m in b["missing"])}
@@ -239,6 +283,12 @@ async def set_challan(
         )
     ).scalar_one_or_none()
     before = {"status": existing.status} if existing else {"status": "none"}
+    # the state that is about to be overwritten / cleared, kept in the append-only event row
+    prev = (
+        {"status": existing.status, "paid_on": existing.paid_on, "reference": existing.reference, "amount": existing.amount}
+        if existing is not None
+        else {"status": None, "paid_on": None, "reference": None, "amount": None}
+    )
 
     if status == "paid":
         if paid_on is None or paid_on > today or paid_on < period:
@@ -248,10 +298,24 @@ async def set_challan(
             )  # fmt: skip
         if existing is not None and existing.status == "paid":
             raise AppError("CHALLAN_ALREADY_PAID", "This due is already marked paid; mark it unpaid first", status=409)
-        paid_amount = calc.parse_money(amount) if amount is not None else due
+        if amount is not None:
+            paid_amount = calc.parse_money(amount)
+            if paid_amount <= 0:
+                raise AppError(
+                    "VALIDATION_ERROR", "Request validation failed", status=422,
+                    details=[{"field": "amount", "message": "must be greater than 0"}],
+                )  # fmt: skip
+        elif due <= 0:
+            raise AppError(
+                "NOTHING_DUE", "Nothing is due for this month; enter the amount actually paid to record a payment", status=409
+            )
+        else:
+            paid_amount = due
         if existing is None:
             existing = StatutoryChallan(type=type_, period=period, created_by=actor.id)
+            existing.status, existing.amount = "unpaid", calc.money_str(paid_amount)
             session.add(existing)
+            await session.flush()  # assigns the id (audit entity_id, event challan_id)
         existing.status, existing.paid_on, existing.reference = "paid", paid_on, reference
         existing.amount = calc.money_str(paid_amount)
         existing.updated_by = actor.id
@@ -263,9 +327,19 @@ async def set_challan(
         existing.updated_by = actor.id
         action = "payroll.statutory.challan_unpaid"
 
+    session.add(
+        StatutoryChallanEvent(
+            challan_id=existing.id, type=type_, period=period, action=status, status=existing.status, paid_on=existing.paid_on,
+            reference=existing.reference, amount=existing.amount, actor_id=actor.id,
+            prev_status=prev["status"], prev_paid_on=prev["paid_on"], prev_reference=prev["reference"], prev_amount=prev["amount"],
+        )
+    )  # fmt: skip
+    after = {"type": type_, "period": f"{period:%Y-%m}", "status": status}
+    if status == "paid":
+        after["paid_on"] = paid_on.isoformat()  # not a secret; amount and reference stay out of the audit log
     audit(
         session, action=action, actor=actor, entity_type="statutory_challan", entity_id=existing.id,
-        before=before, after={"type": type_, "period": f"{period:%Y-%m}", "status": status},
+        before=before, after=after,
     )  # fmt: skip
     await pc.commit(session)
     return {
@@ -293,12 +367,12 @@ async def pf_ecr(session: AsyncSession, raw_period: str | None) -> tuple[bytes, 
         er_i = _int(er)
         ncp = int((_d(r.p.basis_days) - _d(r.p.paid_days)).to_integral_value(rounding=ROUND_CEILING))
         vals = (
-            r.ident["uan"].strip(), r.name, _int(_d(r.result["gross"])), _int(epf_wage), _int(eps_wage), _int(eps_wage),
+            r.ident["uan"].strip(), ecr_name(r.name), _int(_d(r.result["gross"])), _int(epf_wage), _int(eps_wage), _int(eps_wage),
             _int(ee), eps_share, er_i - eps_share, max(ncp, 0), 0,
         )  # fmt: skip
         lines.append(SEP.join(str(v) for v in vals))
     body = ("\r\n".join(lines) + "\r\n") if lines else ""
-    return body.encode("ascii", errors="replace"), f"payroll-pf-ecr-{period:%Y-%m}.txt", len(lines), {"period": f"{period:%Y-%m}"}
+    return body.encode("ascii"), f"payroll-pf-ecr-{period:%Y-%m}.txt", len(lines), {"period": f"{period:%Y-%m}"}
 
 
 # ================================================================================================== xlsx
