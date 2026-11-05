@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.audit import audit
+from ..core.clock import utcnow
 from ..core.errors import AppError
 from ..core.pagination import PageParams, make_page
 from ..core.rbac import Principal
@@ -37,6 +38,7 @@ DETAIL_FIELDS = (
     "uan",
     "esi_ip_number",
 )
+BANK_FIELDS = ("payment_mode", "bank_name", "bank_account", "bank_ifsc")  # a change sets bank_changed_by / bank_changed_at
 MIN_YEAR, MAX_YEAR = 2000, 2200
 
 
@@ -340,6 +342,7 @@ def _details_out(user_id: uuid.UUID, d: EmployeePayrollDetails | None, *, reveal
         "bank_name": d.bank_name if d else None,
         "bank_account": m(d.bank_account if d else None, pc.mask_tail),
         "bank_ifsc": d.bank_ifsc if d else None,
+        "bank_changed_at": pc.iso(d.bank_changed_at) if d else None,  # read-only (migration 0026)
         "pan": m(d.pan if d else None, pc.mask_pan),
         "uan": m(d.uan if d else None, pc.mask_tail),
         "esi_ip_number": m(d.esi_ip_number if d else None, pc.mask_tail),
@@ -382,6 +385,8 @@ async def put_details(
             setattr(d, f, v)
             changed.append(f)
     d.updated_by = actor.id
+    if any(f in BANK_FIELDS for f in changed):  # migration 0026: the database refuses a bank change without a fresh marker
+        d.bank_changed_by, d.bank_changed_at = actor.id, utcnow()
     audit(session, action="payroll.details.update", actor=actor, entity_type="user", entity_id=user_id, after={"fields": changed})
     await pc.commit(session)
     await session.refresh(d)  # updated_at is set by the database

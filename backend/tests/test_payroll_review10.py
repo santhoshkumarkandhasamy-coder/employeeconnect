@@ -13,6 +13,7 @@ from app.models import Payslip
 from app.services import key_rotation, payslip_pdf
 from app.services import payroll_runs as runs
 from tests.conftest import PASSWORD
+from tests.payroll_controls_helpers import decide, extra_user, request_payslip, request_run
 from tests.payroll_fixtures import new_run, process_and_publish, publish_run, row_for
 
 KEY = "payroll.publish_requires_second_person"
@@ -54,8 +55,10 @@ async def test_rule_on_in_run_copy_survives_switching_the_setting_off(client, pa
     assert (await put_rule(client, admin, False, current_password=PASSWORD)).status_code == 200
     await client.post(f"/api/admin/payroll/runs/{run['id']}/process", headers=hr)
     r = await publish_run(client, hr, run["id"])
-    assert r.status_code == 403 and r.json()["error"]["code"] == "SECOND_PERSON_REQUIRED"
-    assert (await publish_run(client, admin, run["id"])).status_code == 200
+    assert r.status_code == 409 and r.json()["error"]["code"] == "PUBLISH_REQUEST_REQUIRED"
+    assert (await publish_run(client, admin, run["id"])).status_code == 409  # nobody publishes directly any more
+    req = await request_run(client, hr, run["id"])  # the run snapshot still says ON: the request path stays open and mandatory
+    assert (await decide(client, admin, req, "approve"))["run"]["status"] == "published"
 
 
 async def test_rule_switched_on_after_the_run_was_created_still_applies(client, payroll):
@@ -64,11 +67,12 @@ async def test_rule_switched_on_after_the_run_was_created_still_applies(client, 
     await client.post(f"/api/admin/payroll/runs/{run['id']}/process", headers=hr)
     assert (await put_rule(client, admin, True, current_password=PASSWORD)).status_code == 200
     r = await publish_run(client, hr, run["id"])
-    assert r.status_code == 403 and r.json()["error"]["code"] == "SECOND_PERSON_REQUIRED"
-    assert (await publish_run(client, admin, run["id"])).status_code == 200
+    assert r.status_code == 409 and r.json()["error"]["code"] == "PUBLISH_REQUEST_REQUIRED"
+    req = await request_run(client, hr, run["id"])
+    assert (await decide(client, admin, req, "approve"))["run"]["status"] == "published"
 
 
-async def test_last_editor_of_a_payslip_cannot_publish_it(client, payroll, db):
+async def test_last_editor_of_a_payslip_cannot_publish_it(client, payroll, db, seeded):
     hr, admin = payroll["hr"], payroll["admin"]
     run = await new_run(client, hr)
     await process_and_publish(client, hr, run["id"])
@@ -80,14 +84,13 @@ async def test_last_editor_of_a_payslip_cannot_publish_it(client, payroll, db):
     pid = rev.json()["id"]
     assert (await client.post(f"/api/admin/payroll/payslips/{pid}/process", headers=admin)).status_code == 200
     assert (await put_rule(client, admin, True, current_password=PASSWORD)).status_code == 200
-    # processed by the admin; make HR the last editor behind the service's back
-    ps = (await db.execute(select(Payslip).where(Payslip.id == uuid.UUID(pid)))).scalar_one()
-    ps.updated_by, ps.processed_by = ps.created_by, None  # last editor = HR, nobody recorded as the processor
-    await db.commit()
     r = await client.post(f"/api/admin/payroll/payslips/{pid}/publish", json={"current_password": PASSWORD}, headers=hr)
-    assert r.status_code == 403 and r.json()["error"]["code"] == "SECOND_PERSON_REQUIRED"
-    r = await client.post(f"/api/admin/payroll/payslips/{pid}/publish", json={"current_password": PASSWORD}, headers=admin)
-    assert r.status_code == 200, r.text
+    assert r.status_code == 409 and r.json()["error"]["code"] == "PUBLISH_REQUEST_REQUIRED"
+    req = await request_payslip(client, hr, pid)  # HR created the revision, the admin processed it: both are makers
+    await decide(client, hr, req, "approve", 403)
+    await decide(client, admin, req, "approve", 403)
+    _, admin2 = await extra_user(client, db, seeded, "ADM002")
+    assert (await decide(client, admin2, req, "approve"))["payslip"]["status"] == "published"
 
 
 # ================================================================================================ M2 / L2

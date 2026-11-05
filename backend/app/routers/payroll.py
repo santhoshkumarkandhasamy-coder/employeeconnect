@@ -69,6 +69,7 @@ from ..services import (
     fnf_pdf,
     payroll_arrears,
     payroll_ctc_gratuity,
+    payroll_delivery,
     payroll_encashment,
     payroll_fnf,
     payroll_increments,
@@ -146,6 +147,7 @@ async def my_payslip_pdf(
     view, footer, logo = await runs.pdf_parts(session, ps, admin=False)
     data = await payslip_pdf.build_pdf(view, footer, logo, payslip_pdf.watermark_for(ps.status))
     audit(session, action="payroll.payslip.download", actor=actor, entity_type="payslip", entity_id=payslip_id)
+    await payroll_delivery.mark_seen(session, ps, downloaded=True)
     await pc.commit(session)
     return _pdf_response(data, payslip_pdf.filename_for(view))
 

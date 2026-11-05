@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import hmac
+import json
 import logging
 import uuid
 from types import SimpleNamespace
@@ -48,13 +51,24 @@ def map_integrity(exc: IntegrityError) -> AppError:
     return AppError("CONFLICT", "The change conflicts with existing data")
 
 
+def after_commit(session: AsyncSession, fn: Any) -> None:
+    """Queue a zero-argument coroutine function (a best-effort push) to run once the NEXT `pc.commit` succeeded."""
+    session.info.setdefault("after_commit", []).append(fn)
+
+
 async def commit(session: AsyncSession) -> None:
-    """commit() with trigger errors mapped to PAYROLL_LOCKED."""
+    """commit() with trigger errors mapped to PAYROLL_LOCKED; queued `after_commit` callbacks run afterwards (errors logged only)."""
     try:
         await session.commit()
     except IntegrityError as exc:
+        session.info.pop("after_commit", None)
         await session.rollback()
         raise map_integrity(exc) from None
+    for fn in session.info.pop("after_commit", []):
+        try:
+            await fn()
+        except Exception:  # noqa: BLE001 - pushes never fail the business operation
+            log.exception("after-commit callback failed (ignored)")
 
 
 async def flush(session: AsyncSession) -> None:
@@ -141,3 +155,29 @@ def import_binding_key() -> bytes:
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=IMPORT_BINDING_LABEL).derive(
         get_settings().jwt_secret.encode()
     )
+
+
+SNAPSHOT_LABEL = b"employee-connect/payroll-publish-snapshot/v1"
+LINES_LABEL = b"employee-connect/payroll-payment-lines/v1"
+
+
+def derived_key(label: bytes) -> bytes:
+    """HKDF-SHA256 of the server secret with a purpose label (one key per binding, never the raw secret)."""
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=label).derive(get_settings().jwt_secret.encode())
+
+
+def canonical(obj: Any) -> bytes:
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str).encode()
+
+
+def mac_hex(label: bytes, obj: Any) -> str:
+    """HMAC-SHA256 (never a plain hash: amounts are low-entropy) over the canonical JSON of `obj`."""
+    return hmac.new(derived_key(label), canonical(obj), hashlib.sha256).hexdigest()
+
+
+def touch(row: Any, actor_id: uuid.UUID | str) -> None:
+    """Append the actor to the append-only `contributors` list (a NEW list: the ORM must see the change)."""
+    ids = list(row.contributors or [])
+    if str(actor_id) not in ids:
+        ids.append(str(actor_id))
+    row.contributors = ids

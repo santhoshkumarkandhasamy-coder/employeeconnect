@@ -11,6 +11,7 @@ Jobs (office timezone = `office.timezone` setting at start-up):
                                                      ANNOUNCEMENT_DELETED_RETENTION_DAYS ago, 0 = off; the hourly orphan sweep then
                                                      removes the blobs)
   license.expiry_alert                 daily 08:00   (grace / expired license -> admin_alert push to license.manage holders)
+  payroll.publish_request_expiry       hourly at :20 (open publish requests past their expiry become stale / EXPIRED; plan 17 5a)
   worker.heartbeat                     every 60 s    (Redis ec:worker:heartbeat, read by GET /admin/system/health)
   leave.retention                      daily 03:45   (setting leave.reason_retention_days, 0 = off: nulls reason/comment of
                                                      old decided requests, deletes their unreferenced attachment files;
@@ -88,6 +89,13 @@ async def job_license_alert() -> int:
         return await license_svc.alert_expiry(s)
 
 
+async def job_publish_request_expiry() -> int:
+    from ..services import payroll_publish_requests as prs_svc
+
+    async with get_sessionmaker()() as s:
+        return await prs_svc.expire_overdue(s)
+
+
 async def job_heartbeat() -> None:
     """Not lock-guarded and never raises: it only proves this worker is alive."""
     try:
@@ -123,6 +131,7 @@ def build_scheduler(tz: str) -> AsyncIOScheduler:
         ("leave.retention", job_leave_retention, CronTrigger(hour=3, minute=45, timezone=tz)),
         ("announcements.retention", job_announcement_retention, CronTrigger(hour=3, minute=50, timezone=tz)),
         ("license.expiry_alert", job_license_alert, CronTrigger(hour=8, minute=0, timezone=tz)),
+        ("payroll.publish_request_expiry", job_publish_request_expiry, CronTrigger(minute=20, timezone=tz)),
     ]
     for name, fn, trig in jobs:
         sched.add_job(_guarded, trig, args=[name, fn], id=name, name=name, replace_existing=True)

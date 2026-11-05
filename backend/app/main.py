@@ -37,6 +37,7 @@ from .routers import (
     leave,
     on_duty,
     payroll,
+    payroll_controls,
     profile,
     reimbursements,
 )
@@ -116,6 +117,7 @@ def create_app() -> FastAPI:
     app.include_router(payroll.employee_router, prefix="/api")
     app.include_router(payroll.admin_router, prefix="/api")
     app.include_router(payroll.me_router, prefix="/api")
+    app.include_router(payroll_controls.admin_router, prefix="/api")
     app.include_router(reimbursements.router, prefix="/api")
     app.include_router(reimbursements.admin_router, prefix="/api")
     return app

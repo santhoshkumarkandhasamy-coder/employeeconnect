@@ -25,7 +25,7 @@ from ..core.clock import utcnow
 from ..core.errors import AppError
 from ..core.pagination import PageParams, make_page
 from ..core.rbac import Principal
-from ..models import EmployeePayrollDetails, PayrollRun, Payslip, SalaryStructure, User
+from ..models import EmployeePayrollDetails, PayrollPublishRequest, PayrollRun, Payslip, PayslipDelivery, SalaryStructure, User
 from ..schemas.payroll import PayslipUpdate, RunCreate
 from . import admin_security, notifications
 from . import attendance as att
@@ -338,7 +338,7 @@ def _new_payslip(run: PayrollRun, user: User, actor: Principal, revision: int = 
         run_id=run.id, user_id=user.id, revision=revision, status="draft", hold=False,
         employee_snapshot={}, basis_days=Decimal("0.0"), employed_days=Decimal("0.0"), lop_auto=Decimal("0.0"),
         paid_days=Decimal("0.0"), lop_breakdown={}, inputs=_blank_inputs(), warnings=[], version=1,
-        created_by=actor.id, updated_by=actor.id,
+        created_by=actor.id, updated_by=actor.id, contributors=[str(actor.id)],
     )  # fmt: skip
 
 
@@ -426,7 +426,9 @@ def _live(rows: list[Payslip]) -> list[Payslip]:
 
 
 # ============================================================================================ output
-async def run_out(session: AsyncSession, run: PayrollRun, rows: list[Payslip] | None = None) -> dict[str, Any]:
+async def run_out(
+    session: AsyncSession, run: PayrollRun, rows: list[Payslip] | None = None, *, with_request: bool = True
+) -> dict[str, Any]:
     rows = rows if rows is not None else await _run_payslips(session, run.id)
     present = [p for p in rows if p.status != "superseded"]
     counts = {
@@ -478,6 +480,28 @@ async def run_out(session: AsyncSession, run: PayrollRun, rows: list[Payslip] | 
         "processed_by": pc.user_out(users.get(run.processed_by)),
         "published_at": pc.iso(run.published_at),
         "published_by": pc.user_out(users.get(run.published_by)),
+        "publish_request": await _latest_request(session, run_id=run.id) if with_request else None,
+    }
+
+
+async def _latest_request(
+    session: AsyncSession, *, run_id: uuid.UUID | None = None, payslip_id: uuid.UUID | None = None
+) -> dict[str, Any] | None:
+    """The newest publish request of a run (scope run) or of one payslip (scope payslip), 13.5 / 13.6 `publish_request`."""
+    q = select(PayrollPublishRequest).order_by(PayrollPublishRequest.requested_at.desc(), PayrollPublishRequest.id).limit(1)
+    if payslip_id is not None:
+        q = q.where(PayrollPublishRequest.payslip_id == payslip_id)
+    else:
+        q = q.where(PayrollPublishRequest.run_id == run_id, PayrollPublishRequest.scope == "run")
+    r = (await session.execute(q)).scalar_one_or_none()
+    if r is None:
+        return None
+    return {
+        "id": str(r.id),
+        "status": r.status,
+        "requested_by": pc.user_out(await session.get(User, r.requested_by)),
+        "requested_at": pc.iso(r.requested_at),
+        "stale_reason": r.stale_reason,
     }
 
 
@@ -492,7 +516,7 @@ async def list_runs(session: AsyncSession, year: int | None) -> dict[str, Any]:
     )
     items = []
     for r in (await session.execute(q)).scalars():
-        o = await run_out(session, r)
+        o = await run_out(session, r, with_request=False)
         items.append(
             {
                 "id": o["id"],
@@ -650,6 +674,7 @@ async def admin_payslip_out(session: AsyncSession, p: Payslip) -> dict[str, Any]
             "processed_by": pc.user_out(people.get(p.processed_by)),
             "published_by": pc.user_out(people.get(p.published_by)),
             "updated_at": pc.iso(p.updated_at),
+            "publish_request": await _latest_request(session, payslip_id=p.id),
         }
     )
     return out
@@ -664,7 +689,8 @@ async def create_run(session: AsyncSession, actor: Principal, body: RunCreate) -
     cfg = await pset.snapshot(session)
     _, end = pdays.month_bounds(period)
     run = PayrollRun(
-        period=period, status="draft", pay_date=body.pay_date, attendance_cutoff=min(end, today), config=cfg, created_by=actor.id
+        period=period, status="draft", pay_date=body.pay_date, attendance_cutoff=min(end, today), config=cfg, created_by=actor.id,
+        contributors=[str(actor.id)],
     )
     session.add(run)
     try:
@@ -719,6 +745,7 @@ def _require_status(run: PayrollRun, status: str) -> None:
 async def refresh_run(session: AsyncSession, actor: Principal, run_id: uuid.UUID) -> dict[str, Any]:
     run = await _run_or_404(session, run_id, lock=True)
     _require_status(run, "draft")
+    pc.touch(run, actor.id)
     today = await _today(session)
     run.config = await pset.snapshot(session)
     _, end = pdays.month_bounds(run.period)
@@ -747,6 +774,7 @@ async def refresh_run(session: AsyncSession, actor: Principal, run_id: uuid.UUID
         if not eligible:
             ps.warnings = [*(ps.warnings or []), "NOT_ELIGIBLE"]
         ps.updated_by = actor.id
+        pc.touch(ps, actor.id)
         todo.append((u, ps, False, keep))
     await comps.pull_for(session, [ps for _, ps, _, _ in todo], run.period, lock=False)  # pay components (plan 15 P2)
     for u, ps, is_new, keep in todo:
@@ -760,6 +788,7 @@ async def refresh_run(session: AsyncSession, actor: Principal, run_id: uuid.UUID
             updated += 1
     audit(session, action="payroll.run.refresh", actor=actor, entity_type="payroll_run", entity_id=run.id,
           after={"added": added, "updated": updated})  # fmt: skip
+    await _stale_requests(session, actor, run, "RUN_REFRESHED")
     await pc.commit(session)
     return await run_out(session, run)
 
@@ -816,7 +845,9 @@ async def process_run(session: AsyncSession, actor: Principal, run_id: uuid.UUID
     now = utcnow()
     for p in todo:
         p.status, p.processed_at, p.processed_by, p.updated_by = "processed", now, actor.id, actor.id
+        pc.touch(p, actor.id)
     run.status, run.processed_at, run.processed_by = "processed", now, actor.id
+    pc.touch(run, actor.id)
     audit(session, action="payroll.run.process", actor=who_plain, entity_type="payroll_run", entity_id=run.id,
           after={"payslips": len(todo), "held": sum(p.hold for p in rows if p.status == "draft")})  # fmt: skip
     await pc.commit(session)
@@ -832,8 +863,11 @@ async def reopen_run(session: AsyncSession, actor: Principal, run_id: uuid.UUID)
         if p.status == "processed":
             p.status, p.processed_at, p.processed_by, p.updated_by = "draft", None, None, actor.id
             p.version += 1
+            pc.touch(p, actor.id)
     run.status, run.processed_at, run.processed_by = "draft", None, None
+    pc.touch(run, actor.id)
     audit(session, action="payroll.run.reopen", actor=actor, entity_type="payroll_run", entity_id=run.id)
+    await _stale_requests(session, actor, run, "RUN_REOPENED")
     await pc.commit(session)
     return await run_out(session, run)
 
@@ -843,6 +877,8 @@ async def delete_run(session: AsyncSession, actor: Principal, run_id: uuid.UUID)
     rows = await _run_payslips(session, run.id, lock=True)
     if run.status != "draft" or any(p.status in ("published", "superseded") for p in rows):
         raise AppError("PAYROLL_LOCKED", "Only a draft run that was never published can be deleted")
+    if (await session.execute(select(PayrollPublishRequest.id).where(PayrollPublishRequest.run_id == run.id).limit(1))).first():
+        raise AppError("CONFLICT", "This run has publish requests (kept as evidence) and cannot be deleted")
     info = {"period": pc.period_str(run.period), "payslips": len(rows)}
     await session.execute(delete(Payslip).where(Payslip.run_id == run.id))
     await session.delete(run)
@@ -850,22 +886,19 @@ async def delete_run(session: AsyncSession, actor: Principal, run_id: uuid.UUID)
     await pc.commit(session)
 
 
-async def _check_second_person(
-    session: AsyncSession,
-    run: PayrollRun,
-    payslips: list[Payslip],
-    actor: Principal,
-    *,
-    run_processed_by: uuid.UUID | None = None,
+async def maker_checker_applies(session: AsyncSession, run: PayrollRun) -> bool:
+    """Publish maker-checker applies when the run's snapshot OR the CURRENT setting is on (switching the setting off after the run
+    was created does not bypass it). While it applies, publishing goes through a publish request (plan 17 G1, contract 19.2)."""
+    return bool(run.config.get("publish_requires_second_person") or await pset.current_value(session, pset.SECOND_PERSON_KEY))
+
+
+async def _stale_requests(
+    session: AsyncSession, actor: Principal, run: PayrollRun, reason: str, *, payslip_id: uuid.UUID | None = None
 ) -> None:
-    """Maker-checker. Enforced when the run's snapshot OR the CURRENT setting is on (switching the setting off after the run
-    was created does not bypass it). The publisher must not be the person who processed the run, nor the last person to
-    process or edit any payslip being published (`processed_by` / `updated_by`)."""
-    if not (run.config.get("publish_requires_second_person") or await pset.current_value(session, pset.SECOND_PERSON_KEY)):
-        return
-    makers = {run_processed_by} | {x for p in payslips for x in (p.processed_by, p.updated_by)}
-    if actor.id in makers:
-        raise AppError("SECOND_PERSON_REQUIRED", "A different person must publish what you processed or edited")
+    """Open publish requests of the run become `stale` in the caller's transaction (the request row is locked LAST)."""
+    from . import payroll_publish_requests as prs  # local import: that module imports this one
+
+    await prs.mark_stale(session, run.id, reason, actor.id, payslip_id=payslip_id, actor=_plain(actor))
 
 
 async def _share_lock_structures(session: AsyncSession, payslips: list[Payslip]) -> None:
@@ -885,6 +918,7 @@ async def _publish_one(session: AsyncSession, p: Payslip, actor_id: uuid.UUID, n
             await pc.flush(session)
     p.status, p.published_at, p.published_by, p.updated_by = "published", now, actor_id, actor_id
     await pc.flush(session)
+    session.add(PayslipDelivery(payslip_id=p.id, user_id=p.user_id))  # push-only delivery tracking (contract 19.3)
     from . import payroll_fnf  # local import: payroll_fnf imports this module
 
     await payroll_fnf.on_published(session, p, actor_id, now)  # locks the approved F&F LAST (plan 16 F15)
@@ -910,29 +944,38 @@ async def _push_settled(session: AsyncSession) -> None:
 
 
 async def _push_published(session: AsyncSession, items: list[tuple[uuid.UUID, uuid.UUID, dt.date, bool]]) -> None:
-    """Data-only push after commit (best effort, never amounts)."""
+    """Data-only push after commit (best effort, never amounts). A push that reached a device stamps the delivery row."""
+    stamped: list[uuid.UUID] = []
     for user_id, payslip_id, period, revised in items:
         try:
-            await notifications.notify(
+            n = await notifications.notify(
                 session, [user_id], type="payslip_published", entity_id=payslip_id,
                 title="Revised payslip available" if revised else "Payslip available",
                 body=f"Your payslip for {month_label(period)} is ready.",
             )  # fmt: skip
+            if n:
+                stamped.append(payslip_id)
         except Exception:  # noqa: BLE001
             log.exception("payslip_published push failed (ignored)")
+    if stamped:
+        try:
+            now = utcnow()
+            for d in (await session.execute(select(PayslipDelivery).where(PayslipDelivery.payslip_id.in_(stamped)))).scalars():
+                if d.pushed_at is None:
+                    d.pushed_at = now
+                d.push_count = min(10, (d.push_count or 0) + 1)
+            await session.commit()
+        except Exception:  # noqa: BLE001 - delivery statistics only
+            await session.rollback()
+            log.exception("delivery stamp failed (ignored)")
 
 
-async def publish_run(session: AsyncSession, redis: Redis, actor: Principal, run_id: uuid.UUID, password) -> dict[str, Any]:
-    await admin_security.require_reauth(session, redis, actor, password, action="payroll.run.publish")
+async def publish_run_core(
+    session: AsyncSession, actor: Principal, run: PayrollRun, todo: list[Payslip], *, request_id: uuid.UUID | None = None
+) -> list[tuple[uuid.UUID, uuid.UUID, dt.date, bool]]:
+    """The publish itself (13.5 internals): the caller holds the run and payslip locks and commits. Direct publish and the approval
+    of a publish request both run exactly this code in their own transaction. Returns the pushes to send AFTER the commit."""
     who = _plain(actor)
-    run = await _run_or_404(session, run_id, lock=True)
-    if run.status != "processed":
-        raise AppError("PAYROLL_LOCKED", "Only a processed run can be published (it may already be published)")
-    rows = await _run_payslips(session, run.id, lock=True)
-    todo = [p for p in rows if p.status == "processed" and not p.hold]
-    if not todo:
-        raise AppError("NOTHING_TO_PUBLISH", "There is no processed payslip to publish")
-    await _check_second_person(session, run, todo, actor, run_processed_by=run.processed_by)
     await _share_lock_structures(session, todo)
     await comps.mark_paid(session, todo, actor.id)  # processing -> paid, carried rows follow the new revision
     now = utcnow()
@@ -948,8 +991,25 @@ async def publish_run(session: AsyncSession, redis: Redis, actor: Principal, run
         actor.id,
         (company.name or "")[:100] or None,
     )
-    audit(session, action="payroll.run.publish", actor=who, entity_type="payroll_run", entity_id=run.id,
-          after={"payslips": len(todo), "self_included": any(p.user_id == actor.id for p in todo)})  # fmt: skip
+    after: dict[str, Any] = {"payslips": len(todo), "self_included": any(p.user_id == actor.id for p in todo)}
+    if request_id is not None:
+        after["request_id"] = str(request_id)
+    audit(session, action="payroll.run.publish", actor=who, entity_type="payroll_run", entity_id=run.id, after=after)
+    return pushes
+
+
+async def publish_run(session: AsyncSession, redis: Redis, actor: Principal, run_id: uuid.UUID, password) -> dict[str, Any]:
+    await admin_security.require_reauth(session, redis, actor, password, action="payroll.run.publish")
+    run = await _run_or_404(session, run_id, lock=True)
+    if run.status != "processed":
+        raise AppError("PAYROLL_LOCKED", "Only a processed run can be published (it may already be published)")
+    if await maker_checker_applies(session, run):
+        raise AppError("PUBLISH_REQUEST_REQUIRED", "Publishing needs a second person: create a publish request")
+    rows = await _run_payslips(session, run.id, lock=True)
+    todo = [p for p in rows if p.status == "processed" and not p.hold]
+    if not todo:
+        raise AppError("NOTHING_TO_PUBLISH", "There is no processed payslip to publish")
+    pushes = await publish_run_core(session, actor, run, todo)
     await pc.commit(session)
     await _push_published(session, pushes)
     await _push_settled(session)
@@ -1063,6 +1123,7 @@ async def update_payslip(session: AsyncSession, actor: Principal, payslip_id: uu
     recompute(ps, user=user, period=run.period, structs=structs, adopt_latest=False, cfg=run.config, prior=prior,
               lwd=_lwd((await _load_details(session, [ps.user_id])).get(ps.user_id)))
     ps.updated_by = actor.id
+    pc.touch(ps, actor.id)
     audit(session, action="payroll.payslip.update", actor=actor, entity_type="payslip", entity_id=ps.id,
           after={"fields": sorted(sent)})  # fmt: skip
     await pc.commit(session)
@@ -1075,6 +1136,8 @@ async def delete_payslip(session: AsyncSession, actor: Principal, payslip_id: uu
     if ps.status != "draft":
         raise AppError("PAYROLL_LOCKED", "Only a draft payslip can be deleted")
     info = {"run_id": str(run.id), "user_id": str(ps.user_id), "revision": ps.revision}
+    if (await session.execute(select(PayrollPublishRequest.id).where(PayrollPublishRequest.payslip_id == ps.id).limit(1))).first():
+        raise AppError("CONFLICT", "This payslip has publish requests (kept as evidence) and cannot be deleted")
     await session.delete(ps)
     audit(session, action="payroll.payslip.delete", actor=actor, entity_type="payslip", entity_id=payslip_id, after=info)
     await pc.commit(session)
@@ -1093,7 +1156,9 @@ async def process_payslip(session: AsyncSession, actor: Principal, payslip_id: u
     await comps.attach_processing(session, [ps], actor.id)
     now = utcnow()
     ps.status, ps.processed_at, ps.processed_by, ps.updated_by, ps.hold = "processed", now, actor.id, actor.id, False
+    pc.touch(ps, actor.id)
     audit(session, action="payroll.payslip.process", actor=actor, entity_type="payslip", entity_id=ps.id)
+    await _stale_requests(session, actor, run, "PAYSLIP_CHANGED")
     await pc.commit(session)
     return await admin_payslip_out(session, ps)
 
@@ -1106,9 +1171,29 @@ async def reopen_payslip(session: AsyncSession, actor: Principal, payslip_id: uu
     await comps.release_processing(session, [ps.id], actor.id)
     ps.status, ps.processed_at, ps.processed_by, ps.updated_by = "draft", None, None, actor.id
     ps.version += 1
+    pc.touch(ps, actor.id)
     audit(session, action="payroll.payslip.reopen", actor=actor, entity_type="payslip", entity_id=ps.id)
+    await _stale_requests(session, actor, run, "PAYSLIP_CHANGED")
     await pc.commit(session)
     return await admin_payslip_out(session, ps)
+
+
+async def publish_payslip_core(
+    session: AsyncSession, actor: Principal, run: PayrollRun, ps: Payslip, *, request_id: uuid.UUID | None = None
+) -> list[tuple[uuid.UUID, uuid.UUID, dt.date, bool]]:
+    """Single-payslip publish internals (13.6), shared by the direct endpoint and the approval of a publish request."""
+    who = _plain(actor)
+    await _share_lock_structures(session, [ps])
+    await comps.mark_paid(session, [ps], actor.id)
+    now = utcnow()
+    await _publish_one(session, ps, actor.id, now)
+    if ps.revision > 1:
+        await _resync_arrears(session, actor, [ps.user_id])
+    after: dict[str, Any] = {"revision": ps.revision, "run_id": str(run.id)}
+    if request_id is not None:
+        after["request_id"] = str(request_id)
+    audit(session, action="payroll.payslip.publish", actor=who, entity_type="payslip", entity_id=ps.id, after=after)
+    return [(ps.user_id, ps.id, run.period, ps.revision > 1)]
 
 
 async def publish_payslip(
@@ -1119,20 +1204,12 @@ async def publish_payslip(
         raise AppError("NOT_FOUND", "Payslip not found")
     await pc.forbid_self(session, actor, owner_id, entity_type="payslip", entity_id=payslip_id)
     await admin_security.require_reauth(session, redis, actor, password, action="payroll.payslip.publish")
-    who = _plain(actor)
     run, ps = await _payslip_locked(session, payslip_id)
     if run.status != "published" or ps.status != "processed":
         raise AppError("PAYROLL_LOCKED", "Only a processed payslip of a published run can be published")
-    await _check_second_person(session, run, [ps], actor)
-    await _share_lock_structures(session, [ps])
-    await comps.mark_paid(session, [ps], actor.id)
-    now = utcnow()
-    await _publish_one(session, ps, actor.id, now)
-    if ps.revision > 1:
-        await _resync_arrears(session, actor, [ps.user_id])
-    audit(session, action="payroll.payslip.publish", actor=who, entity_type="payslip", entity_id=ps.id,
-          after={"revision": ps.revision, "run_id": str(run.id)})  # fmt: skip
-    push = [(ps.user_id, ps.id, run.period, ps.revision > 1)]
+    if await maker_checker_applies(session, run):
+        raise AppError("PUBLISH_REQUEST_REQUIRED", "Publishing needs a second person: create a publish request")
+    push = await publish_payslip_core(session, actor, run, ps)
     await pc.commit(session)
     await _push_published(session, push)
     await _push_settled(session)
@@ -1239,6 +1316,9 @@ async def own_view(session: AsyncSession, actor: Principal, ps: Payslip, *, audi
         final=await settled_fnf(session, ps.user_id, run.period) is not None,
     )  # fmt: skip
     audit(session, action=audit_action, actor=actor, entity_type="payslip", entity_id=ps.id)
+    from . import payroll_delivery  # local import: that module imports this one
+
+    await payroll_delivery.mark_seen(session, ps, downloaded=False)
     await pc.commit(session)
     return out
 

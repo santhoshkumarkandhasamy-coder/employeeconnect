@@ -561,10 +561,14 @@ async def test_maker_checker_second_person(client, payroll):
     assert r.status_code == 200, r.text
     run = await new_run(client, payroll["hr"])
     await client.post(f"/api/admin/payroll/runs/{run['id']}/process", headers=payroll["hr"])
-    r = await publish_run(client, payroll["hr"], run["id"])
-    assert r.status_code == 403 and r.json()["error"]["code"] == "SECOND_PERSON_REQUIRED"
-    r = await publish_run(client, payroll["admin"], run["id"])
-    assert r.status_code == 200
+    r = await publish_run(client, payroll["hr"], run["id"])  # plan 17: a direct publish is refused while the rule applies
+    assert r.status_code == 409 and r.json()["error"]["code"] == "PUBLISH_REQUEST_REQUIRED"
+    from tests.payroll_controls_helpers import decide, request_run
+
+    req = await request_run(client, payroll["hr"], run["id"])
+    await decide(client, payroll["hr"], req, "approve", 403)  # the requester is a maker
+    out = await decide(client, payroll["admin"], req, "approve")
+    assert out["run"]["status"] == "published"
 
 
 # ================================================================================================ employee side

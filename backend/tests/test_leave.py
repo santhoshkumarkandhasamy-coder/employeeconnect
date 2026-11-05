@@ -379,6 +379,7 @@ def test_scheduler_builds_jobs():
         "leave.retention",
         "announcements.retention",
         "license.expiry_alert",
+        "payroll.publish_request_expiry",
         "worker.heartbeat",
     }
     trig = str(s.get_job("attendance.auto_close_open_records").trigger)

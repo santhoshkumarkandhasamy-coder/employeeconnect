@@ -31,7 +31,8 @@ PREFIX = "payroll."
 SECOND_PERSON_KEY = "payroll.publish_requires_second_person"
 SECOND_PERSON_PERMISSION = "role.assign"  # the maker-checker switch is an admin-level control, not a payroll.manage one
 APPROVAL_KEY = "payroll.structure_changes_need_approval"  # plan 16 F2: same control level as the second-person switch
-GUARDED_KEYS = (SECOND_PERSON_KEY, APPROVAL_KEY)  # change needs role.assign AND the caller's own password
+BANK_SECOND_PERSON_KEY = "payroll.bank_file_requires_second_person"  # plan 17 B1
+GUARDED_KEYS = (SECOND_PERSON_KEY, APPROVAL_KEY, BANK_SECOND_PERSON_KEY)  # change needs role.assign AND the caller's own password
 MAX_SLABS = 20
 MAX_CATEGORIES = 20
 _CATEGORY_CODE = re.compile(r"^[a-z][a-z0-9_]{1,19}$")
@@ -398,5 +399,10 @@ async def update(
         await admin_security.notify_admins(
             session, entity_id=actor.id, title="Payroll control changed",
             body=f"{actor.user.full_name} ({actor.employee_id}) changed the salary approval rule.",
+        )  # fmt: skip
+    if BANK_SECOND_PERSON_KEY in guarded:
+        await admin_security.notify_admins(
+            session, entity_id=actor.id, title="Payroll control changed",
+            body=f"{actor.user.full_name} ({actor.employee_id}) changed the bank file approval rule.",
         )  # fmt: skip
     return await read_all(session)

@@ -101,6 +101,7 @@ async def calendar(session: AsyncSession, period: dt.date, run: PayrollRun | Non
     if run is not None and run.status == "processed" and today >= pay_date:
         alerts.append("RUN_NOT_PUBLISHED")
     alerts.extend(await _fnf_alerts(session, today))
+    alerts.extend(await _control_alerts(session, run, today))
     return {
         "cutoff_day": int(s["payroll.cutoff_day"]),
         "process_by": process_by.isoformat(),
@@ -136,6 +137,19 @@ async def _leavers(session: AsyncSession, period: dt.date, end: dt.date) -> list
         out.append((u.deactivated_at.date(), u))
     out.sort(key=lambda t: (t[0], t[1].employee_id))
     return [{"employee_id": u.employee_id, "name": u.full_name, "date": d.isoformat()} for d, u in out]
+
+
+async def _control_alerts(session: AsyncSession, run: PayrollRun | None, today: dt.date) -> list[str]:
+    """Plan 17 5a: PUBLISH_PENDING_APPROVAL (an open publish request), PAYMENT_NOT_EXPORTED, PAYMENT_FAILED_LINES (published run)."""
+    from ..models import PayrollPublishRequest
+    from . import payroll_payments  # local import: that module imports payroll_runs
+
+    alerts: list[str] = []
+    q = select(PayrollPublishRequest.id).where(PayrollPublishRequest.status == "submitted").limit(1)
+    if (await session.execute(q)).first():
+        alerts.append("PUBLISH_PENDING_APPROVAL")
+    alerts.extend(await payroll_payments.dashboard_alerts(session, run, today))
+    return alerts
 
 
 async def _fnf_alerts(session: AsyncSession, today: dt.date) -> list[str]:
