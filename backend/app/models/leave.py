@@ -24,6 +24,13 @@ class LeaveType(TimestampMixin, Base):
         CheckConstraint("requires_attachment_after_days IS NULL OR requires_attachment_after_days >= 0",
                         name="ck_leave_types_attachment_days"),
         CheckConstraint("max_consecutive_days IS NULL OR max_consecutive_days > 0", name="ck_leave_types_max_consecutive"),
+        CheckConstraint(
+            "encash_max_days_per_year IS NULL OR (encash_max_days_per_year > 0 AND encash_max_days_per_year * 2 = trunc(encash_max_days_per_year * 2))",
+            name="ck_leave_types_encash_max",
+        ),
+        CheckConstraint(
+            "encash_min_balance >= 0 AND encash_min_balance * 2 = trunc(encash_min_balance * 2)", name="ck_leave_types_encash_min"
+        ),
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
@@ -35,16 +42,21 @@ class LeaveType(TimestampMixin, Base):
     requires_attachment_after_days: Mapped[int | None] = mapped_column(Integer)
     max_consecutive_days: Mapped[int | None] = mapped_column(Integer)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    # leave encashment (migration 0022, plan 15)
+    encashable: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    encash_max_days_per_year: Mapped[Decimal | None] = mapped_column(Numeric(4, 1))
+    encash_min_balance: Mapped[Decimal] = mapped_column(Numeric(4, 1), nullable=False, server_default=text("0"))
 
 
 class LeaveBalance(TimestampMixin, Base):
-    """remaining = quota - used - pending. DB guarantees used, pending >= 0 and used + pending <= quota."""
+    """remaining = quota - used - pending - encashed. DB guarantees used, pending, encashed >= 0 and used + pending + encashed <= quota."""
     __tablename__ = "leave_balances"
     __table_args__ = (
         UniqueConstraint("user_id", "leave_type_id", "year", name="uq_leave_balances_user_type_year"),
         CheckConstraint("year BETWEEN 2000 AND 2200", name="ck_leave_balances_year"),
         CheckConstraint("quota >= 0 AND used >= 0 AND pending >= 0", name="ck_leave_balances_non_negative"),
-        CheckConstraint("used + pending <= quota", name="ck_leave_balances_not_overdrawn"),
+        CheckConstraint("encashed >= 0", name="ck_leave_balances_encashed"),
+        CheckConstraint("used + pending + encashed <= quota", name="ck_leave_balances_not_overdrawn"),
         Index("ix_leave_balances_leave_type_id", "leave_type_id"),
     )
 
@@ -55,6 +67,7 @@ class LeaveBalance(TimestampMixin, Base):
     quota: Mapped[Decimal] = mapped_column(Numeric(4, 1), nullable=False, server_default=text("0"))
     used: Mapped[Decimal] = mapped_column(Numeric(4, 1), nullable=False, server_default=text("0"))
     pending: Mapped[Decimal] = mapped_column(Numeric(4, 1), nullable=False, server_default=text("0"))
+    encashed: Mapped[Decimal] = mapped_column(Numeric(4, 1), nullable=False, server_default=text("0"))  # migration 0022
 
 
 class LeaveRequest(TimestampMixin, Base):

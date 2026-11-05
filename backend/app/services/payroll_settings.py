@@ -61,12 +61,18 @@ DEFAULTS: dict[str, Any] = {
     "payroll.publish_requires_second_person": False,
     "payroll.company_address": "",
     "payroll.payslip_footer": "This is a computer-generated payslip and does not require a signature.",
+    # plan 15 (pay components), work package 3a
+    "payroll.loan_max_tenure_months": 60,
+    "payroll.loan_max_active": 3,
+    "payroll.encashment_basis": "basic",
+    "payroll.encashment_divisor": 30,
 }
 
 _ENUMS = {
     "payroll.pay_days_basis": ("calendar", "fixed_30", "working_days"),
     "payroll.pt_frequency": ("monthly", "half_yearly"),
     "payroll.rounding": ("rupee", "paise"),
+    "payroll.encashment_basis": ("basic", "gross"),
 }
 _BOOLS = {
     "payroll.lop_absent_days",
@@ -85,6 +91,11 @@ _NUMBERS = {  # key -> (min, max), at most 2 decimals
     "payroll.esi_employer_rate_pct": (0, 10),
 }
 _DAYS = {"payroll.cutoff_day", "payroll.process_day", "payroll.pay_day"}  # day of month, 1..31
+_INTS = {  # key -> (min, max), whole numbers
+    "payroll.loan_max_tenure_months": (1, 120),
+    "payroll.loan_max_active": (1, 10),
+    "payroll.encashment_divisor": (1, 31),
+}
 _TEXTS = {"payroll.company_address": (0, 300), "payroll.payslip_footer": (0, 200)}
 
 
@@ -155,6 +166,11 @@ def validate(key: str, value: Any) -> Any:
     if key in _DAYS:
         if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 31:
             raise _bad(key, "must be a whole day of month between 1 and 31")
+        return value
+    if key in _INTS:
+        lo, hi = _INTS[key]
+        if isinstance(value, bool) or not isinstance(value, int) or not lo <= value <= hi:
+            raise _bad(key, f"must be a whole number between {lo} and {hi}")
         return value
     if key in _NUMBERS:
         lo, hi = _NUMBERS[key]

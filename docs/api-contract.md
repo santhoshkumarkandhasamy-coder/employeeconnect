@@ -1108,9 +1108,9 @@ manager verify/reject `claims:decide` 60/min; step-up 5/min (shared, section 9).
 ```
 **POST** `{ "user_id":"uuid","period":"2026-11","code":"BONUS|INCENTIVE|OTHER_EARNING|OTHER_DEDUCTION","label":"Diwali bonus","amount":"5000.00" }` -> 201 OneTimeItem.
 `amount` > 0 (a deduction uses `OTHER_DEDUCTION`). **PUT** `{ "expected_version":1, "period"?, "label"?, "amount"? }` -> 200. **cancel** `{ "reason":"Duplicate entry" }` -> 200.
-Errors: 409 `PERIOD_LOCKED`, `ITEM_LOCKED`, `VERSION_CONFLICT`, `TOO_MANY_ITEMS` (> 20 per employee-month); 403 `FORBIDDEN` (own); 422.
+Errors: 409 `PERIOD_LOCKED`, `ITEM_LOCKED`, `VERSION_CONFLICT`, `TOO_MANY_ITEMS` (> 20 per employee-month); 403 `FORBIDDEN` (own); 422. `PUT` needs at least one of `period`, `label`, `amount` (else 422); a non-pending item (processing, paid or cancelled) is `ITEM_LOCKED`; cancelling a batch twice is 409 `CONFLICT`. `GET /admin/payroll/items` takes `period`, `user_id`, `code`, `status`, `batch_id` and the standard page parameters.
 **template** -> `.xlsx` with sheet `Items` (header `Employee ID | Code | Label | Amount`, one example row) and sheet `Codes`. `Cache-Control: no-store`.
-**import** multipart: `file` (xlsx <= 1 MB), `period` (`YYYY-MM`), and for `dry_run=false` also `file_sha256` (from the dry run) and `current_password`.
+**import** multipart: `file` (xlsx <= 1 MB), `period` (`YYYY-MM`), and for `dry_run=false` also `file_sha256` (from the dry run) and `current_password`. `dry_run` defaults to `true` when omitted. Commit answers 201 and both modes send `Cache-Control: no-store`. The parser reads sheet 1 only and checks the zip directory (entries, unpacked size, ratio, macros, external links) before opening the file; a spreadsheet formula cell, or text starting with `= + - @`, is a `FORMULA_NOT_ALLOWED` row error. The `Items` sheet of the template carries one example row (`EXAMPLE-DELETE-ME`) that fails with `UNKNOWN_EMPLOYEE` if it is left in.
 Dry run -> 200 (nothing is written; audit `payroll.import.dry_run` with rows/errors counts):
 ```json
 { "period":"2026-11","file_sha256":"<64 hex>","rows":120,"valid":118,

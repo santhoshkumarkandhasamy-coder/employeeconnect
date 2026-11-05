@@ -31,6 +31,7 @@ from . import admin_security, notifications
 from . import attendance as att
 from . import payroll_calc as calc
 from . import payroll_common as pc
+from . import payroll_components as comps
 from . import payroll_days as pdays
 from . import payroll_settings as pset
 from .company import _logo_url
@@ -161,7 +162,7 @@ def _snapshot(user: User, det: EmployeePayrollDetails | None) -> dict:
 
 
 def _blank_inputs() -> dict:
-    return {"tds": None, "pt_override": None, "adjustments": [], "note": None}
+    return {"tds": None, "pt_override": None, "adjustments": [], "components": [], "note": None}
 
 
 def _pay_inputs(inputs: dict) -> calc.PayInputs:
@@ -169,6 +170,7 @@ def _pay_inputs(inputs: dict) -> calc.PayInputs:
         tds=Decimal(inputs["tds"]) if inputs.get("tds") is not None else None,
         pt_override=Decimal(inputs["pt_override"]) if inputs.get("pt_override") is not None else None,
         adjustments=tuple(calc.Adjustment(a["code"], a["label"], Decimal(a["amount"])) for a in inputs.get("adjustments", [])),
+        components=tuple(calc.Adjustment(c["code"], c["label"], Decimal(c["amount"])) for c in inputs.get("components", [])),
     )
 
 
@@ -215,6 +217,9 @@ def recompute(
         warns.append("PENDING_LEAVE")
     if ps.paid_days == 0:
         warns.append("ZERO_PAID_DAYS")
+    system_codes = {c["code"] for c in (ps.inputs or {}).get("components", [])}
+    if system_codes & {a["code"] for a in (ps.inputs or {}).get("adjustments", [])}:
+        warns.append("MANUAL_COMPONENT_OVERLAP")  # likely double counting: a manual line and a system line share a code
     snap, ident = ps.employee_snapshot or {}, ps.identity or {}
     if snap.get("payment_mode", "bank_transfer") == "bank_transfer" and not (
         ident.get("bank_account") and ident.get("bank_ifsc")
@@ -519,6 +524,7 @@ async def admin_payslip_out(session: AsyncSession, p: Payslip) -> dict[str, Any]
                 "tds": tds,
                 "pt_override": inputs.get("pt_override"),
                 "adjustments": inputs.get("adjustments", []),
+                "components": inputs.get("components", []),
                 "note": inputs.get("note"),
             },
             "errors": errors,
@@ -552,7 +558,7 @@ async def create_run(session: AsyncSession, actor: Principal, body: RunCreate) -
         raise
     b = await _bulk(session, period)
     tz = b.ctx.tz
-    n = 0
+    fresh: list[tuple[User, Payslip]] = []
     for u in b.users:
         det = b.details.get(u.id)
         if not _eligible(u, det, period, tz):
@@ -561,12 +567,15 @@ async def create_run(session: AsyncSession, actor: Principal, body: RunCreate) -
         pull_identity(ps, u, det)
         if not pull_days(ps, u, b.ctx, run.attendance_cutoff, cfg):
             continue
+        fresh.append((u, ps))
+    await comps.pull_for(session, [ps for _, ps in fresh], period, lock=False)  # pay components (plan 15 P2)
+    for u, ps in fresh:
         recompute(
             ps, user=u, period=period, structs=b.structs.get(u.id, []), adopt_latest=True, cfg=cfg, prior=b.prior.get(u.id, [])
         )
         ps.version = 1
         session.add(ps)
-        n += 1
+    n = len(fresh)
     audit(session, action="payroll.run.create", actor=actor, entity_type="payroll_run", entity_id=run.id,
           after={"period": pc.period_str(period), "employees": n})  # fmt: skip
     await pc.commit(session)
@@ -600,6 +609,7 @@ async def refresh_run(session: AsyncSession, actor: Principal, run_id: uuid.UUID
     b = await _bulk(session, run.period)
     existing = {p.user_id: p for p in rows if p.status in OPEN}
     added = updated = 0
+    todo: list[tuple[User, Payslip, bool, tuple[str, ...]]] = []  # (user, payslip, is_new, keep)
     for u in b.users:
         det = b.details.get(u.id)
         ps = existing.get(u.id)
@@ -611,11 +621,7 @@ async def refresh_run(session: AsyncSession, actor: Principal, run_id: uuid.UUID
             pull_identity(ps, u, det)
             if not pull_days(ps, u, b.ctx, run.attendance_cutoff, run.config):
                 continue
-            recompute(ps, user=u, period=run.period, structs=b.structs.get(u.id, []), adopt_latest=True, cfg=run.config,
-                      prior=b.prior.get(u.id, []))  # fmt: skip
-            ps.version = 1
-            session.add(ps)
-            added += 1
+            todo.append((u, ps, True, ("NOT_ELIGIBLE",)))
             continue
         keep = ("NOT_ELIGIBLE",) if not eligible else ()
         pull_identity(ps, u, det)
@@ -623,9 +629,17 @@ async def refresh_run(session: AsyncSession, actor: Principal, run_id: uuid.UUID
         if not eligible:
             ps.warnings = [*(ps.warnings or []), "NOT_ELIGIBLE"]
         ps.updated_by = actor.id
+        todo.append((u, ps, False, keep))
+    await comps.pull_for(session, [ps for _, ps, _, _ in todo], run.period, lock=False)  # pay components (plan 15 P2)
+    for u, ps, is_new, keep in todo:
         recompute(ps, user=u, period=run.period, structs=b.structs.get(u.id, []), adopt_latest=True, cfg=run.config,
                   prior=b.prior.get(u.id, []), keep=keep)  # fmt: skip
-        updated += 1
+        if is_new:
+            ps.version = 1
+            session.add(ps)
+            added += 1
+        else:
+            updated += 1
     audit(session, action="payroll.run.refresh", actor=actor, entity_type="payroll_run", entity_id=run.id,
           after={"added": added, "updated": updated})  # fmt: skip
     await pc.commit(session)
@@ -638,6 +652,7 @@ async def _recompute_open(session: AsyncSession, run: PayrollRun, payslips: list
     b = await _bulk(session, run.period, uids, share_lock_structs=True)  # processing makes a structure 'in use'
     users = {u.id: u for u in b.users}
     errors: list[tuple[str, str]] = []
+    await comps.pull_for(session, payslips, run.period, lock=True)  # source rows locked FOR UPDATE (plan 15 P6 / P7)
     for p in payslips:
         u = users[p.user_id]
         pull_identity(p, u, b.details.get(u.id))
@@ -679,6 +694,7 @@ async def process_run(session: AsyncSession, actor: Principal, run_id: uuid.UUID
     errors = await _recompute_open(session, run, todo)
     if errors:
         raise await _blocked(session, actor, "payroll_run", run.id, errors)
+    await comps.attach_processing(session, todo, actor.id)
     now = utcnow()
     for p in todo:
         p.status, p.processed_at, p.processed_by, p.updated_by = "processed", now, actor.id, actor.id
@@ -693,6 +709,7 @@ async def reopen_run(session: AsyncSession, actor: Principal, run_id: uuid.UUID)
     run = await _run_or_404(session, run_id, lock=True)
     _require_status(run, "processed")
     rows = await _run_payslips(session, run.id, lock=True)
+    await comps.release_processing(session, [p.id for p in rows if p.status == "processed"], actor.id)
     for p in rows:
         if p.status == "processed":
             p.status, p.processed_at, p.processed_by, p.updated_by = "draft", None, None, actor.id
@@ -777,6 +794,7 @@ async def publish_run(session: AsyncSession, redis: Redis, actor: Principal, run
         raise AppError("NOTHING_TO_PUBLISH", "There is no processed payslip to publish")
     await _check_second_person(session, run, todo, actor, run_processed_by=run.processed_by)
     await _share_lock_structures(session, todo)
+    await comps.mark_paid(session, todo, actor.id)  # processing -> paid, carried rows follow the new revision
     now = utcnow()
     company = await get_company(session)
     pushes = []
@@ -929,6 +947,7 @@ async def process_payslip(session: AsyncSession, actor: Principal, payslip_id: u
     errors = await _recompute_open(session, run, [ps])
     if errors:
         raise await _blocked(session, actor, "payslip", ps.id, errors)
+    await comps.attach_processing(session, [ps], actor.id)
     now = utcnow()
     ps.status, ps.processed_at, ps.processed_by, ps.updated_by, ps.hold = "processed", now, actor.id, actor.id, False
     audit(session, action="payroll.payslip.process", actor=actor, entity_type="payslip", entity_id=ps.id)
@@ -941,6 +960,7 @@ async def reopen_payslip(session: AsyncSession, actor: Principal, payslip_id: uu
     await pc.forbid_self(session, actor, ps.user_id, entity_type="payslip", entity_id=ps.id)
     if run.status != "published" or ps.status != "processed":
         raise AppError("PAYROLL_LOCKED", "Only a processed payslip of a published run can be reopened")
+    await comps.release_processing(session, [ps.id], actor.id)
     ps.status, ps.processed_at, ps.processed_by, ps.updated_by = "draft", None, None, actor.id
     ps.version += 1
     audit(session, action="payroll.payslip.reopen", actor=actor, entity_type="payslip", entity_id=ps.id)
@@ -962,6 +982,7 @@ async def publish_payslip(
         raise AppError("PAYROLL_LOCKED", "Only a processed payslip of a published run can be published")
     await _check_second_person(session, run, [ps], actor)
     await _share_lock_structures(session, [ps])
+    await comps.mark_paid(session, [ps], actor.id)
     now = utcnow()
     await _publish_one(session, ps, actor.id, now)
     audit(session, action="payroll.payslip.publish", actor=who, entity_type="payslip", entity_id=ps.id,
@@ -1002,6 +1023,7 @@ async def revise(session: AsyncSession, actor: Principal, run_id: uuid.UUID, use
     if not pull_days(new, u, b.ctx, cutoff, run.config):
         raise AppError("VALIDATION_ERROR", "The employee was not employed in this period",
                        details=[{"field": "user_id", "message": "not employed"}])  # fmt: skip
+    await comps.pull_for(session, [new], run.period, lock=False)  # carried `paid` rows of the live copy + new pending rows
     recompute(new, user=u, period=run.period, structs=b.structs.get(u.id, []), adopt_latest=True, cfg=run.config,
               prior=b.prior.get(u.id, []))  # fmt: skip
     new.version = 1

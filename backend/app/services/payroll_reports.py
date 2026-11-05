@@ -172,6 +172,11 @@ async def dashboard(session: AsyncSession, raw_period: str | None) -> dict[str, 
 
 
 # ================================================================================================== variance
+def _component_signature(ps: Any) -> list[tuple[str, str]]:
+    """System lines (plan 15 `inputs.components`) of a payslip as comparable (code, amount) pairs."""
+    return sorted((x["code"], x["amount"]) for x in (ps.inputs or {}).get("components", []))
+
+
 async def variance(session: AsyncSession, raw_period: str | None) -> dict[str, Any]:
     today = await runs._today(session)
     period = _period(raw_period, today)
@@ -196,6 +201,8 @@ async def variance(session: AsyncSession, raw_period: str | None) -> dict[str, A
                 reasons.append("STRUCTURE_CHANGE")
             if _lop(c) != _lop(p):
                 reasons.append("LOP_CHANGE")
+            if _component_signature(c) != _component_signature(p):
+                reasons.append("COMPONENTS")
             codes_c = {e["code"] for e in c.result["earnings"] if e["code"] in calc.EARNING_ADJUSTMENTS}
             if codes_c:
                 reasons.append("ADJUSTMENTS")

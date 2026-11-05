@@ -81,6 +81,13 @@ TABLES = [
     "payslips",
     "statutory_challans",
     "statutory_challan_events",
+    "payroll_import_batches",
+    "payroll_item_events",
+    "payroll_one_time_items",
+    "payroll_loans",
+    "payroll_loan_installments",
+    "payroll_arrears",
+    "leave_encashments",
     "duty_locations",
     "duty_location_assignments",
     "on_duty_requests",
@@ -126,6 +133,7 @@ def _adapt_metadata_for_sqlite() -> None:
                 or "extract(" in str(c.sqltext)
                 or "DATE '" in str(c.sqltext)
                 or "trunc(" in str(c.sqltext)
+                or " ~ " in str(c.sqltext)
             ):
                 table.constraints.discard(c)
         for ix in list(table.indexes):

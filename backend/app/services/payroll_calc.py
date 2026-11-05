@@ -22,12 +22,14 @@ MAX_MONEY = Decimal("10000000.00")
 _MONEY_RE = re.compile(r"^\d{1,8}(\.\d{1,2})?$")
 CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,15}$")
 
-EARNING_ADJUSTMENTS = ("BONUS", "ARREARS", "INCENTIVE", "REIMBURSEMENT", "OTHER_EARNING")
+EARNING_ADJUSTMENTS = ("BONUS", "ARREARS", "INCENTIVE", "REIMBURSEMENT", "OTHER_EARNING", "OVERTIME", "LEAVE_ENCASH")
 DEDUCTION_ADJUSTMENTS = ("ADVANCE_RECOVERY", "LOAN_EMI", "OTHER_DEDUCTION")
 RESERVED_CODES = frozenset(
     {"BASIC", "HRA", "PF", "ESI", "PF_ER_REC", "ESI_ER_REC", "PT", "TDS", "LOP", *EARNING_ADJUSTMENTS, *DEDUCTION_ADJUSTMENTS}
 )
-ESI_ADJUSTMENTS = frozenset({"INCENTIVE", "OTHER_EARNING"})  # adjustment earnings that are ESI wages
+ESI_ADJUSTMENTS = frozenset({"INCENTIVE", "OTHER_EARNING", "OVERTIME"})  # adjustment earnings that are ESI wages
+# Codes that only the component engine may produce (plan 15 P3): refused in manual adjustments, structures and fixed deductions.
+SYSTEM_ONLY_CODES = frozenset({"OVERTIME", "LEAVE_ENCASH"})
 
 ERROR_CODES = frozenset({"STRUCTURE_MISSING", "NEGATIVE_NET_PAY"})
 WARNING_CODES = frozenset(
@@ -40,6 +42,10 @@ WARNING_CODES = frozenset(
         "NO_PAN",
         "STRUCTURE_CHANGED",
         "NOT_ELIGIBLE",
+        "OVERTIME_UNREVIEWED",
+        "OVERTIME_CAPPED",
+        "ARREARS_PROPOSED",
+        "MANUAL_COMPONENT_OVERLAP",
     }
 )
 
@@ -263,7 +269,8 @@ class Adjustment:
 class PayInputs:
     tds: Decimal | None = None  # None = the structure default
     pt_override: Decimal | None = None
-    adjustments: tuple[Adjustment, ...] = ()
+    adjustments: tuple[Adjustment, ...] = ()  # typed in by HR
+    components: tuple[Adjustment, ...] = ()  # pulled by the component engine (plan 15); treated like adjustments
 
 
 @dataclass
@@ -377,7 +384,8 @@ def calculate(
         if a.esi_wage:
             esi_wage += amt
     gross = basic + hra + sum((Decimal(e["amount"]) for e in r.earnings[2:]), Decimal(0))
-    for adj in inputs.adjustments:
+    all_adjustments = (*inputs.adjustments, *inputs.components)
+    for adj in all_adjustments:
         if adj.code in EARNING_ADJUSTMENTS:
             r.earnings.append({"code": adj.code, "label": adj.label, "monthly": None, "amount": money_str(adj.amount)})
             gross += adj.amount
@@ -414,7 +422,7 @@ def calculate(
     ded.append(("TDS", LABELS["TDS"], q2(inputs.tds if inputs.tds is not None else structure.tds_monthly)))
     for f in structure.fixed_deductions:
         ded.append((f.code, f.name, f.amount))
-    for adj in inputs.adjustments:
+    for adj in all_adjustments:
         if adj.code in DEDUCTION_ADJUSTMENTS:
             ded.append((adj.code, adj.label, adj.amount))
 

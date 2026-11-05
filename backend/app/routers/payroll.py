@@ -7,8 +7,9 @@ import uuid
 from types import SimpleNamespace
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile
 from fastapi.responses import StreamingResponse
+from pydantic import SecretStr
 from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,9 +25,12 @@ from ..models import Payslip
 from ..schemas.payroll import (
     ChallanIn,
     DetailsIn,
+    OneTimeItemCreate,
+    OneTimeItemUpdate,
     PayrollSettingsIn,
     PayslipUpdate,
     PublishIn,
+    ReasonIn,
     RegisterIn,
     ReviseIn,
     RunCreate,
@@ -35,6 +39,7 @@ from ..schemas.payroll import (
 )
 from ..services import (
     admin_security,
+    payroll_items,
     payroll_register,
     payroll_reports,
     payroll_settings,
@@ -42,6 +47,7 @@ from ..services import (
     payroll_structures,
     payslip_pdf,
     xlsx,
+    xlsx_import,
 )
 from ..services import payroll_common as pc
 from ..services import payroll_runs as runs
@@ -611,3 +617,120 @@ async def put_challan(
         session, redis, actor, type_=body.type, raw_period=body.period, status=body.status, paid_on=body.paid_on,
         reference=body.reference, amount=body.amount, password=body.current_password,
     )  # fmt: skip
+
+
+# ============================================================================================ plan 15: one-time items (3a)
+@admin_router.get("/items")
+async def list_items(
+    period: str | None = Query(None, pattern=r"^\d{4}-\d{2}$"),
+    user_id: uuid.UUID | None = None,
+    code: Literal["BONUS", "INCENTIVE", "OTHER_EARNING", "OTHER_DEDUCTION"] | None = None,
+    status: Literal["pending", "processing", "paid", "cancelled"] | None = None,
+    batch_id: uuid.UUID | None = None,
+    page: PageParams = Depends(),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "admin_read", (120, 60))
+    return await payroll_items.list_items(
+        session, period=period, user_id=user_id, code=code, status=status, batch_id=batch_id, page=page
+    )
+
+
+@admin_router.post("/items", status_code=201)
+async def create_item(
+    body: OneTimeItemCreate,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "write", (60, 60), closed=True)
+    return await payroll_items.create_item(session, actor, body)
+
+
+@admin_router.get("/items/template")
+async def items_template(redis: Redis = Depends(get_redis), actor: Principal = Depends(MANAGE)):
+    await pc.limit(redis, actor, "import", (10, 60), (50, 86400), closed=True)
+    built = await payroll_items.template()
+    return StreamingResponse(
+        xlsx.iter_file(built),
+        media_type=xlsx.XLSX_MIME,
+        headers={**_NOSTORE, "Content-Disposition": 'attachment; filename="payroll-items-template.xlsx"'},
+        background=BackgroundTask(built.close),
+    )
+
+
+@admin_router.post("/items/import")
+async def import_items(
+    response: Response,
+    file: UploadFile = File(...),
+    period: str = Form(..., pattern=r"^\d{4}-\d{2}$"),
+    file_sha256: str | None = Form(None, max_length=64),
+    current_password: SecretStr | None = Form(None, max_length=128),
+    dry_run: bool = Query(True),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    """xlsx bulk upload. `dry_run=true` (default) validates and reports; `dry_run=false` re-sends the same file with its
+    `file_sha256` and the caller's own password and imports everything or nothing."""
+    if dry_run:
+        await pc.limit(redis, actor, "import", (10, 60), (50, 86400), closed=True)
+    else:
+        await pc.limit(redis, actor, "action", (10, 60), closed=True)
+    data = await xlsx_import.read_upload(file)
+    out = await payroll_items.import_items(
+        session, redis, actor, data=data, raw_period=period, dry_run=dry_run, file_sha256=file_sha256, password=current_password
+    )
+    response.headers["Cache-Control"] = "no-store"
+    if not dry_run:
+        response.status_code = 201
+    return out
+
+
+@admin_router.get("/items/batches")
+async def list_batches(
+    period: str | None = Query(None, pattern=r"^\d{4}-\d{2}$"),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "admin_read", (120, 60))
+    return await payroll_items.list_batches(session, period)
+
+
+@admin_router.post("/items/batches/{batch_id}/cancel")
+async def cancel_batch(
+    batch_id: uuid.UUID,
+    body: ReasonIn,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "write", (60, 60), closed=True)
+    return await payroll_items.cancel_batch(session, actor, batch_id, body.reason)
+
+
+@admin_router.put("/items/{item_id}")
+async def update_item(
+    item_id: uuid.UUID,
+    body: OneTimeItemUpdate,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "write", (60, 60), closed=True)
+    return await payroll_items.update_item(session, actor, item_id, body)
+
+
+@admin_router.post("/items/{item_id}/cancel")
+async def cancel_item(
+    item_id: uuid.UUID,
+    body: ReasonIn,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "write", (60, 60), closed=True)
+    return await payroll_items.cancel_item(session, actor, item_id, body.reason)

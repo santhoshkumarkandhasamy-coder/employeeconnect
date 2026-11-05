@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+import uuid
 from decimal import Decimal, InvalidOperation
 from typing import Annotated, Any, Literal
 
@@ -251,3 +252,67 @@ class StatutoryFileIn(_Strict):
     """Body of the statutory file downloads. `current_password` (step-up) is required for pf_ecr and esi, ignored for pt."""
 
     current_password: SecretStr | None = Field(default=None, min_length=1, max_length=128)
+
+
+# ============================================================================================ plan 15: pay components
+ItemCode = Literal["BONUS", "INCENTIVE", "OTHER_EARNING", "OTHER_DEDUCTION"]
+PeriodStr = Annotated[str, Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")]
+
+
+def _reason(v: str) -> str:
+    v = clean_text(v)
+    if not 3 <= len(v) <= 200:
+        raise ValueError("must be 3-200 characters")
+    return v
+
+
+def _positive(v: Decimal) -> Decimal:
+    if v <= 0:
+        raise ValueError("must be greater than 0 (use OTHER_DEDUCTION for a deduction)")
+    return v
+
+
+class OneTimeItemCreate(_Strict):
+    user_id: uuid.UUID
+    period: PeriodStr
+    code: ItemCode
+    label: str
+    amount: Money
+
+    _l = field_validator("label")(_label)
+    _a = field_validator("amount")(_positive)
+
+
+class OneTimeItemUpdate(_Strict):
+    expected_version: int = Field(ge=1)
+    period: PeriodStr | None = None
+    label: str | None = None
+    amount: Money | None = None
+
+    @field_validator("label")
+    @classmethod
+    def _lab(cls, v: str | None) -> str | None:
+        return _label(v) if v is not None else None
+
+    @field_validator("amount")
+    @classmethod
+    def _amt(cls, v: Decimal | None) -> Decimal | None:
+        return _positive(v) if v is not None else None
+
+    @model_validator(mode="after")
+    def _something(self) -> OneTimeItemUpdate:
+        sent = self.model_fields_set - {"expected_version"}
+        if not sent:
+            raise ValueError("send at least one of period, label, amount")
+        for name in sent:
+            if getattr(self, name) is None:
+                raise ValueError(f"{name} cannot be null")
+        return self
+
+
+class ReasonIn(_Strict):
+    """Body of the cancel actions: a reason of 3-200 characters (stored encrypted, never audited)."""
+
+    reason: str
+
+    _r = field_validator("reason")(_reason)
