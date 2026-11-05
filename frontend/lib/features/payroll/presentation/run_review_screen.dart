@@ -11,9 +11,13 @@ import '../../admin/presentation/admin_widgets.dart'
 import '../data/payroll_repository.dart';
 import '../domain/payroll_models.dart';
 import '../domain/payroll_money.dart';
+import '../domain/phase5a_models.dart' show phase5ErrorMessage;
+import 'delivery_report_screen.dart';
+import 'payment_batches_screen.dart';
 import 'payroll_providers.dart';
 import 'payroll_widgets.dart';
 import 'payslip_edit_screen.dart';
+import 'publish_request_widgets.dart';
 
 /// Review of one run: totals, per-employee rows with errors / warnings, and the
 /// lifecycle actions allowed for the current status and permissions.
@@ -74,8 +78,11 @@ class _RunReviewScreenState extends ConsumerState<RunReviewScreen> {
       if (!mounted) return;
       if (e.code == 'PAYROLL_BLOCKED') {
         unawaited(showBlockedDialog(context, e));
+      } else if (e.code == 'PUBLISH_REQUEST_REQUIRED') {
+        // Maker-checker applies: offer the request flow instead of a plain error.
+        unawaited(_offerRequest());
       } else {
-        payrollSnack(context, payrollErrorMessage(e));
+        payrollSnack(context, phase5ErrorMessage(e));
         // The run moved on (published / already processed): show its real state.
         if (e.code == 'PAYROLL_LOCKED' || e.code == 'CONFLICT') _reload();
       }
@@ -103,6 +110,24 @@ class _RunReviewScreenState extends ConsumerState<RunReviewScreen> {
       );
       if (!done) throw const _Cancelled();
     }, done: 'Payslips published.',);
+  }
+
+  /// The server refused a direct publish (409 PUBLISH_REQUEST_REQUIRED).
+  Future<void> _offerRequest() async {
+    final ok = await confirmAction(
+      context,
+      title: 'A second person must approve',
+      message: 'This payroll cannot be published directly: somebody else with publish rights has to approve it. '
+          'Send a publish request now?',
+      confirmLabel: 'Request publish',
+    );
+    if (!ok || !mounted) return;
+    await _request();
+  }
+
+  Future<void> _request() async {
+    await requestPublishFlow(context, ref, id: widget.runId, payslip: false);
+    if (mounted) _reload();
   }
 
   Future<void> _delete(PayrollRun run) async {
@@ -187,7 +212,24 @@ class _RunReviewScreenState extends ConsumerState<RunReviewScreen> {
                   onPublish: () => _publish(run),
                   onDelete: () => _delete(run),
                   onRegister: () => _register(run),
+                  onRequestPublish: _request,
+                  onPayments: () => Navigator.of(context).push<void>(
+                    MaterialPageRoute<void>(builder: (_) => PaymentBatchesScreen(runId: run.id)),
+                  ),
+                  onDelivery: () => Navigator.of(context).push<void>(
+                    MaterialPageRoute<void>(
+                      builder: (_) => DeliveryReportScreen(runId: run.id, period: run.period),
+                    ),
+                  ),
                 ),
+                if (run.publishRequest != null)
+                  PublishRefCard(
+                    request: run.publishRequest!,
+                    onTap: () async {
+                      await openPublishRequest(context, run.publishRequest!.id);
+                      if (mounted) _reload();
+                    },
+                  ),
                 const SizedBox(height: 8),
                 TextField(
                   controller: _search,
@@ -344,7 +386,13 @@ class _Actions extends StatelessWidget {
     required this.onPublish,
     required this.onDelete,
     required this.onRegister,
+    required this.onRequestPublish,
+    required this.onPayments,
+    required this.onDelivery,
   });
+  final VoidCallback onRequestPublish;
+  final VoidCallback onPayments;
+  final VoidCallback onDelivery;
   final PayrollRun run;
   final List<String> perms;
   final bool busy;
@@ -385,6 +433,27 @@ class _Actions extends StatelessWidget {
           onPressed: busy ? null : onPublish,
           icon: const Icon(Icons.send_outlined),
           label: const Text('Publish'),
+        ),
+      if (manage && run.isProcessed && !(run.publishRequest?.isOpen ?? false))
+        OutlinedButton.icon(
+          key: const ValueKey('request-publish'),
+          onPressed: busy ? null : onRequestPublish,
+          icon: const Icon(Icons.how_to_reg_outlined),
+          label: const Text('Request publish'),
+        ),
+      if (run.isPublished)
+        OutlinedButton.icon(
+          key: const ValueKey('run-payments'),
+          onPressed: onPayments,
+          icon: const Icon(Icons.account_balance_outlined),
+          label: const Text('Payments'),
+        ),
+      if (run.isPublished)
+        OutlinedButton.icon(
+          key: const ValueKey('run-delivery'),
+          onPressed: onDelivery,
+          icon: const Icon(Icons.mark_email_read_outlined),
+          label: const Text('Delivery'),
         ),
       OutlinedButton.icon(
         key: const ValueKey('register-run'),

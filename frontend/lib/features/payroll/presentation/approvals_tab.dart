@@ -8,10 +8,14 @@ import 'fnf_detail_screen.dart';
 import 'fnf_widgets.dart';
 import 'increment_detail_screen.dart';
 import 'increment_widgets.dart';
+import '../domain/phase5a_models.dart';
+import 'payment_widgets.dart';
 import 'payroll_providers.dart';
+import 'publish_request_widgets.dart';
 import 'payroll_widgets.dart';
 
-/// Approvals queue (needs `payroll.approve`): increments and bulk batches
+/// Approvals queue (`payroll.approve` and / or `payroll.publish`): increments, bulk
+/// batches, final settlements, payment batches (approve) and publish requests (publish)
 /// waiting for a decision. The maker (creator or submitter) and the employee
 /// cannot decide on their own item; the server enforces it too.
 class ApprovalsTab extends ConsumerWidget {
@@ -38,6 +42,72 @@ class ApprovalsTab extends ConsumerWidget {
             : ListView(
                 padding: const EdgeInsets.fromLTRB(12, 8, 12, 48),
                 children: [
+                  if (q.publishRequests.isNotEmpty) ...[
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      child: Text('Publish requests', style: Theme.of(context).textTheme.titleSmall),
+                    ),
+                    for (final r in q.publishRequests)
+                      PublishRequestTile(
+                        request: r,
+                        onTap: () async {
+                          await openPublishRequest(context, r.id);
+                          ref.invalidate(approvalQueueProvider);
+                        },
+                        extra: canDecidePublishRequest(r, selfId)
+                            ? Padding(
+                                padding: const EdgeInsets.only(top: 6),
+                                child: Wrap(
+                                  spacing: 8,
+                                  children: [
+                                    FilledButton.icon(
+                                      key: ValueKey('queue-publish-approve-${r.id}'),
+                                      onPressed: () => approvePublishFlow(context, ref, r),
+                                      icon: const Icon(Icons.lock_outline, size: 18),
+                                      label: const Text('Approve'),
+                                    ),
+                                    OutlinedButton(
+                                      key: ValueKey('queue-publish-reject-${r.id}'),
+                                      onPressed: () => rejectPublishFlow(context, ref, r),
+                                      child: const Text('Reject'),
+                                    ),
+                                  ],
+                                ),
+                              )
+                            : Padding(
+                                padding: const EdgeInsets.only(top: 4),
+                                child: Text(
+                                  cannotDecidePublishReason(r, selfId) ?? '',
+                                  key: ValueKey('queue-publish-why-${r.id}'),
+                                  style: Theme.of(context).textTheme.bodySmall,
+                                ),
+                              ),
+                      ),
+                  ],
+                  if (q.paymentBatches.isNotEmpty) ...[
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      child: Text('Payment batches', style: Theme.of(context).textTheme.titleSmall),
+                    ),
+                    for (final b in q.paymentBatches)
+                      PaymentBatchTile(
+                        batch: b,
+                        onTap: () async {
+                          await openPaymentBatch(context, b.id);
+                          ref.invalidate(approvalQueueProvider);
+                        },
+                        extra: canDecideBatch(b, selfId)
+                            ? null
+                            : Padding(
+                                padding: const EdgeInsets.only(top: 4),
+                                child: Text(
+                                  cannotDecideBatchReason(b, selfId) ?? '',
+                                  key: ValueKey('queue-batch-why-${b.id}'),
+                                  style: Theme.of(context).textTheme.bodySmall,
+                                ),
+                              ),
+                      ),
+                  ],
                   if (q.batches.isNotEmpty) ...[
                     Padding(
                       padding: const EdgeInsets.symmetric(vertical: 6),

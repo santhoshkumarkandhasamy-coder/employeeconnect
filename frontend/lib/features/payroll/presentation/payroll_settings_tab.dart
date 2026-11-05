@@ -12,6 +12,7 @@ import '../data/payroll_repository.dart';
 import '../domain/payroll_logic.dart';
 import '../domain/payroll_models.dart';
 import '../domain/payroll_money.dart';
+import '../domain/phase5a_models.dart' show bankFileSecondPersonKey;
 import '../domain/claims_models.dart';
 import 'categories_editor.dart';
 import 'payroll_providers.dart';
@@ -23,9 +24,9 @@ import 'pt_slab_editor.dart';
 /// runs and to a draft run after "Refresh" (runs snapshot the settings).
 const String secondPersonKey = 'payroll.publish_requires_second_person';
 
-/// Needs role.assign + the caller's password too (contract 18.1).
+/// Needs role.assign + the caller's password too (contract 18.1; 19.0 for the bank file key).
 const String structureApprovalKey = 'payroll.structure_changes_need_approval';
-const Set<String> stepUpSettingKeys = {secondPersonKey, structureApprovalKey};
+const Set<String> stepUpSettingKeys = {secondPersonKey, structureApprovalKey, bankFileSecondPersonKey};
 
 class PayrollSettingsTab extends ConsumerWidget {
   const PayrollSettingsTab({super.key});

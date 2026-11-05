@@ -313,7 +313,11 @@ class Payslip {
     this.warnings = const [],
     this.isFinal = false,
     this.finalSettlement,
+    this.publishRequest,
   });
+
+  /// Admin shape (5a): newest publish request of this payslip, or null.
+  final PublishRequestRef? publishRequest;
 
   final String id;
   final String period;
@@ -390,6 +394,7 @@ class Payslip {
               status: _s(_m(j['final_settlement'])['status']),
             )
           : null,
+      publishRequest: PublishRequestRef.parse(j['publish_request']),
     );
   }
 
@@ -503,12 +508,16 @@ class PayrollRun {
     this.attendanceCutoff,
     this.publishedAt,
     this.processedAt,
+    this.publishRequest,
   });
   final String id;
   final String period;
   final String status;
   final String? payDate;
   final String? attendanceCutoff;
+
+  /// Newest publish request of the run (contract 19.1), or null.
+  final PublishRequestRef? publishRequest;
   final RunCounts counts;
   final RunTotals totals;
   final DateTime? publishedAt;
@@ -528,7 +537,41 @@ class PayrollRun {
         totals: RunTotals.fromJson(_m(j['totals'])),
         publishedAt: parseTimestamp(j['published_at']),
         processedAt: parseTimestamp(j['processed_at']),
+        publishRequest: PublishRequestRef.parse(j['publish_request']),
       );
+}
+
+/// `publish_request` of a Run or AdminPayslip (contract 19.1): the newest
+/// request, without snapshot or comment.
+class PublishRequestRef {
+  const PublishRequestRef({
+    required this.id,
+    required this.status,
+    this.requestedBy,
+    this.requestedAt,
+    this.staleReason,
+  });
+  final String id;
+
+  /// `submitted` | `approved` | `rejected` | `withdrawn` | `stale`.
+  final String status;
+  final EmployeeRef? requestedBy;
+  final DateTime? requestedAt;
+  final String? staleReason;
+
+  bool get isOpen => status == 'submitted';
+
+  static PublishRequestRef? parse(Object? v) {
+    if (v is! Map) return null;
+    final j = v.cast<String, dynamic>();
+    return PublishRequestRef(
+      id: _s(j['id']),
+      status: _opt(j['status']) ?? 'submitted',
+      requestedBy: EmployeeRef.parse(j['requested_by']),
+      requestedAt: parseTimestamp(j['requested_at']),
+      staleReason: _opt(j['stale_reason']),
+    );
+  }
 }
 
 /// A row of `GET /admin/payroll/runs/{id}/payslips`. Draft rows with an error
@@ -822,8 +865,12 @@ class PayrollDetails {
     this.overtimeEligible = false,
     this.noticePeriodDays,
     this.lastWorkingDay,
+    this.bankChangedAt,
   });
   final String userId;
+
+  /// Read-only (5a): when the bank name, account, IFSC or payment mode last changed.
+  final DateTime? bankChangedAt;
   final String? designation;
   final String paymentMode;
   final bool includeInPayroll;
@@ -861,6 +908,7 @@ class PayrollDetails {
         overtimeEligible: j['overtime_eligible'] == true,
         noticePeriodDays: j['notice_period_days'] is num ? (j['notice_period_days'] as num).toInt() : null,
         lastWorkingDay: _opt(j['last_working_day']),
+        bankChangedAt: parseTimestamp(j['bank_changed_at']),
       );
 }
 

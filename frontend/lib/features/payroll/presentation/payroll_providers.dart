@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../admin/presentation/admin_providers.dart' show AdminPagedNotifier;
+import '../../admin/presentation/admin_widgets.dart' show adminPermissionsProvider;
 import '../../announcements/presentation/announcement_providers.dart' show PagedList;
 import '../../attendance/domain/attendance_models.dart' show Paged;
 import '../data/payroll_repository.dart';
@@ -9,6 +10,7 @@ import '../domain/gross_split.dart';
 import '../domain/pay_items_models.dart';
 import '../domain/phase4a_models.dart';
 import '../domain/phase4b_models.dart';
+import '../domain/phase5a_models.dart';
 import '../domain/payroll_models.dart';
 
 /// All payroll state is autoDispose and in memory only: it is never written to
@@ -328,30 +330,108 @@ final myFnfProvider = FutureProvider.autoDispose<MyFnf?>(
   (ref) => ref.watch(payrollRepositoryProvider).myFnf(),
 );
 
+// ---- phase 5a: publish requests, delivery, bank accounts, payment batches (contract 19) ---
+
+final publishCheckRunProvider = FutureProvider.autoDispose.family<PublishCheck, String>(
+  (ref, runId) => ref.watch(payrollRepositoryProvider).publishCheckRun(runId),
+);
+
+final publishCheckPayslipProvider = FutureProvider.autoDispose.family<PublishCheck, String>(
+  (ref, payslipId) => ref.watch(payrollRepositoryProvider).publishCheckPayslip(payslipId),
+);
+
+class PublishRequestsNotifier extends AdminPagedNotifier<PublishRequest, PublishRequestQuery> {
+  @override
+  Future<Paged<PublishRequest>> fetchPage(PublishRequestQuery arg, int page) =>
+      ref.read(payrollRepositoryProvider).publishRequests(arg, page: page);
+
+  @override
+  String idOf(PublishRequest item) => item.id;
+}
+
+final publishRequestsProvider = AsyncNotifierProvider.autoDispose
+    .family<PublishRequestsNotifier, PagedList<PublishRequest>, PublishRequestQuery>(
+  PublishRequestsNotifier.new,
+);
+
+final publishRequestProvider = FutureProvider.autoDispose.family<PublishRequest, String>(
+  (ref, id) => ref.watch(payrollRepositoryProvider).publishRequest(id),
+);
+
+/// Family argument: (query, page). The report is paged with previous / next.
+typedef DeliveryKey = (DeliveryQuery query, int page);
+
+final deliveryProvider = FutureProvider.autoDispose.family<DeliveryPage, DeliveryKey>(
+  (ref, key) => ref.watch(payrollRepositoryProvider).delivery(key.$1, page: key.$2),
+);
+
+final bankAccountsProvider = FutureProvider.autoDispose<List<BankAccount>>(
+  (ref) => ref.watch(payrollRepositoryProvider).bankAccounts(),
+);
+
+class PaymentBatchesNotifier extends AdminPagedNotifier<PaymentBatch, PaymentBatchQuery> {
+  @override
+  Future<Paged<PaymentBatch>> fetchPage(PaymentBatchQuery arg, int page) =>
+      ref.read(payrollRepositoryProvider).paymentBatches(arg, page: page);
+
+  @override
+  String idOf(PaymentBatch item) => item.id;
+}
+
+final paymentBatchesProvider = AsyncNotifierProvider.autoDispose
+    .family<PaymentBatchesNotifier, PagedList<PaymentBatch>, PaymentBatchQuery>(PaymentBatchesNotifier.new);
+
+final paymentBatchProvider = FutureProvider.autoDispose.family<PaymentBatch, String>(
+  (ref, id) => ref.watch(payrollRepositoryProvider).paymentBatch(id),
+);
+
 /// Submitted increments (outside bulk batches), batches and F&F settlements
 /// waiting for a decision: the Approvals queue and its badge. The batch endpoint
 /// has no status filter, so the first page of batches is filtered here.
 class ApprovalQueue {
-  const ApprovalQueue({required this.increments, required this.batches, this.fnfs = const []});
+  const ApprovalQueue({
+    required this.increments,
+    required this.batches,
+    this.fnfs = const [],
+    this.publishRequests = const [],
+    this.paymentBatches = const [],
+  });
   final List<Increment> increments;
   final List<IncrementBatch> batches;
   final List<FnfListItem> fnfs;
-  int get count => increments.length + batches.length + fnfs.length;
+
+  /// Submitted publish requests (only fetched for `payroll.publish` holders).
+  final List<PublishRequest> publishRequests;
+
+  /// Submitted payment batches (only fetched for `payroll.approve` holders).
+  final List<PaymentBatch> paymentBatches;
+  int get count =>
+      increments.length + batches.length + fnfs.length + publishRequests.length + paymentBatches.length;
 }
 
 final approvalQueueProvider = FutureProvider.autoDispose<ApprovalQueue>((ref) async {
   final repo = ref.watch(payrollRepositoryProvider);
-  final results = await Future.wait([
-    repo.increments(const IncrementQuery(status: 'submitted')),
-    repo.incrementBatches(),
-    repo.fnfList(const FnfQuery(status: 'submitted')),
+  final perms = ref.watch(adminPermissionsProvider);
+  final approver = perms.contains(payrollApprovePerm);
+  final publisher = perms.contains(PayrollPerm.publish);
+  final results = await Future.wait<Object?>([
+    if (approver) repo.increments(const IncrementQuery(status: 'submitted')),
+    if (approver) repo.incrementBatches(),
+    if (approver) repo.fnfList(const FnfQuery(status: 'submitted')),
+    if (publisher) repo.publishRequests(const PublishRequestQuery(status: 'submitted')),
+    if (approver) repo.paymentBatches(const PaymentBatchQuery(status: 'submitted')),
   ]);
-  final incs = (results[0] as Paged<Increment>).items;
-  final batches = (results[1] as Paged<IncrementBatch>).items;
-  final fnfs = (results[2] as Paged<FnfListItem>).items;
+  var n = 0;
+  final incs = approver ? (results[n++] as Paged<Increment>).items : const <Increment>[];
+  final batches = approver ? (results[n++] as Paged<IncrementBatch>).items : const <IncrementBatch>[];
+  final fnfs = approver ? (results[n++] as Paged<FnfListItem>).items : const <FnfListItem>[];
+  final reqs = publisher ? (results[n++] as Paged<PublishRequest>).items : const <PublishRequest>[];
+  final pays = approver ? (results[n++] as Paged<PaymentBatch>).items : const <PaymentBatch>[];
   return ApprovalQueue(
     increments: [for (final i in incs) if (!i.isInBatch) i],
     batches: [for (final b in batches) if (!b.isCancelled && b.submittedCount > 0) b],
     fnfs: [for (final f in fnfs) if (f.status == 'submitted') f],
+    publishRequests: [for (final r in reqs) if (r.isSubmitted) r],
+    paymentBatches: [for (final b in pays) if (b.isSubmitted) b],
   );
 });

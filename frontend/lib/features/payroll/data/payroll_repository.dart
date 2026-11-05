@@ -12,6 +12,7 @@ import '../domain/claims_models.dart';
 import '../domain/pay_items_models.dart';
 import '../domain/phase4a_models.dart';
 import '../domain/phase4b_models.dart';
+import '../domain/phase5a_models.dart';
 import '../domain/payroll_models.dart';
 
 /// A downloaded file held in memory (a payslip PDF or the register workbook).
@@ -1069,7 +1070,187 @@ class PayrollRepository {
 
   Future<MyOvertime> myOvertime(String period) async =>
       MyOvertime.fromJson(await _json('GET', '/me/overtime', query: {'period': period}));
+
+  // ---- phase 5a: publish requests (contract 19.2) -------------------------------------
+
+  Future<PublishCheck> publishCheckRun(String runId) async =>
+      PublishCheck.fromJson(await _json('GET', '$_a/runs/$runId/publish-check'));
+
+  Future<PublishCheck> publishCheckPayslip(String payslipId) async =>
+      PublishCheck.fromJson(await _json('GET', '$_a/payslips/$payslipId/publish-check'));
+
+  Future<PublishRequest> createRunPublishRequest(String runId, {String? comment}) async =>
+      PublishRequest.fromJson(await _json('POST', '$_a/runs/$runId/publish-requests', body: {
+        'comment': _blankToNull(comment),
+      },),);
+
+  Future<PublishRequest> createPayslipPublishRequest(String payslipId, {String? comment}) async =>
+      PublishRequest.fromJson(await _json('POST', '$_a/payslips/$payslipId/publish-requests', body: {
+        'comment': _blankToNull(comment),
+      },),);
+
+  Future<Paged<PublishRequest>> publishRequests(PublishRequestQuery q, {int page = 1}) async =>
+      Paged.parse(
+        await _json('GET', '$_a/publish-requests', query: {
+          if (q.status != null) 'status': q.status,
+          if (q.runId != null) 'run_id': q.runId,
+          'page': page,
+          'page_size': 20,
+        },),
+        PublishRequest.fromJson,
+      );
+
+  Future<PublishRequest> publishRequest(String id) async =>
+      PublishRequest.fromJson(await _json('GET', '$_a/publish-requests/$id'));
+
+  Future<PublishRequest> withdrawPublishRequest(String id, {required int expectedVersion}) async =>
+      PublishRequest.fromJson(await _json('POST', '$_a/publish-requests/$id/withdraw', body: {
+        'expected_version': expectedVersion,
+      },),);
+
+  /// Needs `payroll.publish` and the caller's own password (step-up, never kept).
+  Future<PublishApproveResult> approvePublishRequest(
+    String id, {
+    required int expectedVersion,
+    required String currentPassword,
+    String? comment,
+  }) async =>
+      PublishApproveResult.fromJson(await _json('POST', '$_a/publish-requests/$id/approve', body: {
+        'expected_version': expectedVersion,
+        'comment': _blankToNull(comment),
+        'current_password': currentPassword,
+      },),);
+
+  Future<PublishRequest> rejectPublishRequest(
+    String id, {
+    required int expectedVersion,
+    required String comment,
+  }) async =>
+      PublishRequest.fromJson(await _json('POST', '$_a/publish-requests/$id/reject', body: {
+        'expected_version': expectedVersion,
+        'comment': comment.trim(),
+      },),);
+
+  // ---- phase 5a: delivery (19.3) ---------------------------------------------------------
+
+  Future<DeliveryPage> delivery(DeliveryQuery q, {int page = 1}) async =>
+      DeliveryPage.fromJson(await _json('GET', '$_a/runs/${q.runId}/delivery', query: {
+        if (q.state != null) 'state': q.state,
+        if (q.q.trim().isNotEmpty) 'q': q.q.trim(),
+        'page': page,
+        'page_size': 50,
+      },),);
+
+  /// [userIds] null = every employee who has not opened the payslip and has a phone.
+  Future<RemindResult> remindDelivery(String runId, {List<String>? userIds}) async =>
+      RemindResult.fromJson(await _json('POST', '$_a/runs/$runId/delivery/remind', body: {
+        'user_ids': userIds,
+      },),);
+
+  // ---- phase 5a: company bank accounts (19.4) --------------------------------------------
+
+  Future<List<BankAccount>> bankAccounts() => guardApi<List<BankAccount>>(() async {
+        final res = await _dio.request<Object?>('$_a/bank-accounts', options: Options(method: 'GET'));
+        final d = res.data;
+        if (d is List) {
+          return [
+            for (final e in d)
+              if (e is Map) BankAccount.fromJson(e.cast<String, dynamic>()),
+          ];
+        }
+        return d is Map ? BankAccount.parseList(d.cast<String, dynamic>()) : <BankAccount>[];
+      });
+
+  /// Needs `payroll.manage` and the caller's own password (step-up, never kept).
+  Future<BankAccount> createBankAccount(BankAccountInput input, {required String currentPassword}) async =>
+      BankAccount.fromJson(await _json('POST', '$_a/bank-accounts', body: input.toJson(currentPassword)));
+
+  /// Only the provided fields are sent; the account number and IFSC cannot change.
+  Future<BankAccount> updateBankAccount(String id, {String? label, bool? isDefault, bool? active}) async =>
+      BankAccount.fromJson(await _json('PUT', '$_a/bank-accounts/$id', body: {
+        if (label != null) 'label': label.trim(),
+        if (isDefault != null) 'is_default': isDefault,
+        if (active != null) 'active': active,
+      },),);
+
+  // ---- phase 5a: payment batches (19.5) ----------------------------------------------------
+
+  Future<PaymentBatch> createPaymentBatch(String runId, PaymentBatchCreate body) async =>
+      PaymentBatch.fromJson(await _json('POST', '$_a/runs/$runId/payment-batches', body: body.toJson()));
+
+  Future<Paged<PaymentBatch>> paymentBatches(PaymentBatchQuery q, {int page = 1}) async => Paged.parse(
+        await _json('GET', '$_a/payment-batches', query: {
+          if (q.status != null) 'status': q.status,
+          if (q.runId != null) 'run_id': q.runId,
+          'page': page,
+          'page_size': 20,
+        },),
+        PaymentBatch.fromJson,
+      );
+
+  Future<PaymentBatch> paymentBatch(String id) async =>
+      PaymentBatch.fromJson(await _json('GET', '$_a/payment-batches/$id'));
+
+  /// An empty [edit] refreshes the draft's stale lines.
+  Future<PaymentBatch> updatePaymentBatch(String id, PaymentBatchEdit edit, {required int expectedVersion}) async =>
+      PaymentBatch.fromJson(await _json('PUT', '$_a/payment-batches/$id', body: edit.toJson(expectedVersion)));
+
+  Future<PaymentBatch> submitPaymentBatch(String id, {required int expectedVersion}) async =>
+      PaymentBatch.fromJson(await _json('POST', '$_a/payment-batches/$id/submit', body: {
+        'expected_version': expectedVersion,
+      },),);
+
+  Future<PaymentBatch> withdrawPaymentBatch(String id, {required int expectedVersion}) async =>
+      PaymentBatch.fromJson(await _json('POST', '$_a/payment-batches/$id/withdraw', body: {
+        'expected_version': expectedVersion,
+      },),);
+
+  /// Needs `payroll.approve` and the caller's own password (step-up, never kept).
+  Future<PaymentBatch> approvePaymentBatch(
+    String id, {
+    required int expectedVersion,
+    required String currentPassword,
+    String? comment,
+  }) async =>
+      PaymentBatch.fromJson(await _json('POST', '$_a/payment-batches/$id/approve', body: {
+        'expected_version': expectedVersion,
+        'comment': _blankToNull(comment),
+        'current_password': currentPassword,
+      },),);
+
+  Future<PaymentBatch> rejectPaymentBatch(
+    String id, {
+    required int expectedVersion,
+    required String comment,
+  }) async =>
+      PaymentBatch.fromJson(await _json('POST', '$_a/payment-batches/$id/reject', body: {
+        'expected_version': expectedVersion,
+        'comment': comment.trim(),
+      },),);
+
+  Future<PaymentBatch> cancelPaymentBatch(String id, String reason) async =>
+      PaymentBatch.fromJson(await _json('POST', '$_a/payment-batches/$id/cancel', body: {
+        'reason': reason.trim(),
+      },),);
+
+  /// The approved CSV with the unmasked accounts. The first call marks the batch
+  /// exported; later calls return the same bytes. Needs the caller's password.
+  /// Held in memory only and handed to the share sheet by the screen.
+  Future<PayrollFile> paymentFile(String id, {required String currentPassword}) => _file(
+        'POST',
+        '$_a/payment-batches/$id/file',
+        fallbackName: 'bank-payment.csv',
+        ext: '.csv',
+        body: {'current_password': currentPassword},
+      );
+
+  Future<PaymentBatch> confirmPayment(String id, PaymentConfirm body, {required String currentPassword}) async =>
+      PaymentBatch.fromJson(
+        await _json('POST', '$_a/payment-batches/$id/confirm', body: body.toJson(currentPassword)),
+      );
 }
+
+String? _blankToNull(String? v) => v == null || v.trim().isEmpty ? null : v.trim();
 
 final payrollRepositoryProvider =
     Provider<PayrollRepository>((ref) => PayrollRepository(ref.watch(dioProvider)));

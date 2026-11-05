@@ -404,6 +404,29 @@ const List<PayrollSettingSpec> payrollSettingSpecs = [
     'Gratuity',
     options: [('basic', 'Basic'), ('basic_or_half_gross', 'Basic, or half the gross if higher')],
   ),
+  // 5a: publish requests and the bank payment file (contract 19.10).
+  PayrollSettingSpec('payroll.publish_request_ttl_hours', 'A publish request expires after',
+      PayrollSettingKind.number, 'Publishing and bank file', min: 1, max: 336, suffix: 'hours',),
+  PayrollSettingSpec('payroll.bank_file_requires_second_person',
+      'A different person must approve the bank payment file', PayrollSettingKind.boolean,
+      'Publishing and bank file',),
+  PayrollSettingSpec(
+    'payroll.bank_file_format',
+    'Bank file format',
+    PayrollSettingKind.choice,
+    'Publishing and bank file',
+    options: [('generic_neft_csv', 'Generic NEFT CSV')],
+  ),
+  PayrollSettingSpec(
+    'payroll.bank_payment_type',
+    'Payment type in the bank file',
+    PayrollSettingKind.choice,
+    'Publishing and bank file',
+    options: [('NEFT', 'NEFT'), ('RTGS', 'RTGS'), ('IMPS', 'IMPS')],
+  ),
+  PayrollSettingSpec('payroll.bank_change_alert_days',
+      'Flag bank detail changes made in the last', PayrollSettingKind.number,
+      'Publishing and bank file', min: 0, max: 90, suffix: 'days',),
 ];
 
 const String reimbursementCategoriesKey = 'payroll.reimbursement_categories';

@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/api/api_exception.dart';
 import '../../../core/security/screen_protect.dart';
+import '../../../core/utils/dates.dart';
 import '../../admin/domain/admin_models.dart' show EmployeeRef;
 import '../../admin/presentation/admin_widgets.dart' show confirmAction, runWithReauth;
 import '../data/payroll_repository.dart';
@@ -234,6 +235,16 @@ class _PayrollDetailsScreenState extends ConsumerState<PayrollDetailsScreen> {
                 ],
               ),
               gap,
+              if (d.bankChangedAt != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    'Bank details last changed on ${formatDayLong(d.bankChangedAt!)}. '
+                    'A second person checks a recent change before the salary is paid.',
+                    key: const ValueKey('bank-changed-at'),
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
               TextFormField(controller: _bankName, maxLength: 60, decoration: _dec('Bank name')),
               TextFormField(
                 controller: _account,

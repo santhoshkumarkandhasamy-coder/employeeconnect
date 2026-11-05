@@ -17,6 +17,8 @@ import 'payroll_providers.dart';
 import 'fnf_detail_screen.dart';
 import 'payroll_widgets.dart';
 import 'payslip_view.dart';
+import 'publish_request_widgets.dart';
+import '../domain/phase5a_models.dart' show phase5ErrorMessage;
 
 /// One payslip of a run (admin). A draft can be edited (LOP override with a
 /// reason, TDS, PT override, adjustments, hold, note); saving shows the result
@@ -193,8 +195,11 @@ class _PayslipEditorState extends ConsumerState<PayslipEditor> {
         if (mounted) ref.invalidate(adminPayslipProvider(_p.id));
       } else if (e.code == 'PAYROLL_BLOCKED') {
         unawaited(showBlockedDialog(context, e));
+      } else if (e.code == 'PUBLISH_REQUEST_REQUIRED') {
+        // Maker-checker applies: offer the request flow instead of a plain error.
+        unawaited(_offerRequest());
       } else {
-        payrollSnack(context, payrollErrorMessage(e));
+        payrollSnack(context, phase5ErrorMessage(e));
         // PAYROLL_LOCKED / CONFLICT mean the payslip is no longer in the state this
         // screen shows (13.8): load the current one.
         if (e.code == 'PAYROLL_LOCKED' || e.code == 'CONFLICT') {
@@ -251,6 +256,42 @@ class _PayslipEditorState extends ConsumerState<PayslipEditor> {
       if (!done || published == null) throw const _Cancelled();
       _applyServer(published!, 'Payslip published.');
     });
+  }
+
+  Future<void> _offerRequest() async {
+    final ok = await confirmAction(
+      context,
+      title: 'A second person must approve',
+      message: 'This payslip cannot be published directly: somebody else with publish rights has to approve it. '
+          'Send a publish request now?',
+      confirmLabel: 'Request publish',
+    );
+    if (!ok || !mounted) return;
+    await _request();
+  }
+
+  Future<void> _request() async {
+    await requestPublishFlow(context, ref, id: _p.id, payslip: true);
+    await _reloadRequest();
+  }
+
+  /// Reloads the payslip so the newest publish request is shown (the screen
+  /// keeps its own copy). Only a processed or published payslip is replaced:
+  /// a draft may hold unsaved edits.
+  Future<void> _reloadRequest() async {
+    if (!mounted) return;
+    ref.invalidate(adminPayslipProvider(_p.id));
+    if (_editable) return;
+    try {
+      final fresh = await ref.read(payrollRepositoryProvider).payslip(_p.id);
+      if (!mounted) return;
+      setState(() {
+        _p = fresh;
+        _fill(fresh);
+      });
+    } on ApiException {
+      // keep what is shown; pull to refresh is not available here, the next action reloads
+    }
   }
 
   Future<void> _revise() async {
@@ -329,6 +370,14 @@ class _PayslipEditorState extends ConsumerState<PayslipEditor> {
           const SizedBox(height: 8),
           if (_p.errors.isNotEmpty || _p.warnings.isNotEmpty || _p.hold)
             FlagChips(errors: _p.errors, warnings: _p.warnings, hold: _p.hold),
+          if (_p.publishRequest != null)
+            PublishRefCard(
+              request: _p.publishRequest!,
+              onTap: () async {
+                await openPublishRequest(context, _p.publishRequest!.id);
+                await _reloadRequest();
+              },
+            ),
           if (_p.finalSettlement != null)
             Align(
               alignment: Alignment.centerLeft,
@@ -393,6 +442,13 @@ class _PayslipEditorState extends ConsumerState<PayslipEditor> {
                   onPressed: _busy ? null : _publish,
                   icon: const Icon(Icons.send_outlined),
                   label: const Text('Publish'),
+                ),
+              if (manage && _p.isProcessed && !self && !(_p.publishRequest?.isOpen ?? false))
+                OutlinedButton.icon(
+                  key: const ValueKey('request-publish-payslip'),
+                  onPressed: _busy ? null : _request,
+                  icon: const Icon(Icons.how_to_reg_outlined),
+                  label: const Text('Request publish'),
                 ),
               if (manage && _p.isPublished && !self)
                 FilledButton.tonalIcon(

@@ -6,6 +6,7 @@ import '../../admin/presentation/admin_widgets.dart' show adminPermissionsProvid
 import '../data/payroll_repository.dart';
 import '../domain/payroll_models.dart';
 import '../domain/payroll_money.dart';
+import '../domain/phase5a_models.dart' show phase5AlertText;
 import 'payroll_providers.dart';
 import 'payroll_widgets.dart';
 
@@ -34,6 +35,7 @@ const _alertText = <String, String>{
   'RUN_NOT_PUBLISHED': 'The run is processed but not published and the pay date has arrived.',
   'FNF_PENDING_APPROVAL': 'A final settlement is waiting for approval.',
   'EXIT_WITHOUT_FNF': 'Someone has left without a final settlement, or with an active loan. Record the exit in Pay items.',
+  ...phase5AlertText,
 };
 
 /// Payroll dashboard (plan 14 phase 1): month totals, department cost, 12-month
