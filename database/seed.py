@@ -79,6 +79,9 @@ PERMISSIONS: dict[str, tuple[str, set[str]]] = {
     "payroll.manage": ("Manage payroll: settings, structures, details, runs, drafts", {ADMIN, HR}),
     "payroll.publish": ("Publish payroll runs and payslips", {ADMIN, HR}),
     "payroll.approve": ("Approve or reject salary increments (maker-checker)", {ADMIN, HR}),
+    "device.view": ("View attendance devices, unmatched device users, punch log and sync history", {ADMIN, HR}),
+    "device.map": ("Map or ignore device users and run Sync now", {ADMIN, HR}),
+    "device.manage": ("Add, edit, enable and delete attendance devices, comm key, test connection", {ADMIN}),
     "reimbursement.submit": ("Submit own reimbursement claims and upload bills", {ADMIN, HR, MANAGER, EMPLOYEE}),
 }
 

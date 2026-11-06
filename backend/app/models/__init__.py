@@ -5,6 +5,7 @@ from .announcements import Announcement, AnnouncementDepartment, AnnouncementRea
 from .attendance import Attendance, Holiday, LateRecord
 from .base import Base
 from .company import Company, License
+from .devices import Device, DevicePunch, DevicePunchOutcome, DeviceSync, DeviceUser
 from .food import FoodEnrollment
 from .leave import LeaveBalance, LeaveRequest, LeaveType, PermissionRequest
 from .onduty import ClientLocation, OnDutyRequest
@@ -52,5 +53,6 @@ __all__ = [
     "PayrollItemEvent", "PayrollImportBatch", "PayrollOneTimeItem", "PayrollLoan", "PayrollLoanInstallment", "PayrollArrears", "LeaveEncashment", "ReimbursementClaim", "OvertimeDay",
     "PayrollPublishRequest", "PayslipDelivery", "CompanyBankAccount", "PayrollPaymentBatch", "PayrollPaymentLine", "EmployeeBankChange",
     "TaxYearRule", "TaxDeclaration", "TaxProof", "Form16Document", "PayrollTaxComputation",
+    "Device", "DeviceUser", "DevicePunch", "DevicePunchOutcome", "DeviceSync",
     "FoodEnrollment", "Announcement", "AnnouncementDepartment", "AnnouncementRead",
 ]
