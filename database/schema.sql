@@ -1271,6 +1271,7 @@ INSERT INTO settings (key, value) VALUES ('payroll.pt_slabs', '[{"min_gross":"0.
 INSERT INTO settings (key, value) VALUES ('payroll.rounding', '"rupee"'::jsonb) ON CONFLICT (key) DO NOTHING;
 
 INSERT INTO settings (key, value) VALUES ('payroll.show_employer_contributions', 'false'::jsonb) ON CONFLICT (key) DO NOTHING;
+
 INSERT INTO settings (key, value) VALUES ('payroll.employer_share_from_employee', 'true'::jsonb) ON CONFLICT (key) DO NOTHING;
 
 INSERT INTO settings (key, value) VALUES ('payroll.mask_pan', 'true'::jsonb) ON CONFLICT (key) DO NOTHING;
@@ -1285,168 +1286,114 @@ UPDATE alembic_version SET version_num='0018' WHERE alembic_version.version_num 
 
 -- Running upgrade 0018 -> 0019
 
-CREATE TABLE duty_locations (
+CREATE TABLE client_locations (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  name text NOT NULL,
+  name citext NOT NULL,
   address text,
   lat double precision NOT NULL,
   lng double precision NOT NULL,
-  radius_m integer NOT NULL,
-  assign_mode text NOT NULL DEFAULT 'selected',
+  radius_m integer NOT NULL DEFAULT 200,
   is_active boolean NOT NULL DEFAULT true,
-  created_by uuid REFERENCES users(id) ON DELETE RESTRICT,
-  updated_by uuid REFERENCES users(id) ON DELETE RESTRICT,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT ck_duty_locations_name CHECK (char_length(btrim(name)) BETWEEN 2 AND 80),
-  CONSTRAINT ck_duty_locations_address CHECK (address IS NULL OR char_length(address) <= 300),
-  CONSTRAINT ck_duty_locations_lat CHECK (lat BETWEEN -90 AND 90),
-  CONSTRAINT ck_duty_locations_lng CHECK (lng BETWEEN -180 AND 180),
-  CONSTRAINT ck_duty_locations_radius CHECK (radius_m BETWEEN 10 AND 2000),
-  CONSTRAINT ck_duty_locations_assign_mode CHECK (assign_mode IN ('all','selected'))
+  CONSTRAINT uq_client_locations_name UNIQUE (name),
+  CONSTRAINT ck_client_locations_lat CHECK (lat BETWEEN -90 AND 90),
+  CONSTRAINT ck_client_locations_lng CHECK (lng BETWEEN -180 AND 180),
+  CONSTRAINT ck_client_locations_radius CHECK (radius_m BETWEEN 20 AND 5000)
 );
 
-CREATE UNIQUE INDEX uq_duty_locations_name ON duty_locations (lower(btrim(name)));
-
-CREATE INDEX ix_duty_locations_active ON duty_locations (is_active);
-
-CREATE INDEX ix_duty_locations_created_by ON duty_locations (created_by);
-
-CREATE INDEX ix_duty_locations_updated_by ON duty_locations (updated_by);
-
-CREATE TRIGGER trg_duty_locations_updated_at BEFORE UPDATE ON duty_locations FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
-CREATE TABLE duty_location_assignments (
-  location_id uuid NOT NULL REFERENCES duty_locations(id) ON DELETE CASCADE,
-  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  created_by uuid REFERENCES users(id) ON DELETE SET NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT pk_duty_location_assignments PRIMARY KEY (location_id, user_id)
-);
-
-CREATE INDEX ix_duty_location_assignments_user ON duty_location_assignments (user_id);
-
-CREATE INDEX ix_duty_location_assignments_created_by ON duty_location_assignments (created_by);
+CREATE TRIGGER trg_client_locations_updated_at BEFORE UPDATE ON client_locations FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 CREATE TABLE on_duty_requests (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  client_location_id uuid NOT NULL REFERENCES client_locations(id) ON DELETE RESTRICT,
   from_date date NOT NULL,
   to_date date NOT NULL,
-  location_id uuid REFERENCES duty_locations(id) ON DELETE RESTRICT,
-  purpose_enc bytea NOT NULL,
+  days integer NOT NULL,
+  reason_enc bytea,
   status text NOT NULL DEFAULT 'pending',
   approver_id uuid REFERENCES users(id) ON DELETE RESTRICT,
   decision_comment_enc bytea,
   decided_at timestamptz,
+  cancelled_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT ck_on_duty_requests_dates CHECK (to_date >= from_date),
-  CONSTRAINT ck_on_duty_requests_span CHECK (to_date - from_date <= 30),
-  CONSTRAINT ck_on_duty_requests_status CHECK (status IN ('pending','approved','rejected','cancelled'))
+  CONSTRAINT ck_on_duty_requests_days CHECK (days > 0),
+  CONSTRAINT ck_on_duty_requests_status CHECK (status IN ('pending','approved','rejected','cancelled')),
+  CONSTRAINT ex_on_duty_requests_no_overlap EXCLUDE USING gist (
+    user_id WITH =, daterange(from_date, to_date, '[]') WITH &&
+  ) WHERE (status IN ('pending','approved'))
 );
-
-CREATE INDEX ix_on_duty_requests_user_from ON on_duty_requests (user_id, from_date);
 
 CREATE INDEX ix_on_duty_requests_status ON on_duty_requests (status);
 
-CREATE INDEX ix_on_duty_requests_dates ON on_duty_requests (from_date, to_date);
+CREATE INDEX ix_on_duty_requests_user_from_date ON on_duty_requests (user_id, from_date);
 
-CREATE INDEX ix_on_duty_requests_location_id ON on_duty_requests (location_id);
+CREATE INDEX ix_on_duty_requests_client_location_id ON on_duty_requests (client_location_id);
 
 CREATE INDEX ix_on_duty_requests_approver_id ON on_duty_requests (approver_id);
 
 CREATE TRIGGER trg_on_duty_requests_updated_at BEFORE UPDATE ON on_duty_requests FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
-CREATE TABLE on_duty_visits (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
-  attendance_id uuid NOT NULL REFERENCES attendance(id) ON DELETE CASCADE,
-  work_date date NOT NULL,
-  location_id uuid NOT NULL REFERENCES duty_locations(id) ON DELETE RESTRICT,
-  location_name text NOT NULL,
-  request_id uuid REFERENCES on_duty_requests(id) ON DELETE SET NULL,
-  check_in_at timestamptz NOT NULL,
-  check_in_loc_enc bytea,
-  check_in_distance_m integer,
-  check_in_accuracy_m real,
-  check_in_clock_skew_s integer,
-  check_in_mock_location boolean NOT NULL DEFAULT false,
-  check_in_selfie_file_id uuid REFERENCES files(id) ON DELETE SET NULL,
-  check_out_at timestamptz,
-  check_out_loc_enc bytea,
-  check_out_distance_m integer,
-  check_out_within_fence boolean,
-  check_out_accuracy_m real,
-  check_out_mock_location boolean NOT NULL DEFAULT false,
-  check_out_selfie_file_id uuid REFERENCES files(id) ON DELETE SET NULL,
-  note_enc bytea,
-  auto_closed boolean NOT NULL DEFAULT false,
-  suspicious boolean NOT NULL DEFAULT false,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT ck_on_duty_visits_checkout_after_checkin CHECK (check_out_at IS NULL OR check_out_at > check_in_at),
-  CONSTRAINT ck_on_duty_visits_in_distance CHECK (check_in_distance_m IS NULL OR check_in_distance_m >= 0),
-  CONSTRAINT ck_on_duty_visits_out_distance CHECK (check_out_distance_m IS NULL OR check_out_distance_m >= 0)
-);
+ALTER TABLE attendance ADD COLUMN client_location_id uuid REFERENCES client_locations(id) ON DELETE RESTRICT;
 
-CREATE INDEX ix_on_duty_visits_user_date ON on_duty_visits (user_id, work_date);
+CREATE INDEX ix_attendance_client_location_id ON attendance (client_location_id);
 
-CREATE INDEX ix_on_duty_visits_work_date ON on_duty_visits (work_date);
+INSERT INTO permissions (code, module, description) VALUES ('client_location.manage', 'client_location', 'Manage client locations for on duty (geo coordinates)') ON CONFLICT (code) DO NOTHING;
 
-CREATE INDEX ix_on_duty_visits_location_id ON on_duty_visits (location_id);
-
-CREATE INDEX ix_on_duty_visits_attendance_id ON on_duty_visits (attendance_id);
-
-CREATE INDEX ix_on_duty_visits_request_id ON on_duty_visits (request_id);
-
-CREATE UNIQUE INDEX uq_on_duty_visits_one_open ON on_duty_visits (user_id) WHERE check_out_at IS NULL AND auto_closed = false;
-
-CREATE UNIQUE INDEX uq_on_duty_visits_check_in_selfie ON on_duty_visits (check_in_selfie_file_id) WHERE check_in_selfie_file_id IS NOT NULL;
-
-CREATE UNIQUE INDEX uq_on_duty_visits_check_out_selfie ON on_duty_visits (check_out_selfie_file_id) WHERE check_out_selfie_file_id IS NOT NULL;
-
-CREATE INDEX ix_on_duty_visits_suspicious ON on_duty_visits (work_date) WHERE suspicious;
-
-CREATE TRIGGER trg_on_duty_visits_updated_at BEFORE UPDATE ON on_duty_visits FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
-ALTER TABLE attendance ADD COLUMN work_mode text NOT NULL DEFAULT 'office';
-
-ALTER TABLE attendance ADD COLUMN check_out_source text;
-
-UPDATE attendance SET check_out_source = 'office' WHERE check_out_at IS NOT NULL;
-
-ALTER TABLE attendance ADD CONSTRAINT ck_attendance_work_mode CHECK (work_mode IN ('office','on_duty','mixed'));
-
-ALTER TABLE attendance ADD CONSTRAINT ck_attendance_check_out_source CHECK (check_out_source IN ('office','on_duty'));
-
-ALTER TABLE attendance ADD CONSTRAINT ck_attendance_check_out_source_pair CHECK ((check_out_at IS NULL) = (check_out_source IS NULL));
-
-CREATE INDEX ix_attendance_work_mode ON attendance (work_date) WHERE work_mode <> 'office';
-
-INSERT INTO permissions (code, module, description) VALUES ('duty_location.manage', 'duty_location', 'Manage on-duty locations and assignments') ON CONFLICT (code) DO NOTHING;
-
-INSERT INTO role_permissions (role_id, permission_id) SELECT r.id, p.id FROM roles r, permissions p WHERE r.name IN ('admin', 'hr') AND p.code = 'duty_location.manage' ON CONFLICT DO NOTHING;
-
-INSERT INTO settings (key, value) VALUES ('on_duty.enabled', 'true'::jsonb) ON CONFLICT (key) DO NOTHING;
-
-INSERT INTO settings (key, value) VALUES ('on_duty.approval_required', 'false'::jsonb) ON CONFLICT (key) DO NOTHING;
-
-INSERT INTO settings (key, value) VALUES ('on_duty.apply_late_rule', 'false'::jsonb) ON CONFLICT (key) DO NOTHING;
-
-INSERT INTO settings (key, value) VALUES ('on_duty.checkout_geofence', 'false'::jsonb) ON CONFLICT (key) DO NOTHING;
-
-INSERT INTO settings (key, value) VALUES ('on_duty.selfie_required', 'false'::jsonb) ON CONFLICT (key) DO NOTHING;
-
-INSERT INTO settings (key, value) VALUES ('on_duty.max_visits_per_day', '10'::jsonb) ON CONFLICT (key) DO NOTHING;
-
-INSERT INTO settings (key, value) VALUES ('on_duty.request_backdate_days', '0'::jsonb) ON CONFLICT (key) DO NOTHING;
-
-INSERT INTO settings (key, value) VALUES ('on_duty.request_max_advance_days', '60'::jsonb) ON CONFLICT (key) DO NOTHING;
+INSERT INTO role_permissions (role_id, permission_id) SELECT r.id, p.id FROM roles r, permissions p WHERE r.name IN ('admin', 'hr') AND p.code = 'client_location.manage' ON CONFLICT DO NOTHING;
 
 UPDATE alembic_version SET version_num='0019' WHERE alembic_version.version_num = '0018';
 
 -- Running upgrade 0019 -> 0020
+
+CREATE TABLE tasks (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  created_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  title text NOT NULL,
+  notes_enc bytea,
+  due_at timestamptz NOT NULL,
+  remind_at timestamptz,
+  reminded_at timestamptz,
+  done_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT ck_tasks_remind_before_due CHECK (remind_at IS NULL OR remind_at <= due_at),
+  CONSTRAINT ck_tasks_title CHECK (char_length(title) BETWEEN 1 AND 150)
+);
+
+CREATE INDEX ix_tasks_user_due ON tasks (user_id, due_at);
+
+CREATE INDEX ix_tasks_created_by ON tasks (created_by);
+
+CREATE INDEX ix_tasks_reminder_due ON tasks (remind_at) WHERE reminded_at IS NULL AND done_at IS NULL AND remind_at IS NOT NULL;
+
+CREATE TRIGGER trg_tasks_updated_at BEFORE UPDATE ON tasks FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+ALTER TABLE attendance ADD COLUMN manual boolean NOT NULL DEFAULT false;
+
+ALTER TABLE attendance ADD COLUMN manual_by uuid REFERENCES users(id) ON DELETE RESTRICT;
+
+ALTER TABLE attendance ADD COLUMN manual_reason_enc bytea;
+
+CREATE INDEX ix_attendance_manual ON attendance (work_date) WHERE manual;
+
+INSERT INTO permissions (code, module, description) VALUES ('task.assign_team', 'task', 'Assign tasks to direct reports') ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO permissions (code, module, description) VALUES ('task.assign_all', 'task', 'Assign tasks to any employee') ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO permissions (code, module, description) VALUES ('attendance.manual', 'attendance', 'Enter or correct attendance manually') ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO role_permissions (role_id, permission_id) SELECT r.id, p.id FROM roles r, permissions p WHERE r.name IN ('admin', 'hr', 'manager') AND p.code = 'task.assign_team' ON CONFLICT DO NOTHING;
+
+INSERT INTO role_permissions (role_id, permission_id) SELECT r.id, p.id FROM roles r, permissions p WHERE r.name IN ('admin', 'hr') AND p.code IN ('task.assign_all', 'attendance.manual') ON CONFLICT DO NOTHING;
+
+UPDATE alembic_version SET version_num='0020' WHERE alembic_version.version_num = '0019';
+
+-- Running upgrade 0020 -> 0021
 
 CREATE TABLE statutory_challans (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1478,9 +1425,9 @@ CREATE INDEX ix_statutory_challans_updated_by ON statutory_challans (updated_by)
 
 CREATE TRIGGER trg_statutory_challans_updated_at BEFORE UPDATE ON statutory_challans FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
-UPDATE alembic_version SET version_num='0020' WHERE alembic_version.version_num = '0019';
+UPDATE alembic_version SET version_num='0021' WHERE alembic_version.version_num = '0020';
 
--- Running upgrade 0020 -> 0021
+-- Running upgrade 0021 -> 0022
 
 CREATE TABLE statutory_challan_events (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1537,9 +1484,9 @@ EXCEPTION WHEN undefined_object OR insufficient_privilege THEN
 END
 $$;
 
-UPDATE alembic_version SET version_num='0021' WHERE alembic_version.version_num = '0020';
+UPDATE alembic_version SET version_num='0022' WHERE alembic_version.version_num = '0021';
 
--- Running upgrade 0021 -> 0022
+-- Running upgrade 0022 -> 0023
 
 CREATE TABLE payroll_item_events (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1894,9 +1841,9 @@ EXCEPTION WHEN undefined_object OR insufficient_privilege THEN
 END
 $$;
 
-UPDATE alembic_version SET version_num='0022' WHERE alembic_version.version_num = '0021';
+UPDATE alembic_version SET version_num='0023' WHERE alembic_version.version_num = '0022';
 
--- Running upgrade 0022 -> 0023
+-- Running upgrade 0023 -> 0024
 
 ALTER TABLE files DROP CONSTRAINT ck_files_purpose;
 
@@ -2090,9 +2037,9 @@ EXCEPTION WHEN undefined_object OR insufficient_privilege THEN
 END
 $$;
 
-UPDATE alembic_version SET version_num='0023' WHERE alembic_version.version_num = '0022';
+UPDATE alembic_version SET version_num='0024' WHERE alembic_version.version_num = '0023';
 
--- Running upgrade 0023 -> 0024
+-- Running upgrade 0024 -> 0025
 
 CREATE TABLE salary_increment_batches (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -2296,9 +2243,9 @@ EXCEPTION WHEN undefined_object OR insufficient_privilege THEN
 END
 $$;
 
-UPDATE alembic_version SET version_num='0024' WHERE alembic_version.version_num = '0023';
+UPDATE alembic_version SET version_num='0025' WHERE alembic_version.version_num = '0024';
 
--- Running upgrade 0024 -> 0025
+-- Running upgrade 0025 -> 0026
 
 CREATE TABLE fnf_settlements (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -2512,9 +2459,9 @@ EXCEPTION WHEN undefined_object OR insufficient_privilege THEN
 END
 $$;
 
-UPDATE alembic_version SET version_num='0025' WHERE alembic_version.version_num = '0024';
+UPDATE alembic_version SET version_num='0026' WHERE alembic_version.version_num = '0025';
 
--- Running upgrade 0025 -> 0026
+-- Running upgrade 0026 -> 0027
 
 -- ---------------------------------------------------------------- contributors on runs and payslips
 ALTER TABLE payroll_runs ADD COLUMN contributors text[] NOT NULL DEFAULT '{}';
@@ -3212,13 +3159,13 @@ BEGIN
   REVOKE DELETE, TRUNCATE ON payroll_payment_lines FROM app_user;
   REVOKE DELETE, TRUNCATE ON employee_bank_changes FROM app_user;
 EXCEPTION WHEN undefined_object OR insufficient_privilege THEN
-  RAISE NOTICE 'revoke on the 0026 tables skipped';
+  RAISE NOTICE 'revoke on the 0027 tables skipped';
 END
 $$;
 
-UPDATE alembic_version SET version_num='0026' WHERE alembic_version.version_num = '0025';
+UPDATE alembic_version SET version_num='0027' WHERE alembic_version.version_num = '0026';
 
--- Running upgrade 0026 -> 0027
+-- Running upgrade 0027 -> 0028
 
 -- ---------------------------------------------------------------- tax year rules
 CREATE TABLE tax_year_rules (
@@ -3645,11 +3592,11 @@ BEGIN
   REVOKE DELETE, TRUNCATE ON tax_proofs FROM app_user;
   REVOKE DELETE, TRUNCATE ON form16_documents FROM app_user;
 EXCEPTION WHEN undefined_object OR insufficient_privilege THEN
-  RAISE NOTICE 'revoke on the 0027 tables skipped';
+  RAISE NOTICE 'revoke on the 0028 tables skipped';
 END
 $$;
 
-UPDATE alembic_version SET version_num='0027' WHERE alembic_version.version_num = '0026';
+UPDATE alembic_version SET version_num='0028' WHERE alembic_version.version_num = '0027';
 
 COMMIT;
 

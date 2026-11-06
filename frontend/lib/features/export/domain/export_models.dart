@@ -3,11 +3,12 @@ import '../../../core/utils/dates.dart';
 
 /// api-contract.md section 10 (`GET /admin/export`).
 enum ExportType {
-  all('all', 'All reports', 'Attendance, Leave, Late and Permission in one workbook'),
+  all('all', 'All reports', 'Attendance, Leave, Late, Permission and On Duty in one workbook'),
   attendance('attendance', 'Attendance', 'Check-in and check-out times and status'),
   leave('leave', 'Leave', 'Leave requests overlapping the dates'),
   late('late', 'Late', 'Late arrivals'),
   permission('permission', 'Permission', 'Short permission requests'),
+  onDuty('on_duty', 'On Duty', 'On-duty requests at client locations'),
   food('food', 'Food', 'Who needs food on each date');
 
   const ExportType(this.apiValue, this.label, this.description);
@@ -25,6 +26,7 @@ const Map<ExportType, List<String>> _sheetPerms = {
   ExportType.attendance: ['attendance.view_all', 'attendance.view_team'],
   ExportType.leave: ['request.view_all', 'request.view_team'],
   ExportType.permission: ['request.view_all', 'request.view_team'],
+  ExportType.onDuty: ['request.view_all', 'request.view_team'],
   ExportType.late: ['late.view_all', 'late.view_team'],
   ExportType.food: ['food.view_all'],
 };
@@ -39,6 +41,7 @@ bool canExportType(List<String> permissions, ExportType type) {
       ExportType.leave,
       ExportType.late,
       ExportType.permission,
+      ExportType.onDuty,
     ].every((t) => canExportType(permissions, t));
   }
   return (_sheetPerms[type] ?? const <String>[]).any(permissions.contains);
@@ -101,10 +104,13 @@ String exportRangeLabel(DateTime from, DateTime to) =>
 /// server refuses it with 403 without the permission.
 bool canExportReasons(List<String> permissions) => permissions.contains('export.sensitive');
 
-/// Whether [type] has sheets with reason columns (Leave, Permission). The flag
-/// has no effect for attendance, late and food.
+/// Whether [type] has sheets with reason columns (Leave, Permission, On Duty).
+/// The flag has no effect for attendance, late and food.
 bool exportTypeHasReasons(ExportType type) =>
-    type == ExportType.all || type == ExportType.leave || type == ExportType.permission;
+    type == ExportType.all ||
+    type == ExportType.leave ||
+    type == ExportType.permission ||
+    type == ExportType.onDuty;
 
 /// True when the user can only export their direct reports (`export.team`
 /// without `export.all`): the server then also limits how far back it goes.

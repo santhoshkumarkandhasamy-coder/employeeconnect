@@ -31,7 +31,7 @@ MAX_RANGE_DAYS = 366
 
 @router.get("/export")
 async def export(
-    type: Literal["all", "attendance", "leave", "late", "permission", "food"] = "all",
+    type: Literal["all", "attendance", "leave", "late", "permission", "on_duty", "food"] = "all",
     from_: dt.date = Query(..., alias="from"),
     to: dt.date = Query(...),
     department_id: uuid.UUID | None = None,

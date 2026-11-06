@@ -1,7 +1,7 @@
 """Plan 17 work package 5a: publish requests (maker-checker for publish), contributors, publish-check, staleness (contract 19.2).
 
 HR001 is the maker everywhere (`payroll` fixture: HR created the structures); ADM001 is a clean checker; more people are added with
-`extra_user`. Everything runs on SQLite: row locks and the database triggers / CHECKs are PostgreSQL-only (migration 0026 tests).
+`extra_user`. Everything runs on SQLite: row locks and the database triggers / CHECKs are PostgreSQL-only (migration 0027 tests).
 """
 
 from __future__ import annotations

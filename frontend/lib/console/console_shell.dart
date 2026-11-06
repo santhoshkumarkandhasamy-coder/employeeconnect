@@ -6,6 +6,9 @@ import '../features/admin/domain/admin_models.dart' show AdminPerm;
 import '../features/admin/presentation/audit_screen.dart';
 import '../features/admin/presentation/company_screen.dart';
 import '../features/admin/presentation/employees_screen.dart';
+import '../features/admin/presentation/settings_screen.dart';
+import '../features/leave/domain/leave_logic.dart' show canOpenApprovals;
+import '../features/leave/presentation/approvals_screen.dart';
 import '../features/admin/presentation/license_screen.dart';
 import '../features/admin/presentation/reset_requests_screen.dart';
 import '../features/admin/presentation/sessions_screen.dart';
@@ -15,13 +18,19 @@ import 'pages/attendance_day_page.dart';
 import 'pages/dashboard_page.dart';
 
 class ConsoleDestination {
-  const ConsoleDestination(this.label, this.icon, this.permission, this.build);
+  const ConsoleDestination(this.label, this.icon, this.permission, this.build, {this.visible});
   final String label;
   final IconData icon;
 
   /// Null = always shown. The server enforces every permission anyway.
   final String? permission;
   final Widget Function() build;
+
+  /// Overrides [permission] when the entry opens for any of several permissions.
+  final bool Function(List<String> permissions)? visible;
+
+  bool allowedFor(List<String> permissions) =>
+      visible != null ? visible!(permissions) : (permission == null || permissions.contains(permission));
 }
 
 final List<ConsoleDestination> consoleDestinations = [
@@ -30,8 +39,12 @@ final List<ConsoleDestination> consoleDestinations = [
       () => const EmployeesScreen(),),
   ConsoleDestination('Attendance today', Icons.fact_check_outlined, AdminPerm.attendanceViewAll,
       () => const AttendanceDayPage(),),
+  ConsoleDestination('Requests', Icons.approval_outlined, null, () => const ApprovalsScreen(),
+      visible: canOpenApprovals,),
   ConsoleDestination('Payroll', Icons.payments_outlined, AdminPerm.payrollViewAll,
       () => const PayrollHomeScreen(),),
+  ConsoleDestination('Settings', Icons.settings_outlined, AdminPerm.settingsManage,
+      () => const SettingsScreen(),),
   ConsoleDestination('Password resets', Icons.lock_reset, AdminPerm.employeeResetPassword,
       () => const ResetRequestsScreen(),),
   ConsoleDestination('Sessions', Icons.devices_outlined, AdminPerm.sessionManage,
@@ -47,7 +60,7 @@ final List<ConsoleDestination> consoleDestinations = [
 /// Destinations the user may open.
 List<ConsoleDestination> visibleDestinations(List<String> permissions) => [
       for (final d in consoleDestinations)
-        if (d.permission == null || permissions.contains(d.permission)) d,
+        if (d.allowedFor(permissions)) d,
     ];
 
 class ConsoleShell extends ConsumerStatefulWidget {

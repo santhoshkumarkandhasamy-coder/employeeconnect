@@ -42,7 +42,7 @@ class LeaveType(TimestampMixin, Base):
     requires_attachment_after_days: Mapped[int | None] = mapped_column(Integer)
     max_consecutive_days: Mapped[int | None] = mapped_column(Integer)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
-    # leave encashment (migration 0022, plan 15)
+    # leave encashment (migration 0023, plan 15)
     encashable: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     encash_max_days_per_year: Mapped[Decimal | None] = mapped_column(Numeric(4, 1))
     encash_min_balance: Mapped[Decimal] = mapped_column(Numeric(4, 1), nullable=False, server_default=text("0"))
@@ -67,7 +67,7 @@ class LeaveBalance(TimestampMixin, Base):
     quota: Mapped[Decimal] = mapped_column(Numeric(4, 1), nullable=False, server_default=text("0"))
     used: Mapped[Decimal] = mapped_column(Numeric(4, 1), nullable=False, server_default=text("0"))
     pending: Mapped[Decimal] = mapped_column(Numeric(4, 1), nullable=False, server_default=text("0"))
-    encashed: Mapped[Decimal] = mapped_column(Numeric(4, 1), nullable=False, server_default=text("0"))  # migration 0022
+    encashed: Mapped[Decimal] = mapped_column(Numeric(4, 1), nullable=False, server_default=text("0"))  # migration 0023
 
 
 class LeaveRequest(TimestampMixin, Base):

@@ -63,13 +63,14 @@ class LeaveRepository {
         parse: (j) => BalanceData.fromJson(j as Map<String, dynamic>),
       );
 
-  /// The latest 100 leave and 100 permission requests, newest first.
+  /// The latest 100 leave, 100 permission and 100 on-duty requests, newest first.
   Future<Cached<List<RequestItem>>> myRequests() => fetchWithCache(
         cache: _cache,
         key: '$scope.leave.mine',
         fetch: () async => <String, dynamic>{
           'leave': await _get('/leave/requests', {'page': 1, 'page_size': 100}),
           'permission': await _get('/permission/requests', {'page': 1, 'page_size': 100}),
+          'on_duty': await _get('/on-duty/requests', {'page': 1, 'page_size': 100}),
         },
         parse: (j) => mergeRequests(j as Map<String, dynamic>),
       );
@@ -112,6 +113,30 @@ class LeaveRepository {
         kind: RequestKind.permission,
       );
 
+  /// Active client locations for the on-duty form (name and address only).
+  Future<Cached<List<ClientLocationOption>>> onDutyLocations() => fetchWithCache(
+        cache: _cache,
+        key: '$scope.onduty.locations',
+        fetch: () => _get('/on-duty/locations'),
+        parse: ClientLocationOption.parseList,
+      );
+
+  Future<RequestItem> applyOnDuty({
+    required String clientLocationId,
+    required String fromDate,
+    required String toDate,
+    required String reason,
+  }) async =>
+      RequestItem.fromJson(
+        await _send('POST', '/on-duty/requests', {
+          'client_location_id': clientLocationId,
+          'from_date': fromDate,
+          'to_date': toDate,
+          'reason': reason,
+        }),
+        kind: RequestKind.onDuty,
+      );
+
   /// Uploads a supporting document through the shared [FileService]; returns
   /// the file id.
   Future<String> uploadAttachment(String path, {String? filename}) => _files.upload(
@@ -121,7 +146,7 @@ class LeaveRepository {
       );
 
   Future<RequestItem> cancel(RequestKind kind, String id) async => RequestItem.fromJson(
-        await _send('POST', '/${kind.wire}/requests/$id/cancel'),
+        await _send('POST', '/${kind.path}/requests/$id/cancel'),
         kind: kind,
       );
 
@@ -155,7 +180,7 @@ class LeaveRepository {
       );
 }
 
-/// Merges `{leave: {items}, permission: {items}}` into one list, newest first.
+/// Merges `{leave: {items}, permission: {items}, on_duty: {items}}` into one list, newest first.
 List<RequestItem> mergeRequests(Map<String, dynamic> j) {
   List<RequestItem> of(Object? page, RequestKind k) {
     final raw = page is Map ? page['items'] : null;
@@ -166,7 +191,11 @@ List<RequestItem> mergeRequests(Map<String, dynamic> j) {
     ];
   }
 
-  final all = [...of(j['leave'], RequestKind.leave), ...of(j['permission'], RequestKind.permission)];
+  final all = [
+    ...of(j['leave'], RequestKind.leave),
+    ...of(j['permission'], RequestKind.permission),
+    ...of(j['on_duty'], RequestKind.onDuty),
+  ];
   final epoch = DateTime.fromMillisecondsSinceEpoch(0);
   all.sort((a, b) => (b.createdAt ?? epoch).compareTo(a.createdAt ?? epoch));
   return all;

@@ -1,8 +1,8 @@
 """Plan 17 work package 5a, security review fixes (H1, H2, M1 to M3, L2 to L4, L7).
 
 "Today" is 2026-10-21 (see `quiet`); the payroll month is 2025-06. HR001 is the maker, ADM001 the checker. Database CHECKs and triggers
-(the other half of these fixes) are PostgreSQL-only: they are probed in the migration 0026 notes and cross-checked in
-test_migration_0026.py.
+(the other half of these fixes) are PostgreSQL-only: they are probed in the migration 0027 notes and cross-checked in
+test_migration_0027.py.
 """
 
 from __future__ import annotations

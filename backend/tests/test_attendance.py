@@ -96,7 +96,7 @@ async def test_checkin_outside_fence(client, emp, clock):
     assert e["code"] == "OUTSIDE_GEOFENCE"
     assert {d["field"] for d in e["details"]} == {"within_fence"}  # no distance_m / radius_m (trilateration oracle)
     assert "distance_m" not in r.text and "radius_m" not in r.text
-    assert (await client.get("/api/attendance/today", headers=emp)).json() == {"record": None}
+    assert (await client.get("/api/attendance/today", headers=emp)).json() == {"record": None, "on_duty": None}
 
 
 async def test_fence_radius_boundary_from_settings(client, emp, clock, setting):
@@ -423,7 +423,13 @@ async def test_calendar_statuses(client, emp, clock, db):
     assert days["2026-10-02"]["status"] == "late"
     assert days["2026-10-03"]["status"] == "weekly_off" and days["2026-10-04"]["status"] == "weekly_off"
     assert days["2026-10-05"]["status"] == "half_day"
-    assert days["2026-10-06"] == {"date": "2026-10-06", "status": "holiday", "holiday_name": "Fest", "leave_type": None}
+    assert days["2026-10-06"] == {
+        "date": "2026-10-06",
+        "status": "holiday",
+        "holiday_name": "Fest",
+        "leave_type": None,
+        "on_duty": None,
+    }
     assert days["2026-10-07"]["status"] == "on_leave" and days["2026-10-07"]["leave_type"] == "Casual Leave"
     assert days["2026-10-08"]["status"] == "absent"
     assert days["2026-10-21"]["status"] == "future" and days["2026-10-22"]["status"] == "future"
@@ -629,7 +635,7 @@ async def test_client_time_cannot_override_server_time(client, emp, clock):
 async def test_mock_location_rejected_by_default_and_audited(client, emp, clock, db):
     r = await check_in(client, emp, {"is_mock_location": True})
     assert r.status_code == 422 and r.json()["error"]["code"] == "MOCK_LOCATION_DETECTED"
-    assert (await client.get("/api/attendance/today", headers=emp)).json() == {"record": None}
+    assert (await client.get("/api/attendance/today", headers=emp)).json() == {"record": None, "on_duty": None}
     assert (await _audit_rows(db))[0].after["reason"] == "MOCK_LOCATION_DETECTED"
     assert (await check_in(client, emp, {"is_mock_location": False})).status_code == 201
 

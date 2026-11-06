@@ -240,7 +240,9 @@ class Dashboard {
 
   int? get pendingRequests {
     final r = requests;
-    return r == null ? null : (r['leave_pending'] ?? 0) + (r['permission_pending'] ?? 0);
+    return r == null
+        ? null
+        : (r['leave_pending'] ?? 0) + (r['permission_pending'] ?? 0) + (r['on_duty_pending'] ?? 0);
   }
 
   factory Dashboard.fromJson(Map<String, dynamic> j) {

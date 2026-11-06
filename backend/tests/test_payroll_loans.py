@@ -298,7 +298,7 @@ async def test_skip_defers_one_installment_to_the_end(client, payroll, uid):
 
 
 async def test_skip_reschedule_and_foreclose_never_exhaust_installment_numbers(client, payroll, uid):
-    """Migration 0023: numbers are unique among LIVE installments only, so a loan can be skipped / rescheduled any number of times."""
+    """Migration 0024: numbers are unique among LIVE installments only, so a loan can be skipped / rescheduled any number of times."""
     hr = payroll["hr"]
     loan = await mk_loan(client, hr, uid["employee"], principal="30000.00", emi="10000.00")
     cur = loan

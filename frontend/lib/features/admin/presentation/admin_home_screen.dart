@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/security/screen_protect.dart';
 import '../../../core/widgets/state_views.dart';
 import '../../auth/presentation/auth_controller.dart';
+import '../../announcements/presentation/admin_announcements_screen.dart';
 import '../../payroll/presentation/payroll_home_screen.dart';
 import '../domain/admin_models.dart';
 import 'admin_providers.dart';
@@ -12,6 +13,7 @@ import 'audit_screen.dart';
 import 'company_screen.dart';
 import 'employees_screen.dart';
 import 'license_screen.dart';
+import 'manual_attendance_screen.dart';
 import 'master_screen.dart';
 import 'reset_requests_screen.dart';
 import 'roles_screen.dart';
@@ -26,6 +28,9 @@ IconData _icon(AdminSection s) => switch (s) {
       AdminSection.shifts => Icons.schedule,
       AdminSection.holidays => Icons.event_outlined,
       AdminSection.leaveTypes => Icons.beach_access_outlined,
+      AdminSection.clientLocations => Icons.business_center_outlined,
+      AdminSection.manualAttendance => Icons.edit_calendar_outlined,
+      AdminSection.announcements => Icons.campaign_outlined,
       AdminSection.settings => Icons.settings_outlined,
       AdminSection.audit => Icons.fact_check_outlined,
       AdminSection.sessions => Icons.devices_outlined,
@@ -42,6 +47,9 @@ Widget _screenFor(AdminSection s) => switch (s) {
       AdminSection.shifts => MasterScreen(spec: shiftSpec),
       AdminSection.holidays => MasterScreen(spec: holidaySpec),
       AdminSection.leaveTypes => MasterScreen(spec: leaveTypeSpec),
+      AdminSection.clientLocations => MasterScreen(spec: clientLocationSpec),
+      AdminSection.manualAttendance => const ManualAttendanceScreen(),
+      AdminSection.announcements => const AdminAnnouncementsScreen(),
       AdminSection.settings => const SettingsScreen(),
       AdminSection.audit => const AuditScreen(),
       AdminSection.sessions => const SessionsScreen(),

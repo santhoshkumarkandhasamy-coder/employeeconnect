@@ -1,7 +1,7 @@
 """Full and final settlement with maker-checker (plan 16 work package 4b)
 
-Revision ID: 0025
-Revises: 0024
+Revision ID: 0026
+Revises: 0025
 
 Plan: docs/plans/16-payroll-phase4.md section 2.2; contract: docs/api-contract.md section 18 (18.0, 18.1 [4b], 18.8 to 18.12).
 
@@ -35,7 +35,7 @@ Added
 * fnf_id is INSERT-only on the three source tables (trigger *_fnf_id_immutable): an UPDATE can neither set (NULL -> value), change
   nor clear it. A second trigger (*_fnf_user_match) requires a tagged row's user_id to equal fnf_settlements.user_id (INSERT, and UPDATE of
   fnf_id / user_id).
-* payroll_item_events        nothing to do: 0024 already allows item_type `fnf` and the actions submit / withdraw / settle / revoke / remove.
+* payroll_item_events        nothing to do: 0025 already allows item_type `fnf` and the actions submit / withdraw / settle / revoke / remove.
 * settings payroll.notice_period_days, payroll.notice_recovery_basis, payroll.notice_recovery_divisor (also defaults in code).
 * REVOKE DELETE, TRUNCATE FROM app_user on fnf_settlements (cancelling is a status, never a delete).
 
@@ -47,8 +47,8 @@ Draft / submitted / cancelled F&F plans are lost. History events (payroll_item_e
 
 from migration_sql import run
 
-revision = "0025"
-down_revision = "0024"
+revision = "0026"
+down_revision = "0025"
 branch_labels = None
 depends_on = None
 
@@ -242,7 +242,7 @@ BEGIN
      OR EXISTS (SELECT 1 FROM payroll_one_time_items WHERE fnf_id IS NOT NULL AND status <> 'cancelled')
      OR EXISTS (SELECT 1 FROM leave_encashments WHERE fnf_id IS NOT NULL AND status <> 'cancelled')
      OR EXISTS (SELECT 1 FROM payroll_loan_installments WHERE fnf_id IS NOT NULL AND status NOT IN ('cancelled','skipped')) THEN
-    RAISE EXCEPTION 'cannot downgrade 0025: approved / settled final settlements or live rows created by one exist (revoke or cancel them first)';
+    RAISE EXCEPTION 'cannot downgrade 0026: approved / settled final settlements or live rows created by one exist (revoke or cancel them first)';
   END IF;
 END
 $$;

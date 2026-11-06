@@ -1,13 +1,13 @@
 """Payroll components (plan 15 work package 3a): one-time items + bulk import, loans, auto arrears, leave encashment, money history
 
-Revision ID: 0022
-Revises: 0021
+Revision ID: 0023
+Revises: 0022
 
 Plan: docs/plans/15-payroll-phase3.md section 2.1; contract: docs/api-contract.md section 17.
 
 Added
 * payroll_item_events         APPEND-ONLY money history of every phase 3 source row (one-time, loan, installment, arrears,
-                              encashment; reimbursement / overtime in 0023). Same protection as statutory_challan_events (0021):
+                              encashment; reimbursement / overtime in 0024). Same protection as statutory_challan_events (0022):
                               trigger refuses UPDATE / DELETE / TRUNCATE except a key rotation (`app.key_rotation = 'on'`, only
                               `*_enc` columns changed), REVOKE UPDATE, DELETE, TRUNCATE, column-level UPDATE on `*_enc` only.
 * payroll_import_batches      one row per committed bulk upload (file sha256 + period are unique: a file is imported once).
@@ -32,8 +32,8 @@ holds encashed days (cancel the encashments first).
 
 from migration_sql import run
 
-revision = "0022"
-down_revision = "0021"
+revision = "0023"
+down_revision = "0022"
 branch_labels = None
 depends_on = None
 

@@ -1,7 +1,7 @@
 # 17 - Payroll phase 5: publish maker-checker, bank payment file, investment declarations / Form 16, TDS engine
 
 Status: PROPOSED. Branch `feature/payroll-phase2` (or `feature/payroll-phase5` cut from it). Source: plan 14 phase 5 (items 19, 21, 22, 4).
-Contract: `docs/api-contract.md` section 19 (single source of truth; this plan only explains it). Migrations `0026` (5a), `0027` (5b), `0028` (5c).
+Contract: `docs/api-contract.md` section 19 (single source of truth; this plan only explains it). Migrations `0027` (5a), `0028` (5b), `0029` (5c).
 All plan 12 / 15 / 16 rules still apply: money as 2-decimal strings / `Decimal`, every amount and identifier encrypted at rest, no SQL aggregates on money (D2), audit every view/change
 without amounts or identifiers, step-up (`current_password`) on sensitive writes, nobody acts on their own money (D9), published = locked (D4), maker-checker with the
 creator / last editor / submitter / append-only `contributors` exclusion (18.14), lock order of plan 16 F15. Nothing is deployed until the user approves.
@@ -55,7 +55,7 @@ creator / last editor / submitter / append-only `contributors` exclusion (18.14)
 Common rules of plan 15 section 2 and plan 16 section 2 (uuid PK, `*_enc`, `version`, audit columns + `set_updated_at`, FK indexes, `REVOKE DELETE, TRUNCATE FROM app_user`,
 key-rotation exception `app.key_rotation='on'` with `updated_at` unchanged). Every new encrypted column joins `services/key_rotation.py` (model discovery) and `scripts/rotate_keys.py --verify-only`.
 
-### 2.1 Migration 0026 (5a)
+### 2.1 Migration 0027 (5a)
 - **`payroll_runs.contributors text[] NOT NULL DEFAULT '{}'`**, **`payslips.contributors text[]`** (backfill from created_by / updated_by / processed_by). Triggers: contributors only grow; the 0018 payslip lock trigger
   accepts a `contributors` change only while OLD.status IN (`draft`, `processed`).
 - **`payroll_publish_requests`**: `run_id FK`, `scope CHECK IN ('run','payslip')`, `payslip_id FK NULL` (`CHECK ((scope='payslip') = (payslip_id IS NOT NULL))`), `status CHECK IN ('submitted','approved','rejected','withdrawn','stale')`,
@@ -72,9 +72,9 @@ key-rotation exception `app.key_rotation='on'` with `updated_at` unchanged). Eve
 - **`payroll_payment_lines`**: `batch_id FK`, `payslip_id FK RESTRICT`, `user_id`, `seq int`, `amount_enc`, `beneficiary_enc` (name, account, IFSC, bank as snapshot / current), `account_source CHECK IN ('snapshot','current')`,
   `flags text[]`, `status CHECK IN ('pending','excluded','exported','paid','failed')`, `reference_enc NULL`, `paid_on date NULL`, `version`, audit cols. Partial unique `(payslip_id) WHERE status IN ('pending','exported','paid')`;
   unique `(batch_id, seq)`. Trigger: payslip belongs to the batch's run (any revision of that run) and `user_id` matches; lines frozen while the batch is not `draft` except `status` / `reference_enc` / `paid_on` transitions of `exported -> paid|failed`.
-- `payroll_item_events.item_type` + `publish_request`, `payment_batch`; `action` + `export`, `confirm`, `expire`. Settings seed (19.10). Grants SELECT, INSERT, UPDATE. `test_migration_0026.py`; regenerate `schema.sql`.
+- `payroll_item_events.item_type` + `publish_request`, `payment_batch`; `action` + `export`, `confirm`, `expire`. Settings seed (19.10). Grants SELECT, INSERT, UPDATE. `test_migration_0027.py`; regenerate `schema.sql`.
 
-### 2.2 Migration 0027 (5b)
+### 2.2 Migration 0028 (5b)
 - **`tax_year_rules`**: `fy text CHECK ~ '^\d{4}-\d{2}$'`, `version int`, `status CHECK IN ('draft','submitted','verified','superseded')`, `rules jsonb NOT NULL` (not secret; schema in 19.6), `rules_sha256`,
   `attestation text NULL` (required when verified), `windows jsonb` (declaration / proof open-close dates), `created_by`, `last_edited_by`, `contributors`, `submitted_by/at`, `verified_by/at`, `version_row int` (optimistic lock), audit cols.
   Unique `(fy, version)`; partial unique `(fy) WHERE status='verified'`. CHECK verifier not a party. Trigger: verified / superseded immutable except `verified -> superseded`; `windows` stays editable (dates are not tax rules; audited).
@@ -87,13 +87,13 @@ key-rotation exception `app.key_rotation='on'` with `updated_at` unchanged). Eve
 - **`form16_documents`**: `user_id`, `fy`, `kind CHECK IN ('form16','part_a','part_b','form12ba')`, `file_id FK files`, `sha256`, `upload_batch_id uuid`, `status CHECK IN ('uploaded','published','withdrawn')`,
   `uploaded_by`, `published_by/at` (CHECK `published_by <> uploaded_by` when `second_person` column true), `second_person bool`, `withdrawn_by/at`, `withdraw_reason_enc`, audit cols. Partial unique `(user_id, fy, kind) WHERE status IN ('uploaded','published')`.
 - `files.purpose` CHECK + `tax_proof`, `form16` (encrypted at rest; never purged while referenced). `payroll_item_events.item_type` + `tax_rules`, `tax_declaration`, `tax_proof`, `form16`; actions + `verify`, `unlock`, `withdraw`.
-  Settings seed. Grants. `test_migration_0027.py`.
+  Settings seed. Grants. `test_migration_0028.py`.
 
-### 2.3 Migration 0028 (5c)
+### 2.3 Migration 0029 (5c)
 - **`payroll_tax_computations`**: `payslip_id FK UNIQUE`, `user_id`, `fy`, `rules_id FK tax_year_rules`, `rules_version`, `regime`, `declaration_version int NULL`, `proofs_digest text`, `mode CHECK IN ('suggest','apply')`,
   `computation_enc` (annual figures, steps), `suggested_enc`, `applied bool`, `override_reason_enc NULL`, audit cols. Trigger: user / FY match the payslip; refuse UPDATE / DELETE once the payslip is not `draft` (key rotation excepted).
 - **`statutory_challans`**: `bsr_code_enc`, `challan_serial_enc`, `deposited_on date` (TDS rows; the events table gains the same `prev_*` columns).
-- Settings seed. `test_migration_0028.py`.
+- Settings seed. `test_migration_0029.py`.
 
 ## 3. Business rules and edge cases
 **Publish requests (5a)**
@@ -149,15 +149,15 @@ key-rotation exception `app.key_rotation='on'` with `updated_at` unchanged). Eve
 - **Unit (pure)**: maker-set builder (each source, F&F exclusion, increment structures excluded); `result_mac` canonicalisation; CSV rendering (charset, names, rounding, header); revision delta; rules validation; HRA least-of-three; Chapter VI-A limits and groups; slabs, rebate marginal relief, surcharge marginal relief, cess, rounding, no-PAN rate; projection with joiner / leaver / one-time items / previous employer; over-deduction; net cap. Golden cases per regime from figures the user verifies.
 - **Lifecycle**: request -> approve publishes the exact set; stale on reopen / refresh / expiry / changed payslip; G1 / G2 bypasses closed (earlier editor, item creator, arrears acceptor, structure creator); batch create -> submit -> approve -> file -> confirm; revision delta; failed line re-batched; declaration draft vs submitted; proof verify; Form 16 dry run -> commit -> publish -> withdraw; engine suggest vs apply; rules version change + refresh.
 - **Concurrency (PostgreSQL)**: two checkers approve one request; approve vs reopen; two batches for the same payslip (partial unique); batch approve vs details change; revision publish vs batch export; declaration submit vs run process (share locks); rules verify twice.
-- **DB checks**: 0026-0028 up / down / up; every checker CHECK rejects a direct UPDATE; contributor growth triggers; frozen lines / computations; tagged-row triggers; no DELETE / TRUNCATE; key rotation with `updated_at` unchanged; `rotate_keys.py --verify-only`.
+- **DB checks**: 0027-0029 up / down / up; every checker CHECK rejects a direct UPDATE; contributor growth triggers; frozen lines / computations; tagged-row triggers; no DELETE / TRUNCATE; key rotation with `updated_at` unchanged; `rotate_keys.py --verify-only`.
 - **Security / API**: permission matrix; self and second person; step-up and daily limit; rate limits fail closed; 422 unknown fields; no amounts / PAN / accounts / file names in audit, logs, push; probes 404.
 - **Flutter**: model / repository contract tests per endpoint; widget tests for publish-check states, approvals sections, batch wizard, rules editor, declaration form, proof upload, Form 16 wizard, TDS card; console smoke.
 
 ## 7. Work packages (each: contract -> DB -> backend -> Flutter / console -> qa-tester -> security-reviewer -> fixes; suites green before the next)
-### 5a - publish maker-checker UI + bank payment file + delivery (migration 0026) - estimate 6-7 working days
+### 5a - publish maker-checker UI + bank payment file + delivery (migration 0027) - estimate 6-7 working days
 **database-engineer** (0.5 d)
-1. 0026: contributors columns + triggers (runs, payslips; payslip lock trigger change), `payroll_publish_requests`, `payslip_deliveries`, `company_bank_accounts`, details `bank_changed_*`, `payroll_payment_batches`, `payroll_payment_lines` (+ checks, partial uniques, frozen / tagged-row triggers), event CHECKs, settings seed, grants, downgrade.
-2. ORM models, `schema.sql`, `test_migration_0026.py`.
+1. 0027: contributors columns + triggers (runs, payslips; payslip lock trigger change), `payroll_publish_requests`, `payslip_deliveries`, `company_bank_accounts`, details `bank_changed_*`, `payroll_payment_batches`, `payroll_payment_lines` (+ checks, partial uniques, frozen / tagged-row triggers), event CHECKs, settings seed, grants, downgrade.
+2. ORM models, `schema.sql`, `test_migration_0027.py`.
 **backend-developer** (2.5 d)
 3. Contributors tracking in `payroll_runs.py` (every run / payslip action); `services/payroll_publish_requests.py` (maker set, snapshot + HKDF HMAC, create / withdraw / approve via the existing publish internals / reject, stale hooks in reopen / refresh / payslip process); `PUBLISH_REQUEST_REQUIRED` gate; publish-check.
 4. `services/payroll_payments.py` (accounts, batches, lines, blockers, delta, submit / approve re-derivation, CSV writer, confirm); details service sets `bank_changed_*`.
@@ -165,16 +165,16 @@ key-rotation exception `app.key_rotation='on'` with `updated_at` unchanged). Eve
 **flutter-developer** (2 d) 6. Run review publish states, Approvals sections, Payments wizard / detail / confirm, Bank accounts, Delivery tab, settings toggles.
 **security-reviewer** (0.5 d) 7. Maker-set completeness (try every G1 / G2 path), snapshot binding, double payment, CSV, bank-change controls, redaction. **qa-tester** (1 d) 8. Section 6 for 5a.
 
-### 5b - investment declarations, proofs, Form 16 (migration 0027) - estimate 7-8 working days
-**database-engineer** (0.5 d) 1. 0027: `tax_year_rules` (+ seed draft), `tax_declarations`, `tax_proofs`, `form16_documents`, file purposes, event CHECKs, triggers, settings, grants, downgrade, tests.
+### 5b - investment declarations, proofs, Form 16 (migration 0028) - estimate 7-8 working days
+**database-engineer** (0.5 d) 1. 0028: `tax_year_rules` (+ seed draft), `tax_declarations`, `tax_proofs`, `form16_documents`, file purposes, event CHECKs, triggers, settings, grants, downgrade, tests.
 **backend-developer** (3 d)
 2. `services/tax_rules.py` (schema validation, versions, submit / verify / reject, windows); `services/tax_declarations.py` (employee + HR on behalf, unlock, proofs, verify / reject, declarations xlsx).
 3. `services/form16.py` (multi-file upload, filename matching, HMAC-bound dry run / commit, publish, withdraw, employee list / download); file purposes in `files.py`; pushes; audit allow-list.
 **flutter-developer** (3 d) 4. Tax area for HR (rules editor and verify, declarations, proofs queue, Form 16 wizard); employee Tax screens (declaration, proofs, Form 16); push handlers.
 **security-reviewer** (0.5 d) 5. File access, PAN / third-party data handling, rules verification bypasses, draft vs submitted. **qa-tester** (1 d) 6. As 5a.
 
-### 5c - TDS engine, 24Q data, computation statement (migration 0028) - estimate 9-11 working days
-**database-engineer** (0.5 d) 1. 0028: `payroll_tax_computations` (+ triggers), TDS challan columns, settings, tests.
+### 5c - TDS engine, 24Q data, computation statement (migration 0029) - estimate 9-11 working days
+**database-engineer** (0.5 d) 1. 0029: `payroll_tax_computations` (+ triggers), TDS challan columns, settings, tests.
 **backend-developer** (5 d)
 2. `services/tax_engine.py` (pure: rules in, figures out; no constants) with golden tests built from user-verified examples.
 3. Integration into run create / refresh / process / revise (snapshot `rules_id` / mode in `run.config`), apply / suggest, override reason, flags, AdminPayslip `tds_computation`, `/me/tax/projection`, admin preview / summary.

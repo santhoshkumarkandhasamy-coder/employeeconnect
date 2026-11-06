@@ -6,7 +6,7 @@ import uuid
 from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, Float, Index, Integer, Text, Time, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ..core.crypto import EncryptedJSON
+from ..core.crypto import EncryptedJSON, EncryptedString
 from .base import Base, CreatedMixin, TimestampMixin, fk_uuid, uuid_pk
 
 
@@ -32,6 +32,7 @@ class Attendance(TimestampMixin, Base):
         Index("ix_attendance_work_date", "work_date"),
         Index("ix_attendance_status", "status"),
         Index("ix_attendance_shift_id", "shift_id"),
+        Index("ix_attendance_client_location_id", "client_location_id"),
         Index("ix_attendance_open", "work_date", postgresql_where=text("check_out_at IS NULL")),
         Index("ix_attendance_suspicious", "work_date", postgresql_where=text("suspicious")),
         # a selfie file can back at most one punch (anti-replay); cross in/out reuse is checked in the service
@@ -58,6 +59,8 @@ class Attendance(TimestampMixin, Base):
     check_in_distance_m: Mapped[int | None] = mapped_column(Integer)
     check_in_within_fence: Mapped[bool | None] = mapped_column(Boolean)
     check_in_selfie_file_id: Mapped[uuid.UUID | None] = fk_uuid("files.id", ondelete="SET NULL", nullable=True)
+    # set when the day was an approved on-duty day: the punch was checked against this client site, not the office
+    client_location_id: Mapped[uuid.UUID | None] = fk_uuid("client_locations.id", nullable=True)
     check_out_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     check_out_loc: Mapped[dict | None] = mapped_column("check_out_loc_enc", EncryptedJSON, deferred=True)
     check_out_selfie_file_id: Mapped[uuid.UUID | None] = fk_uuid("files.id", ondelete="SET NULL", nullable=True)
@@ -71,6 +74,10 @@ class Attendance(TimestampMixin, Base):
     check_in_mock_location: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     check_out_mock_location: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     suspicious: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    # manual entry / correction by HR or Admin (plan 14): who, why (encrypted). Punch evidence is kept when correcting.
+    manual: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    manual_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+    manual_reason: Mapped[str | None] = mapped_column("manual_reason_enc", EncryptedString)
 
 
 class LateRecord(CreatedMixin, Base):

@@ -20,6 +20,7 @@ import '../payroll/domain/payroll_models.dart' show canViewOwnPayslips;
 import '../payroll/presentation/payslips_screen.dart';
 import '../placeholders/placeholder_screen.dart';
 import '../profile/presentation/profile_screen.dart';
+import '../tasks/presentation/tasks_screen.dart';
 
 /// More: later features (Late, Announcements, Profile, Admin) plus
 /// account actions (biometrics, logout).
@@ -71,6 +72,12 @@ class MoreScreen extends ConsumerWidget {
               subtitle: Text('${user.employeeId} - ${user.role}'),
             ),
           const Divider(),
+          _navTile(
+            context,
+            'Tasks & reminders',
+            Icons.task_alt,
+            builder: (_) => const TasksScreen(),
+          ),
           _navTile(
             context,
             'Late records',

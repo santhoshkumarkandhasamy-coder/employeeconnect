@@ -11,7 +11,7 @@ const int payrollImportMaxBytes = 1024 * 1024;
 /// works in the browser console).
 class PickedWorkbook {
   const PickedWorkbook(
-      {required this.name, required this.bytes, this.tooLarge = false});
+      {required this.name, required this.bytes, this.tooLarge = false,});
   final String name;
   final Uint8List bytes;
 
@@ -45,7 +45,7 @@ class PluginPayrollImportPicker implements PayrollImportPicker {
       if (f == null) return null;
       if (f.size > payrollImportMaxBytes) {
         return PickedWorkbook(
-            name: f.name, bytes: Uint8List(0), tooLarge: true);
+            name: f.name, bytes: Uint8List(0), tooLarge: true,);
       }
       final stream = f.readStream;
       if (stream == null) return null;
@@ -54,7 +54,7 @@ class PluginPayrollImportPicker implements PayrollImportPicker {
         buf.add(chunk);
         if (buf.length > payrollImportMaxBytes) {
           return PickedWorkbook(
-              name: f.name, bytes: Uint8List(0), tooLarge: true);
+              name: f.name, bytes: Uint8List(0), tooLarge: true,);
         }
       }
       return PickedWorkbook(name: f.name, bytes: buf.takeBytes());

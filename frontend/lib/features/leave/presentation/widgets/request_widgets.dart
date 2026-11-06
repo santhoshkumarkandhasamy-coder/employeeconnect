@@ -65,7 +65,7 @@ class RequestTile extends StatelessWidget {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(item.kind == RequestKind.leave ? Icons.beach_access_outlined : Icons.timer_outlined),
+                Icon(requestKindIcon(item.kind)),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
@@ -137,8 +137,15 @@ class RequestDetailBody extends StatelessWidget {
           if (showUser && item.user != null)
             row('Employee', '${item.user!.display} (${item.user!.employeeId})'
                 '${item.user!.department == null ? '' : ', ${item.user!.department}'}'),
-          row(item.kind == RequestKind.leave ? 'Dates' : 'When', item.whenText),
-          row(item.kind == RequestKind.leave ? 'Days' : 'Duration', item.amountText),
+          if (item.kind == RequestKind.onDuty && item.clientLocationName != null)
+            row(
+              'Client location',
+              item.clientLocationAddress == null || item.clientLocationAddress!.isEmpty
+                  ? item.clientLocationName!
+                  : '${item.clientLocationName}, ${item.clientLocationAddress}',
+            ),
+          row(item.kind.isDateRange ? 'Dates' : 'When', item.whenText),
+          row(item.kind.isDateRange ? 'Days' : 'Duration', item.amountText),
           row('Reason', item.reason.isEmpty ? 'Not available (offline or removed after retention)' : item.reason),
           if (item.hasAttachment) ...[
             row('Attachment', 'Attached'),
@@ -190,3 +197,9 @@ Future<bool> confirmDialog(
       ),
     ) ??
     false;
+
+IconData requestKindIcon(RequestKind k) => switch (k) {
+      RequestKind.leave => Icons.beach_access_outlined,
+      RequestKind.permission => Icons.timer_outlined,
+      RequestKind.onDuty => Icons.business_center_outlined,
+    };

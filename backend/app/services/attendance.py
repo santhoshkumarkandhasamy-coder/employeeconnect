@@ -11,7 +11,7 @@ import uuid
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,17 +23,20 @@ from ..core.pagination import PageParams, make_page
 from ..core.rbac import Principal
 from ..models import (
     Attendance,
+    ClientLocation,
     File,
     Holiday,
     LateRecord,
     LeaveRequest,
     LeaveType,
+    OnDutyRequest,
     PermissionRequest,
     Setting,
     Shift,
     User,
 )
 from . import files as files_svc
+from .notifications import notify
 
 log = logging.getLogger("app.attendance")
 
@@ -58,7 +61,9 @@ DEFAULT_WORKING_DAYS = (1, 2, 3, 4, 5)
 MAX_RANGE_DAYS = 366  # cap for team / admin list queries
 OVERNIGHT_BUFFER = dt.timedelta(hours=4)  # a night-shift record may be closed this long after the shift ends
 SELFIE_CLOCK_TOLERANCE_S = 60
-PUNCH_FAIL_CODES = frozenset({"OUTSIDE_GEOFENCE", "LOCATION_ACCURACY_LOW", "LOCATION_FIX_STALE", "MOCK_LOCATION_DETECTED"})
+PUNCH_FAIL_CODES = frozenset(
+    {"OUTSIDE_GEOFENCE", "OUTSIDE_CLIENT_LOCATION", "LOCATION_ACCURACY_LOW", "LOCATION_FIX_STALE", "MOCK_LOCATION_DETECTED"}
+)
 
 
 # ---------------------------------------------------------------- settings / time helpers
@@ -157,6 +162,44 @@ async def _approved_leaves(session: AsyncSession, user_id: uuid.UUID, d_from: dt
     return list((await session.execute(q)).scalars())
 
 
+async def on_duty_site(session: AsyncSession, user_id: uuid.UUID, day: dt.date) -> ClientLocation | None:
+    """The client location of the user's APPROVED on-duty request covering `day` (plan 13), else None.
+    On such a day punches are checked against this site instead of the office."""
+    q = (
+        select(ClientLocation)
+        .join(OnDutyRequest, OnDutyRequest.client_location_id == ClientLocation.id)
+        .where(
+            OnDutyRequest.user_id == user_id,
+            OnDutyRequest.status == "approved",
+            OnDutyRequest.from_date <= day,
+            OnDutyRequest.to_date >= day,
+        )
+        .limit(1)
+    )
+    return (await session.execute(q)).scalar_one_or_none()
+
+
+async def _approved_on_duty(session: AsyncSession, user_id: uuid.UUID, d_from: dt.date, d_to: dt.date) -> list[tuple]:
+    """[(from_date, to_date, client location name)] of approved on-duty requests touching the range."""
+    q = (
+        select(OnDutyRequest.from_date, OnDutyRequest.to_date, ClientLocation.name)
+        .join(ClientLocation, ClientLocation.id == OnDutyRequest.client_location_id)
+        .where(
+            OnDutyRequest.user_id == user_id,
+            OnDutyRequest.status == "approved",
+            OnDutyRequest.from_date <= d_to,
+            OnDutyRequest.to_date >= d_from,
+        )
+    )
+    return list((await session.execute(q)).all())
+
+
+def site_out(c: ClientLocation) -> dict[str, Any]:
+    """The employee's own assigned site for today: coordinates are included (like the office in GET /config) so the app
+    can show the live distance before punching."""
+    return {"id": str(c.id), "name": c.name, "address": c.address, "lat": c.lat, "lng": c.lng, "radius_m": c.radius_m}
+
+
 # ---------------------------------------------------------------- output
 def user_summary(u: User, photo_file_id: uuid.UUID | None = None) -> dict[str, Any]:
     return {
@@ -168,7 +211,9 @@ def user_summary(u: User, photo_file_id: uuid.UUID | None = None) -> dict[str, A
     }
 
 
-def _record_out(a: Attendance, shift: Shift | None, expose_distance: bool = False) -> dict[str, Any]:
+def _record_out(
+    a: Attendance, shift: Shift | None, expose_distance: bool = False, site: ClientLocation | None = None
+) -> dict[str, Any]:
     """`distance_m` is only exposed to HR/admin viewers (to an employee it would map the office boundary)."""
     return {
         "id": str(a.id),
@@ -182,6 +227,9 @@ def _record_out(a: Attendance, shift: Shift | None, expose_distance: bool = Fals
         "distance_m": a.check_in_distance_m if expose_distance else None,
         "selfie_url": f"/api/files/{a.check_in_selfie_file_id}" if a.check_in_selfie_file_id else None,
         "auto_closed": a.auto_closed,
+        "manual": a.manual,  # entered or corrected by HR/Admin
+        # on-duty punch: the client site it was checked against (null = office)
+        "client_location": {"id": str(site.id), "name": site.name} if site is not None else None,
         "shift": (
             {"start": _fmt_hm(shift.start_time), "end": _fmt_hm(shift.end_time), "grace_minutes": shift.grace_minutes}
             if shift
@@ -195,7 +243,14 @@ async def _records_out(session: AsyncSession, rows: list[Attendance], expose_dis
     shifts: dict[uuid.UUID, Shift] = {}
     if ids:
         shifts = {s.id: s for s in (await session.execute(select(Shift).where(Shift.id.in_(ids)))).scalars()}
-    return [_record_out(a, shifts.get(a.shift_id), expose_distance) for a in rows]
+    loc_ids = {a.client_location_id for a in rows if a.client_location_id}
+    sites: dict[uuid.UUID, ClientLocation] = {}
+    if loc_ids:
+        sites = {c.id: c for c in (await session.execute(select(ClientLocation).where(ClientLocation.id.in_(loc_ids)))).scalars()}
+    return [
+        _record_out(a, shifts.get(a.shift_id), expose_distance, sites.get(a.client_location_id) if a.client_location_id else None)
+        for a in rows
+    ]
 
 
 # ---------------------------------------------------------------- punch validation
@@ -250,9 +305,14 @@ def _log_diagnostics(actor: Principal, body: Any, now: dt.datetime) -> None:
         log.warning("mock location flag reported by user %s", actor.id)
 
 
-def _fence(cfg: dict[str, Any], body: Any) -> tuple[int, bool, int]:
-    dist = haversine_m(body.lat, body.lng, float(cfg["office.lat"]), float(cfg["office.lng"]))
-    radius = int(cfg["office.radius_m"])
+def _fence(cfg: dict[str, Any], body: Any, site: ClientLocation | None = None) -> tuple[int, bool, int]:
+    """Distance to the office, or to the client `site` on an approved on-duty day."""
+    if site is not None:
+        dist = haversine_m(body.lat, body.lng, site.lat, site.lng)
+        radius = site.radius_m
+    else:
+        dist = haversine_m(body.lat, body.lng, float(cfg["office.lat"]), float(cfg["office.lng"]))
+        radius = int(cfg["office.radius_m"])
     return int(round(dist)), dist <= radius, radius
 
 
@@ -289,8 +349,14 @@ def _enforce_accuracy(cfg: dict[str, Any], body: Any) -> None:
         )
 
 
-def _outside() -> AppError:
+def _outside(site: ClientLocation | None = None) -> AppError:
     # Deliberately no distance/radius: exact values let a client trilaterate the office and bisect the boundary.
+    if site is not None:
+        return AppError(
+            "OUTSIDE_CLIENT_LOCATION",
+            f"You are on duty today. Check in at the client location: {site.name}",
+            details=[{"field": "within_fence", "message": "false"}],
+        )
     return AppError(
         "OUTSIDE_GEOFENCE", "You are outside the office area", details=[{"field": "within_fence", "message": "false"}]
     )
@@ -385,14 +451,15 @@ async def check_in(session: AsyncSession, actor: Principal, body: Any) -> dict[s
     for lv in await _approved_leaves(session, user.id, work_date, work_date):
         if not lv.half_day:
             raise AppError("ON_LEAVE", "You are on approved leave today")
+    site = await on_duty_site(session, user.id, work_date)  # approved on duty: only the client site counts today
     try:
         _require_fix(cfg, body, now)
         _enforce_mock(cfg, body)
         _enforce_accuracy(cfg, body)
         selfie_id = await _validate_selfie(session, actor, body.selfie_file_id, bool(cfg["attendance.selfie_required"]), cfg, now)
-        dist, within, _radius = _fence(cfg, body)
+        dist, within, _radius = _fence(cfg, body, site)
         if not within:
-            raise _outside()
+            raise _outside(site)
     except AppError as exc:
         await _audit_reject(session, actor, "check_in", exc.code)
         raise
@@ -411,6 +478,7 @@ async def check_in(session: AsyncSession, actor: Principal, body: Any) -> dict[s
         check_in_distance_m=dist,
         check_in_within_fence=within,
         check_in_selfie_file_id=selfie_id,
+        client_location_id=site.id if site is not None else None,
         check_in_accuracy_m=body.accuracy_m,
         check_in_clock_skew_s=_skew_s(body, now),
         check_in_mock_location=mock,
@@ -444,7 +512,7 @@ async def check_in(session: AsyncSession, actor: Principal, body: Any) -> dict[s
         if again is None:
             raise AppError("SELFIE_REUSED", "This selfie was already used. Take a new one.") from None
         raise AppError("ALREADY_CHECKED_IN", "You have already checked in today") from None
-    return _record_out(rec, shift)
+    return _record_out(rec, shift, site=site)
 
 
 async def check_out(session: AsyncSession, actor: Principal, body: Any) -> dict[str, Any]:
@@ -463,14 +531,16 @@ async def check_out(session: AsyncSession, actor: Principal, body: Any) -> dict[
         await _audit_reject(session, actor, "check_out", "ALREADY_CHECKED_OUT")
         raise AppError("ALREADY_CHECKED_OUT", "You have already checked out today")
     mock = bool(body.is_mock_location)
+    # an on-duty check-in is checked out against the same client site
+    site = await session.get(ClientLocation, rec.client_location_id) if rec.client_location_id else None
     try:
         if cfg["attendance.checkout_geofence"]:
             _require_fix(cfg, body, now)
             _enforce_mock(cfg, body)
             _enforce_accuracy(cfg, body)
-            _dist, within, _radius = _fence(cfg, body)
+            _dist, within, _radius = _fence(cfg, body, site)
             if not within:
-                raise _outside()
+                raise _outside(site)
         selfie_id = await _validate_selfie(session, actor, body.selfie_file_id, False, cfg, now)
     except AppError as exc:
         await _audit_reject(session, actor, "check_out", exc.code)
@@ -497,7 +567,7 @@ async def check_out(session: AsyncSession, actor: Principal, body: Any) -> dict[
     except IntegrityError:
         await session.rollback()
         raise AppError("SELFIE_REUSED", "This selfie was already used. Take a new one.") from None
-    return _record_out(rec, shift)
+    return _record_out(rec, shift, site=site)
 
 
 async def today(session: AsyncSession, actor: Principal) -> dict[str, Any]:
@@ -507,9 +577,149 @@ async def today(session: AsyncSession, actor: Principal) -> dict[str, Any]:
     rec = (await session.execute(q)).scalar_one_or_none()
     if rec is None:
         rec = await _open_overnight_record(session, actor.id, local)  # night shift still running after midnight
+    site = await on_duty_site(session, actor.id, local.date())
+    on_duty = site_out(site) if site is not None else None  # where to punch today (null = office)
     if rec is None:
-        return {"record": None}
-    return (await _records_out(session, [rec]))[0]
+        return {"record": None, "on_duty": on_duty}
+    return {**(await _records_out(session, [rec]))[0], "on_duty": on_duty}
+
+
+# ---------------------------------------------------------------- manual entry (HR / Admin, plan 14)
+MANUAL_MAX_PAST_DAYS = 366
+
+
+async def _manual_target(session: AsyncSession, actor: Principal, user_id: uuid.UUID) -> User:
+    u = await session.get(User, user_id)
+    if u is None or u.deleted_at is not None:
+        raise AppError("NOT_FOUND", "Employee not found")
+    if u.id == actor.id:
+        raise AppError("FORBIDDEN", "You cannot enter or change your own attendance")
+    return u
+
+
+def _manual_date(cfg: dict[str, Any], work_date: dt.date) -> dt.date:
+    today_d = utcnow().astimezone(office_tz(cfg)).date()
+    if work_date > today_d:
+        raise AppError("INVALID_DATE_RANGE", "Attendance cannot be entered for a future date",
+                       details=[{"field": "work_date", "message": "future"}])  # fmt: skip
+    if work_date < today_d - dt.timedelta(days=MANUAL_MAX_PAST_DAYS):
+        raise AppError("INVALID_DATE_RANGE", f"Attendance can be entered at most {MANUAL_MAX_PAST_DAYS} days back",
+                       details=[{"field": "work_date", "message": "too old"}])  # fmt: skip
+    return today_d
+
+
+def _manual_snapshot(a: Attendance | None) -> dict[str, Any] | None:
+    if a is None:
+        return None
+    return {
+        "check_in_at": iso_z(a.check_in_at),
+        "check_out_at": iso_z(a.check_out_at) if a.check_out_at else None,
+        "status": a.status,
+        "minutes_late": a.minutes_late,
+        "manual": a.manual,
+    }
+
+
+async def manual_get(session: AsyncSession, actor: Principal, user_id: uuid.UUID, work_date: dt.date) -> dict[str, Any]:
+    u = await session.get(User, user_id)
+    if u is None or u.deleted_at is not None:
+        raise AppError("NOT_FOUND", "Employee not found")
+    q = select(Attendance).where(Attendance.user_id == u.id, Attendance.work_date == work_date)
+    rec = (await session.execute(q)).scalar_one_or_none()
+    photos = await files_svc.photo_file_ids(session, [u.id])
+    out = (await _records_out(session, [rec], expose_distance=True))[0] if rec else None
+    if rec is not None and rec.manual:
+        out["manual_reason"] = rec.manual_reason  # type: ignore[index]
+    return {"user": user_summary(u, photos.get(u.id)), "work_date": work_date.isoformat(), "record": out}
+
+
+async def manual_upsert(
+    session: AsyncSession, actor: Principal, user_id: uuid.UUID, work_date: dt.date, body: Any
+) -> dict[str, Any]:
+    """Create or correct one attendance day. Status, lateness and worked time are derived exactly like punches;
+    the late record is rebuilt. Location / selfie evidence of an existing punch is kept. Audited and pushed."""
+    user = await _manual_target(session, actor, user_id)
+    cfg = await load_settings(session)
+    tz = office_tz(cfg)
+    _manual_date(cfg, work_date)
+    q = select(Attendance).where(Attendance.user_id == user.id, Attendance.work_date == work_date).with_for_update()
+    rec = (await session.execute(q)).scalar_one_or_none()
+    shift = (await session.get(Shift, rec.shift_id)) if rec is not None and rec.shift_id else user.shift
+    if shift is None:
+        raise AppError("NO_SHIFT_ASSIGNED", "This employee has no shift. Assign one first.")
+    for lv in await _approved_leaves(session, user.id, work_date, work_date):
+        if not lv.half_day:
+            raise AppError("ON_LEAVE", "The employee is on approved full-day leave that day. Cancel the leave first.")
+    local_in = dt.datetime.combine(work_date, body.check_in.replace(second=0, microsecond=0), tzinfo=tz)
+    local_out = None
+    if body.check_out is not None:
+        local_out = dt.datetime.combine(work_date, body.check_out.replace(second=0, microsecond=0), tzinfo=tz)
+        if local_out <= local_in:
+            if not is_overnight(shift):
+                raise AppError("VALIDATION_ERROR", "Check-out must be after check-in",
+                               details=[{"field": "check_out", "message": "before check-in"}])  # fmt: skip
+            local_out += dt.timedelta(days=1)  # night shift: check-out the next morning
+    now = utcnow()
+    in_utc = local_in.astimezone(dt.UTC)
+    out_utc = local_out.astimezone(dt.UTC) if local_out else None
+    if in_utc > now or (out_utc is not None and out_utc > now):
+        raise AppError("VALIDATION_ERROR", "Times cannot be in the future",
+                       details=[{"field": "check_out" if in_utc <= now else "check_in", "message": "future"}])  # fmt: skip
+    minutes_late = 0
+    if await working_day(session, user, work_date):
+        minutes_late = await minutes_late_for(session, user, shift, work_date, local_in)
+    worked = int((out_utc - in_utc).total_seconds() // 60) if out_utc else None
+    status = "late" if minutes_late else "present"
+    if worked is not None and worked < int(cfg["attendance.half_day_minutes"]):
+        status = "half_day"
+    before = _manual_snapshot(rec)
+    if rec is None:
+        rec = Attendance(user_id=user.id, work_date=work_date, shift_id=shift.id, check_in_at=in_utc)
+        session.add(rec)
+    else:
+        await session.execute(delete(LateRecord).where(LateRecord.attendance_id == rec.id))
+    rec.check_in_at, rec.check_out_at, rec.worked_minutes = in_utc, out_utc, worked
+    rec.status, rec.minutes_late, rec.auto_closed = status, minutes_late, False
+    rec.manual, rec.manual_by, rec.manual_reason = True, actor.id, body.reason
+    await session.flush()
+    if minutes_late:
+        session.add(
+            LateRecord(
+                user_id=user.id, attendance_id=rec.id, work_date=work_date, shift_start=shift.start_time,
+                grace_minutes=shift.grace_minutes, check_in_at=in_utc, minutes_late=minutes_late,
+            )
+        )  # fmt: skip
+    audit(
+        session, action="attendance.manual", actor=actor, entity_type="attendance", entity_id=rec.id,
+        before=before, after={**_manual_snapshot(rec), "owner": user.employee_id, "work_date": work_date.isoformat()},  # type: ignore[dict-item]
+    )  # fmt: skip
+    await session.commit()
+    await notify(
+        session, [user.id], type="attendance_manual", entity_id=rec.id,
+        title="Attendance updated", body=f"HR updated your attendance for {work_date.strftime('%d %b %Y')}",
+    )  # fmt: skip
+    return await manual_get(session, actor, user.id, work_date)
+
+
+async def manual_delete(session: AsyncSession, actor: Principal, user_id: uuid.UUID, work_date: dt.date) -> None:
+    """Remove a MANUAL entry (a real punch cannot be deleted, only corrected)."""
+    user = await _manual_target(session, actor, user_id)
+    q = select(Attendance).where(Attendance.user_id == user.id, Attendance.work_date == work_date).with_for_update()
+    rec = (await session.execute(q)).scalar_one_or_none()
+    if rec is None:
+        raise AppError("NOT_FOUND", "No attendance for this date")
+    if not rec.manual:
+        raise AppError("CONFLICT", "Only manual entries can be removed. Correct the times instead.", status=409)
+    if rec.check_in_within_fence is not None or rec.check_in_selfie_file_id is not None:  # set only by a real punch
+        raise AppError("CONFLICT", "This day has a real punch; correct the times instead of removing it.", status=409)
+    before = _manual_snapshot(rec)
+    await session.execute(delete(LateRecord).where(LateRecord.attendance_id == rec.id))
+    await session.delete(rec)
+    audit(
+        session, action="attendance.manual_delete", actor=actor, entity_type="attendance", entity_id=rec.id,
+        before={**before, "owner": user.employee_id, "work_date": work_date.isoformat()},  # type: ignore[dict-item]
+    )  # fmt: skip
+    await session.commit()
 
 
 # ---------------------------------------------------------------- history / team
@@ -583,6 +793,7 @@ async def _month_days(session: AsyncSession, user: User, month: str | None) -> t
     recs = {a.work_date: a for a in (await session.execute(q)).scalars()}
     holidays = await holiday_map(session, first, last)
     leaves = await _approved_leaves(session, user.id, first, last)
+    duties = await _approved_on_duty(session, user.id, first, last)
     type_names: dict[uuid.UUID, str] = {}
     if leaves:
         ids = {lv.leave_type_id for lv in leaves}
@@ -593,6 +804,7 @@ async def _month_days(session: AsyncSession, user: User, month: str | None) -> t
         holiday_name = holidays.get(d)
         leave_type = next((type_names.get(lv.leave_type_id) for lv in leaves if lv.from_date <= d <= lv.to_date), None)
         covered = any(lv.from_date <= d <= lv.to_date for lv in leaves)
+        on_duty_at = next((name for f, t, name in duties if f <= d <= t), None)
         if d in recs:
             status = recs[d].status
         elif holiday_name is not None:
@@ -611,6 +823,7 @@ async def _month_days(session: AsyncSession, user: User, month: str | None) -> t
                 "status": status,
                 "holiday_name": holiday_name,
                 "leave_type": leave_type if covered else None,
+                "on_duty": on_duty_at,  # client location name on an approved on-duty day
             }
         )
         d += dt.timedelta(days=1)

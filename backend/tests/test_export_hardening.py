@@ -286,10 +286,11 @@ async def _team(db, seeded):
     return set((await db.execute(select(User.id).where(User.manager_id == mgr))).scalars())
 
 
-async def test_every_registered_type_as_manager_and_hr_over_http(client, H, clock, db, seeded):
+async def test_every_registered_type_as_manager_and_hr_over_http(client, H, clock, db, seeded, redis):
     await seed_food(db, seeded)
     await seed_all(db, seeded)
     for name in export_svc.SHEETS:
+        await redis.flushall()  # the per-user export limit (5/min) is not under test here; there are more types than that
         p = {"type": name, "from": "2026-10-23", "to": "2026-10-23"}
         r = await client.get("/api/admin/export", headers=await H("hr"), params=p)
         assert r.status_code == 200, (name, r.text)

@@ -38,11 +38,15 @@ class TodayStatusCard extends ConsumerWidget {
       error: (_, __) => fallbackSubtitle != null
           ? (Icons.fingerprint, 'Today', fallbackSubtitle!)
           : (Icons.cloud_off_outlined, 'Today', 'Could not load. Tap to retry.'),
-      data: (r) => (
-        r != null && r.checkedIn ? Icons.check_circle_outline : Icons.fingerprint,
-        r != null && r.checkedOut ? 'Day complete' : (r != null && r.checkedIn ? 'Checked in' : 'Check in'),
-        todayStatusText(r),
-      ),
+      data: (t) {
+        final r = t.record;
+        final site = t.onDuty;
+        return (
+          r != null && r.checkedIn ? Icons.check_circle_outline : Icons.fingerprint,
+          r != null && r.checkedOut ? 'Day complete' : (r != null && r.checkedIn ? 'Checked in' : 'Check in'),
+          site == null ? todayStatusText(r) : '${todayStatusText(r)}. On duty at ${site.name}',
+        );
+      },
     );
     return Card(
       child: Semantics(

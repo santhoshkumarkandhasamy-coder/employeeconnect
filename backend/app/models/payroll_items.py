@@ -1,4 +1,4 @@
-"""Payroll components (migration 0022, plan docs/plans/15-payroll-phase3.md section 2.1): one-time items and bulk import batches,
+"""Payroll components (migration 0023, plan docs/plans/15-payroll-phase3.md section 2.1): one-time items and bulk import batches,
 loans and instalments, auto arrears, leave encashments and the append-only money history.
 
 Every money value, label, reason and breakdown is application-encrypted (`*_enc`; the python attribute drops the suffix).
@@ -112,7 +112,7 @@ class PayrollOneTimeItem(TimestampMixin, Base):
         CheckConstraint(
             "code IN ('BONUS','INCENTIVE','OTHER_EARNING','OTHER_DEDUCTION','NOTICE_RECOVERY')", name="ck_payroll_one_time_items_code"
         ),
-        # migration 0025: NOTICE_RECOVERY is system-only (written by the F&F approve); an F&F row is never an imported row
+        # migration 0026: NOTICE_RECOVERY is system-only (written by the F&F approve); an F&F row is never an imported row
         CheckConstraint("code <> 'NOTICE_RECOVERY' OR fnf_id IS NOT NULL", name="ck_payroll_one_time_items_notice_system"),
         CheckConstraint("fnf_id IS NULL OR batch_id IS NULL", name="ck_payroll_one_time_items_fnf_batch"),
         CheckConstraint("status IN ('pending','processing','paid','cancelled')", name="ck_payroll_one_time_items_status"),
@@ -136,7 +136,7 @@ class PayrollOneTimeItem(TimestampMixin, Base):
     amount: Mapped[str] = mapped_column("amount_enc", EncryptedString, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
     batch_id: Mapped[uuid.UUID | None] = fk_uuid("payroll_import_batches.id", nullable=True)
-    fnf_id: Mapped[uuid.UUID | None] = fk_uuid("fnf_settlements.id", nullable=True)  # migration 0025; write-once (trigger)
+    fnf_id: Mapped[uuid.UUID | None] = fk_uuid("fnf_settlements.id", nullable=True)  # migration 0026; write-once (trigger)
     payslip_id: Mapped[uuid.UUID | None] = fk_uuid("payslips.id", nullable=True)
     cancel_reason: Mapped[str | None] = mapped_column("cancel_reason_enc", EncryptedString)
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
@@ -214,7 +214,7 @@ class PayrollLoanInstallment(TimestampMixin, Base):
             "seq",
             unique=True,
             postgresql_where=text("status NOT IN ('cancelled','skipped')"),
-        ),  # fmt: skip  (migration 0023: numbers are unique among live installments only)
+        ),  # fmt: skip  (migration 0024: numbers are unique among live installments only)
         Index("ix_payroll_loan_installments_user_period", "user_id", "period", "status"),
         Index("ix_payroll_loan_installments_payslip_id", "payslip_id"),
         Index("ix_payroll_loan_installments_fnf_id", "fnf_id"),
@@ -231,7 +231,7 @@ class PayrollLoanInstallment(TimestampMixin, Base):
     kind: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'emi'"))
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
     payslip_id: Mapped[uuid.UUID | None] = fk_uuid("payslips.id", nullable=True)
-    fnf_id: Mapped[uuid.UUID | None] = fk_uuid("fnf_settlements.id", nullable=True)  # migration 0025; write-once (trigger)
+    fnf_id: Mapped[uuid.UUID | None] = fk_uuid("fnf_settlements.id", nullable=True)  # migration 0026; write-once (trigger)
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     created_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
     updated_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
@@ -313,14 +313,14 @@ class LeaveEncashment(TimestampMixin, Base):
     reason: Mapped[str | None] = mapped_column("reason_enc", EncryptedString)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
     payslip_id: Mapped[uuid.UUID | None] = fk_uuid("payslips.id", nullable=True)
-    fnf_id: Mapped[uuid.UUID | None] = fk_uuid("fnf_settlements.id", nullable=True)  # migration 0025; write-once (trigger)
+    fnf_id: Mapped[uuid.UUID | None] = fk_uuid("fnf_settlements.id", nullable=True)  # migration 0026; write-once (trigger)
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     created_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
     updated_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
 
 
 class ReimbursementClaim(TimestampMixin, Base):
-    """Expense claim (migration 0023). Two-step approval: the reporting manager verifies (`manager_step`), HR approves the final
+    """Expense claim (migration 0024). Two-step approval: the reporting manager verifies (`manager_step`), HR approves the final
     amount and the payout month. `approved` is the payable state of the component engine; `period` is the payout month."""
 
     __tablename__ = "reimbursement_claims"
@@ -386,7 +386,7 @@ class ReimbursementClaim(TimestampMixin, Base):
 
 
 class OvertimeDay(TimestampMixin, Base):
-    """Overtime minutes of one employee-day derived from attendance and reviewed by HR (migration 0023). Minutes are not money
+    """Overtime minutes of one employee-day derived from attendance and reviewed by HR (migration 0024). Minutes are not money
     (plaintext); `approved` is the payable state of the component engine."""
 
     __tablename__ = "overtime_days"

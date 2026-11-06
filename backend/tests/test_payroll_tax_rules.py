@@ -1,6 +1,6 @@
 """Plan 17 work package 5b: tax year rules (contract 19.6): validation, versions, maker-checker, windows, audit redaction.
 
-Database triggers / CHECKs are PostgreSQL-only (test_migration_0027.py); here the service layer enforces and is exercised on SQLite.
+Database triggers / CHECKs are PostgreSQL-only (test_migration_0028.py); here the service layer enforces and is exercised on SQLite.
 HR001 is the maker, ADM001 / ADM002 / ADM003 are checkers.
 """
 
@@ -39,7 +39,7 @@ def _migration():
     sys.path.insert(0, str(DB))
     try:
         spec = importlib.util.spec_from_file_location(
-            "mig0027r", DB / "alembic" / "versions" / "0027_tax_rules_declarations_form16.py"
+            "mig0028r", DB / "alembic" / "versions" / "0028_tax_rules_declarations_form16.py"
         )
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)

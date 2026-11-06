@@ -1,7 +1,7 @@
 """Reimbursement claims + overtime (plan 15 work package 3b) and the loan installment numbering fix
 
-Revision ID: 0023
-Revises: 0022
+Revision ID: 0024
+Revises: 0023
 
 Plan: docs/plans/15-payroll-phase3.md section 2.2; contract: docs/api-contract.md sections 17.6 to 17.9.
 
@@ -33,8 +33,8 @@ is above 120 (renumbering is impossible because `paid` rows are immutable).
 
 from migration_sql import run
 
-revision = "0023"
-down_revision = "0022"
+revision = "0024"
+down_revision = "0023"
 branch_labels = None
 depends_on = None
 

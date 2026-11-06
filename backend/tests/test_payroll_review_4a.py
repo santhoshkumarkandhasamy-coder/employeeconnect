@@ -1,7 +1,7 @@
 """Phase 4a security review fixes: H1 (every contributor is a party), M1 (batch approve bound to reviewed rows), M2 (employee
 lock on direct structure writes), L1 (money bounds), L4 (daily step-up window), L6 (derived import-binding key).
 
-The trigger changes of migration 0024 (L2) need PostgreSQL; their text is checked in test_migration_0024.py."""
+The trigger changes of migration 0025 (L2) need PostgreSQL; their text is checked in test_migration_0025.py."""
 
 from __future__ import annotations
 
@@ -260,7 +260,7 @@ def test_migration_text_for_the_review_fixes():
     db = Path(__file__).resolve().parents[2] / "database"
     sys.path.insert(0, str(db))
     try:
-        spec = importlib.util.spec_from_file_location("mig0024r", db / "alembic" / "versions" / "0024_salary_increments.py")
+        spec = importlib.util.spec_from_file_location("mig0025r", db / "alembic" / "versions" / "0025_salary_increments.py")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
     finally:

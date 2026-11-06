@@ -1,7 +1,7 @@
 """Salary increments with maker-checker, increment batches, structure provenance (plan 16 work package 4a)
 
-Revision ID: 0024
-Revises: 0023
+Revision ID: 0025
+Revises: 0024
 
 Plan: docs/plans/16-payroll-phase4.md section 2.1; contract: docs/api-contract.md section 18 (18.4 to 18.7, 18.11).
 
@@ -22,7 +22,7 @@ Added
 * salary_structures         `source` (manual | increment | import), `increment_id` (circular FK, RESTRICT) and
                             `import_batch_id`. The existing salary_structures_lock already compares every column.
 * payroll_item_events       item_type gains `increment`, `fnf`; action gains `submit`, `withdraw`, `settle`, `revoke`, `remove`
-                            (the two CHECKs are recreated; 0025 uses the F&F values).
+                            (the two CHECKs are recreated; 0026 uses the F&F values).
 * permission `payroll.approve` (module payroll) granted to the admin and hr roles.
 * settings payroll.structure_changes_need_approval (default true), payroll.split_*, payroll.increment_*,
   payroll.ctc_include_gratuity, payroll.gratuity_* (also defaults in code).
@@ -36,8 +36,8 @@ an increment (they stay as plain structures).
 
 from migration_sql import run
 
-revision = "0024"
-down_revision = "0023"
+revision = "0025"
+down_revision = "0024"
 branch_labels = None
 depends_on = None
 

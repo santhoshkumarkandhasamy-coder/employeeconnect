@@ -13,6 +13,7 @@ Jobs (office timezone = `office.timezone` setting at start-up):
   license.expiry_alert                 daily 08:00   (grace / expired license -> admin_alert push to license.manage holders)
   payroll.publish_request_expiry       hourly at :20 (open publish requests past their expiry become stale / EXPIRED; plan 17 5a)
   worker.heartbeat                     every 60 s    (Redis ec:worker:heartbeat, read by GET /admin/system/health)
+  tasks.reminders                      every minute  (pushes task reminders that are due; plan 14)
   leave.retention                      daily 03:45   (setting leave.reason_retention_days, 0 = off: nulls reason/comment of
                                                      old decided requests, deletes their unreferenced attachment files)
 
@@ -41,6 +42,7 @@ from ..services import attendance as att
 from ..services import files as files_svc
 from ..services import leave as leave_svc
 from ..services import license as license_svc
+from ..services import tasks as tasks_svc
 from ..services.system_health import HEARTBEAT_KEY
 
 log = logging.getLogger("app.jobs")
@@ -93,6 +95,11 @@ async def job_publish_request_expiry() -> int:
         return await prs_svc.expire_overdue(s)
 
 
+async def job_task_reminders() -> int:
+    async with get_sessionmaker()() as s:
+        return await tasks_svc.send_due_reminders(s)
+
+
 async def job_heartbeat() -> None:
     """Not lock-guarded and never raises: it only proves this worker is alive."""
     try:
@@ -132,6 +139,10 @@ def build_scheduler(tz: str) -> AsyncIOScheduler:
     ]
     for name, fn, trig in jobs:
         sched.add_job(_guarded, trig, args=[name, fn], id=name, name=name, replace_existing=True)
+    sched.add_job(  # short lock: a minute job must not be skipped for 15 minutes after a crash
+        _guarded, IntervalTrigger(seconds=60), args=["tasks.reminders", job_task_reminders, 55],
+        id="tasks.reminders", name="tasks.reminders", replace_existing=True,
+    )  # fmt: skip
     sched.add_job(
         job_heartbeat, IntervalTrigger(seconds=60), id="worker.heartbeat", name="worker.heartbeat", replace_existing=True
     )

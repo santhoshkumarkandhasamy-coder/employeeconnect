@@ -82,6 +82,9 @@ TABLES = [
     "leave_balances",
     "leave_requests",
     "permission_requests",
+    "client_locations",
+    "on_duty_requests",
+    "tasks",
     "announcements",
     "announcement_departments",
     "announcement_reads",
@@ -183,13 +186,13 @@ def _adapt_metadata_for_sqlite() -> None:
     fnf_contrib.type = JSON()
     fnf_contrib.server_default = None
     fnf_contrib.default = ColumnDefault(list)
-    for tname, cname in (  # migration 0026: text[] in Postgres
+    for tname, cname in (  # migration 0027: text[] in Postgres
         ("payroll_runs", "contributors"),
         ("payslips", "contributors"),
         ("payroll_publish_requests", "makers"),
         ("payroll_payment_batches", "contributors"),
         ("payroll_payment_lines", "flags"),
-        ("tax_year_rules", "contributors"),  # migration 0027
+        ("tax_year_rules", "contributors"),  # migration 0028
     ):
         arr = Base.metadata.tables[tname].c[cname]
         arr.type = JSON()

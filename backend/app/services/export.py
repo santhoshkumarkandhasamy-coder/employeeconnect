@@ -69,6 +69,7 @@ SHEETS: dict[str, SheetBuilder] = {
     "leave": export_sheets.leave_sheet,
     "late": export_sheets.late_sheet,
     "permission": export_sheets.permission_sheet,
+    "on_duty": export_sheets.on_duty_sheet,
     "food": food_export.food_sheet,
 }
 
@@ -78,11 +79,12 @@ TYPE_PERMISSIONS: dict[str, tuple[str, ...]] = {
     "leave": ("request.view_all", "request.view_team"),
     "late": ("late.view_all", "late.view_team"),
     "permission": ("request.view_all", "request.view_team"),
+    "on_duty": ("request.view_all", "request.view_team"),
     "food": ("food.view_all",),
 }
 SENSITIVE_PERMISSION = "export.sensitive"  # needed for include_reasons=true
-SENSITIVE_TYPES = ("leave", "permission")  # the sheets that have Reason / Decision Comment columns
-ALL_TYPES = ("attendance", "leave", "late", "permission")  # sheets of type=all (food excluded)
+SENSITIVE_TYPES = ("leave", "permission", "on_duty")  # the sheets that have Reason / Decision Comment columns
+ALL_TYPES = ("attendance", "leave", "late", "permission", "on_duty")  # sheets of type=all (food excluded)
 
 
 def types_for(requested: str) -> list[str]:

@@ -15,6 +15,8 @@ import '../../announcements/presentation/announcement_providers.dart';
 import '../../announcements/presentation/announcements_screen.dart';
 import '../../auth/presentation/auth_controller.dart';
 import '../../auth/presentation/auth_state.dart';
+import '../../tasks/data/reminder_scheduler.dart';
+import '../../tasks/presentation/tasks_screen.dart';
 import '../../profile/presentation/profile_screen.dart';
 import '../data/home_repository.dart';
 import '../domain/home_models.dart';
@@ -47,6 +49,7 @@ class HomeScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final now = (clock ?? DateTime.now)();
+    ref.watch(taskReminderSyncProvider); // schedule today's task reminders on the phone when the app opens
     final name = ref.watch(authControllerProvider.select(
       (s) => s is AuthAuthenticated ? s.user.fullName : '',
     ),);
@@ -60,6 +63,7 @@ class HomeScreen extends ConsumerWidget {
       QuickAction('Food', Icons.restaurant_outlined, () => _go(context, Routes.food)),
       QuickAction('Announcements', Icons.campaign_outlined,
           () => _push(context, const AnnouncementsScreen()),),
+      QuickAction('Tasks', Icons.task_alt, () => _push(context, const TasksScreen())),
       QuickAction('Profile', Icons.person_outline, () => _push(context, const ProfileScreen())),
     ];
 

@@ -2,7 +2,7 @@
 
 Status: PROPOSED. Branch `feature/payroll-phase2`. Builds on plan 12 (payroll, migration 0018) and its rules: money as integer paise / 2-decimal strings,
 amounts encrypted at rest, audit every view/change, step-up (`current_password`) on sensitive writes, no self-approval (D9), published = locked.
-Admin gets every feature in the console; HR gets the app screens (D11). Each phase ships with its own migration (0020+), contract section, security review and tests.
+Admin gets every feature in the console; HR gets the app screens (D11). Each phase ships with its own migration (0021+), contract section, security review and tests.
 Nothing is deployed until the user approves.
 
 ## Phase 1 - Dashboard, reports, calendar (read-only, no money tables)

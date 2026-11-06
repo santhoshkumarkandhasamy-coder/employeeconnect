@@ -5,13 +5,15 @@ import '../../../core/api/api_exception.dart';
 import '../../../core/security/screen_protect.dart';
 import '../../../core/utils/dates.dart';
 import '../../../core/widgets/state_views.dart';
+import '../../attendance/data/location_service.dart';
 import '../data/admin_repository.dart';
 import '../domain/admin_models.dart';
 import 'admin_providers.dart';
 import 'admin_widgets.dart';
 
 /// Generic list + create / edit / delete screen for departments, shifts,
-/// holidays and leave types, driven by a [MasterSpec]. Needs `spec.permission`.
+/// holidays, leave types and client locations, driven by a [MasterSpec].
+/// Needs `spec.permission`.
 class MasterScreen extends ConsumerStatefulWidget {
   const MasterScreen({required this.spec, super.key});
   final MasterSpec spec;
@@ -32,6 +34,7 @@ class _MasterScreenState extends ConsumerState<MasterScreen> {
       builder: (_) => MasterFormDialog(
         spec: spec,
         initial: rec?.data,
+        currentLocation: spec.hasGeoPicker ? () => readCurrentLocation(ref.read(locationServiceProvider)) : null,
         onSave: (body) async {
           try {
             await ref.read(adminRepositoryProvider).masterSave(spec, rec?.id, body);
@@ -239,6 +242,24 @@ String? validateYear(String? v) {
   return null;
 }
 
+/// Current position for a geo master (client locations): asks for location
+/// permission when needed. Throws [LocationException] with a user-facing text.
+Future<LocationFix> readCurrentLocation(LocationService loc) async {
+  var a = await loc.access();
+  if (a == LocationAccess.denied) a = await loc.request();
+  switch (a) {
+    case LocationAccess.granted:
+      return loc.current();
+    case LocationAccess.serviceOff:
+      throw const LocationException('Turn on location services and try again.');
+    case LocationAccess.reducedAccuracy:
+      throw const LocationException('Allow precise location for Employee Connect in Settings and try again.');
+    case LocationAccess.denied:
+    case LocationAccess.deniedForever:
+      throw const LocationException('Location permission is needed. Allow it in Settings or type the coordinates.');
+  }
+}
+
 /// Create / edit dialog for one master record. [onSave] returns an error
 /// message, or null on success (the dialog then closes with `true`).
 class MasterFormDialog extends StatefulWidget {
@@ -247,10 +268,14 @@ class MasterFormDialog extends StatefulWidget {
     required this.onSave,
     super.key,
     this.initial,
+    this.currentLocation,
   });
   final MasterSpec spec;
   final Map<String, dynamic>? initial;
   final Future<String?> Function(Map<String, Object?> body) onSave;
+
+  /// Fills `lat` / `lng` from the device position (only for [MasterSpec.hasGeoPicker]).
+  final Future<LocationFix> Function()? currentLocation;
 
   @override
   State<MasterFormDialog> createState() => _MasterFormDialogState();
@@ -261,6 +286,7 @@ class _MasterFormDialogState extends State<MasterFormDialog> {
   final Map<String, TextEditingController> _text = {};
   final Map<String, Object?> _other = {};
   bool _saving = false;
+  bool _locating = false;
   String? _error;
 
   @override
@@ -318,6 +344,31 @@ class _MasterFormDialogState extends State<MasterFormDialog> {
     }
   }
 
+  Future<void> _useCurrentLocation() async {
+    final read = widget.currentLocation;
+    if (read == null || _locating) return;
+    setState(() {
+      _locating = true;
+      _error = null;
+    });
+    try {
+      final fix = await read();
+      if (!mounted) return;
+      setState(() {
+        _text['lat']?.text = fix.lat.toStringAsFixed(7);
+        _text['lng']?.text = fix.lng.toStringAsFixed(7);
+        _locating = false;
+        if (fix.isMock) _error = 'A mock location app seems to be active. Check the coordinates before saving.';
+      });
+    } on LocationException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _locating = false;
+        _error = e.message;
+      });
+    }
+  }
+
   Future<void> _pick(FieldSpec f) async {
     final c = _text[f.key]!;
     if (f.kind == FieldKind.time) {
@@ -362,6 +413,21 @@ class _MasterFormDialogState extends State<MasterFormDialog> {
                 for (final f in spec.fields) ...[
                   _field(f),
                   const SizedBox(height: 12),
+                  if (f.key == 'lng' && widget.currentLocation != null) ...[
+                    OutlinedButton.icon(
+                      onPressed: _saving || _locating ? null : _useCurrentLocation,
+                      icon: _locating
+                          ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.my_location),
+                      label: const Text('Use my current location'),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Stand at the client site, or paste the coordinates from a map.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    const SizedBox(height: 12),
+                  ],
                 ],
                 if (_error != null)
                   Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),

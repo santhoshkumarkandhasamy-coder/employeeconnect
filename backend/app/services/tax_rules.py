@@ -347,7 +347,7 @@ def validate_rules(rules: Any) -> dict:
 
 
 def rules_digest(rules: dict) -> str:
-    """sha256 of json.dumps(rules, sort_keys=True, separators=(",", ":"), ensure_ascii=False) (the form migration 0027 uses)."""
+    """sha256 of json.dumps(rules, sort_keys=True, separators=(",", ":"), ensure_ascii=False) (the form migration 0028 uses)."""
     return hashlib.sha256(
         json.dumps(rules, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     ).hexdigest()

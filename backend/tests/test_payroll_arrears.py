@@ -473,7 +473,7 @@ def test_encashment_amount_is_capped_at_the_money_ceiling():
 
 
 def test_loan_installment_numbers_follow_the_live_installments():
-    """Migration 0023: numbers are unique among LIVE installments only, so skipped / cancelled rows never use them up."""
+    """Migration 0024: numbers are unique among LIVE installments only, so skipped / cancelled rows never use them up."""
     import datetime as dt
     import uuid
 

@@ -90,6 +90,7 @@ class _DashboardState extends ConsumerState<DashboardPage> with WidgetsBindingOb
                   _card('Pending requests', {
                     'Leave': d.requests!['leave_pending'],
                     'Permission': d.requests!['permission_pending'],
+                    'On duty': d.requests!['on_duty_pending'] ?? 0,
                     'Total': d.pendingRequests,
                   }),
                 if (d.sessions != null)

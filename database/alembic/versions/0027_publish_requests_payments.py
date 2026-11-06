@@ -1,7 +1,7 @@
 """Publish maker-checker, bank payment batches, payslip delivery (plan 17 work package 5a)
 
-Revision ID: 0026
-Revises: 0025
+Revision ID: 0027
+Revises: 0026
 
 Plan: docs/plans/17-payroll-phase5.md section 2.1; contract: docs/api-contract.md section 19 (19.0 to 19.5, 19.10).
 
@@ -64,8 +64,8 @@ for that statement) and restores the two payroll_item_events CHECKs.
 
 from migration_sql import run
 
-revision = "0026"
-down_revision = "0025"
+revision = "0027"
+down_revision = "0026"
 branch_labels = None
 depends_on = None
 
@@ -719,7 +719,7 @@ BEGIN
   REVOKE DELETE, TRUNCATE ON payroll_payment_lines FROM app_user;
   REVOKE DELETE, TRUNCATE ON employee_bank_changes FROM app_user;
 EXCEPTION WHEN undefined_object OR insufficient_privilege THEN
-  RAISE NOTICE 'revoke on the 0026 tables skipped';
+  RAISE NOTICE 'revoke on the 0027 tables skipped';
 END
 $$;
 """
@@ -731,7 +731,7 @@ DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM payroll_publish_requests) OR EXISTS (SELECT 1 FROM payslip_deliveries)
      OR EXISTS (SELECT 1 FROM payroll_payment_batches) OR EXISTS (SELECT 1 FROM payroll_payment_lines) THEN
-    RAISE EXCEPTION 'cannot downgrade 0026: publish requests, payslip deliveries or payment batches / lines exist (their evidence must not be dropped silently)';
+    RAISE EXCEPTION 'cannot downgrade 0027: publish requests, payslip deliveries or payment batches / lines exist (their evidence must not be dropped silently)';
   END IF;
 END
 $$;

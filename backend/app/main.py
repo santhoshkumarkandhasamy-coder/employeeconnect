@@ -39,6 +39,7 @@ from .routers import (
     payroll_tax,
     profile,
     reimbursements,
+    tasks,
 )
 
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9-]{8,64}$")
@@ -119,4 +120,5 @@ def create_app() -> FastAPI:
     app.include_router(payroll_tax.me_router, prefix="/api")
     app.include_router(reimbursements.router, prefix="/api")
     app.include_router(reimbursements.admin_router, prefix="/api")
+    app.include_router(tasks.router, prefix="/api")
     return app

@@ -100,6 +100,8 @@ class HistoryTile extends StatelessWidget {
     final extra = [
       if (r.status == DayStatus.late) '${r.minutesLate} min late',
       if (r.autoClosed) 'No check-out recorded',
+      if (r.manual) 'Manual entry by HR',
+      if (r.clientLocationName != null) 'On duty at ${r.clientLocationName}',
     ].join(', ');
     final color = statusColor(r.status, Theme.of(context).brightness);
     return Card(

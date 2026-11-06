@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../features/attendance/data/selfie_service.dart';
 import '../../features/food/data/food_repository.dart' show exportStoreProvider;
+import '../../features/tasks/data/reminder_scheduler.dart';
 import '../cache/json_cache.dart';
 import '../files/file_service.dart';
 import '../server/branding.dart';
@@ -45,6 +46,7 @@ class LocalWipe {
     await step(() => _ref.read(jsonCacheProvider).clear());
     await step(() => _ref.read(exportStoreProvider).clear());
     await step(() => _ref.read(selfieServiceProvider).purgeAll());
+    await step(() => _ref.read(reminderSchedulerProvider).clear()); // no reminders of a signed-out user
     await step(() async => _ref.read(fileServiceProvider).clearMemory());
     await step(() async {
       PaintingBinding.instance.imageCache

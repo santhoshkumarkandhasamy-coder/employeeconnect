@@ -293,7 +293,7 @@ Implementation notes (v1):
 | GET | /permission/requests?status=&from=&to=&page= | Self |
 | GET | /permission/requests/{id} | Self (owner) |
 | POST | /permission/requests/{id}/cancel | Self (owner, pending only) |
-| GET | /admin/requests?type=leave\|permission&status=&department_id=&employee_id=&from=&to=&page= | `request.view_team` / `request.view_all` |
+| GET | /admin/requests?type=leave\|permission\|on_duty&status=&department_id=&employee_id=&from=&to=&page= | `request.view_team` / `request.view_all` |
 | PUT | /admin/requests/{type}/{id}/approve | `request.approve_team` / `request.approve_all` |
 | PUT | /admin/requests/{type}/{id}/reject | same |
 
@@ -617,16 +617,17 @@ Audit log item: `{ id,ts,actor:UserSummary|null,action:"employee.create",entity_
 
 ## 10. Export (module 10)
 
-`GET /admin/export?type=all|attendance|leave|late|permission|food&from=2026-10-01&to=2026-10-31&department_id=&employee_id=&include_reasons=false`
+`GET /admin/export?type=all|attendance|leave|late|permission|on_duty|food&from=2026-10-01&to=2026-10-31&department_id=&employee_id=&include_reasons=false`
 - Perm: `export.all` (any scope) or `export.team` (forced to direct reports). `include_reasons=true` additionally needs `export.sensitive` (see below).
 - Response 200: binary `.xlsx`, `Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`,
   `Content-Disposition: attachment; filename="employee-connect-all-2026-10-01_2026-10-31.xlsx"`.
-- `type=all` -> sheets `Attendance`, `Leave`, `Late`, `Permission` (food excluded). Single type -> one sheet. `food` -> sheet `Food`
+- `type=all` -> sheets `Attendance`, `Leave`, `Late`, `Permission`, `On Duty` (food excluded). Single type -> one sheet. `food` -> sheet `Food`
   (columns Date, Employee ID, Name, Department, Need Food).
 - `from`/`to` required, `to>=from`, max range 366 days (422 `RANGE_TOO_LARGE`); food accepts a single date range too.
 - A text cell whose first non-whitespace character is `= + - @` or the full-width `＝ ＋ － ＠` is prefixed with `'` (formula injection; leading spaces do not hide a trigger, plain text starting with a tab or newline is left alone). Empty result -> workbook with header-only sheets.
 - Every export is audit logged (`export.run`).
-- Status: all types are implemented (`attendance`, `leave`, `late`, `permission`, `food`, and `all` = the first four).
+- Status: all types are implemented (`attendance`, `leave`, `late`, `permission`, `on_duty`, `food`, and `all` = all but food).
+  `on_duty` -> sheet `On Duty` (section 14); the `Attendance` sheet ends with a `Client Location` column (empty = office punch).
   `employee_id` filter is the business id (case-insensitive).
 - Response headers: `Content-Type` xlsx, `Content-Disposition: attachment; filename="employee-connect-<type>-<from>_<to>.xlsx"` (built only from the enum type and ISO dates),
   `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`.
@@ -754,7 +755,7 @@ revoke-sessions -> 200 `{ "revoked": 3 }` (all families, access tokens invalidat
 { "date":"2026-10-22",
   "employees": { "active":120, "inactive":8 },                                        // employee.view + employee.update|create (all scope)
   "attendance": { "checked_in":95, "checked_out":10, "late":7, "on_leave":6, "not_checked_in":19 }, // attendance.view_all
-  "requests": { "leave_pending":4, "permission_pending":2 },                           // request.view_all
+  "requests": { "leave_pending":4, "permission_pending":2, "on_duty_pending":1 },                           // request.view_all
   "food": { "date":"2026-10-22", "count_yes":80, "count_no":20, "count_unanswered":20, "tomorrow_yes":60 }, // food.view_all
   "announcements": { "active":3 },                                                     // announcement.manage
   "sessions": { "mobile":110, "web":2 },                                               // session.manage
@@ -1001,6 +1002,42 @@ Audit actions: `payroll.payslip.process|reopen|publish|delete|revise`.
 - **Database locks (review 10, H1/L6):** migration 0018 allows `*_enc`-only updates of payslips and structures when the transaction has `SET LOCAL app.key_rotation = 'on'` (set only by `python -m scripts.rotate_keys`), so key rotation works on published/superseded rows. A published -> superseded change without a published successor in the same transaction fails at commit.
 - **Rate limit keys** (per user): `payroll:own_list` 60/min, `own_detail` 30/min + 200/day (detail and pdf share it), `admin_read` 120/min, `write` 60/min (fail closed), `action` 10/min (fail closed), `register` 5/min (fail closed), `reveal` 30/min + 200/day (fail closed).
 
+## 14. On Duty and client locations (plan 13) - IMPLEMENTED
+
+| Method | Path | Access / Perm |
+|---|---|---|
+| GET | /on-duty/locations | Self (active locations: `{items: [{id, name, address}]}`, no coordinates) |
+| POST | /on-duty/requests | Self |
+| GET | /on-duty/requests?status=&from=&to=&page= | Self |
+| GET | /on-duty/requests/{id} | Self (owner) |
+| POST | /on-duty/requests/{id}/cancel | Self (owner; pending, or approved before it starts when `leave.allow_cancel_approved`) |
+| GET | /admin/requests?type=on_duty&... | `request.view_team` / `request.view_all` |
+| PUT | /admin/requests/on_duty/{id}/approve \| reject | `request.approve_team` / `request.approve_all` |
+| GET | /admin/client-locations?q=&is_active=&page=&page_size= | `client_location.manage` |
+| POST | /admin/client-locations | `client_location.manage` |
+| GET / PUT / DELETE | /admin/client-locations/{id} | `client_location.manage` |
+
+**ClientLocation (admin)**: `{id, name, address|null, lat, lng, radius_m, is_active}`. Body of POST/PUT (full replace, extra keys
+422): `name` 1-120, `address` <= 300 or null, `lat` -90..90, `lng` -180..180 (0,0 refused), `radius_m` 20..5000 (default 200),
+`is_active` (default true). Duplicate name (case-insensitive) 409 `CONFLICT`. DELETE of a used location 409 `IN_USE`.
+
+**POST /on-duty/requests** `{client_location_id, from_date, to_date, reason (1-500)}` -> 201 OnDutyRequest
+`{id, client_location: {id, name, address}, from_date, to_date, days, reason, status, approver, decision_comment, decided_at, created_at}`
+(admin list items add `type: "on_duty"` and `user`).
+Errors: 422 `INVALID_DATE_RANGE` (past from_date, > 31 days, beyond `leave.max_advance_days`), 422 `ZERO_WORKING_DAYS`,
+422 `VALIDATION_ERROR` field `client_location_id` (unknown or inactive), 422 `NO_SHIFT_ASSIGNED`,
+409 `OVERLAPPING_REQUEST` (pending/approved on-duty or leave on any of the days). Leave apply / approve refuse an overlap with an
+on-duty request the same way.
+
+**Attendance on an approved on-duty day**
+- `POST /attendance/check-in` (and check-out when `attendance.checkout_geofence` is on) is checked against the client location:
+  outside -> 422 `OUTSIDE_CLIENT_LOCATION` ("You are on duty today. Check in at the client location: <name>"). The office does not count.
+- Attendance records gain `client_location: {id, name} | null`.
+- `GET /attendance/today` gains `on_duty: {id, name, address, lat, lng, radius_m} | null` (both the `{record: null, ...}` and the
+  record shape).
+- Calendar days gain `on_duty: "<client location name>" | null`.
+- Push: `new_request` to approvers ("New on duty request"), `on_duty_decision` to the employee.
+
 ## 15. Payroll phase 2 (plan 14) - IMPLEMENTED: phase 1 (statutory: section 16)
 
 ### 15.1 Dashboard, variance, reports (permission `payroll.view_all`; read-only)
@@ -1013,7 +1050,7 @@ Audit actions: `payroll.payslip.process|reopen|publish|delete|revise`.
 ### 15.2 New settings (`/admin/payroll/settings`, integers 1..31)
 `payroll.cutoff_day` (25), `payroll.process_day` (28, in the period month), `payroll.pay_day` (1, in the following month).
 
-## 16. Payroll statutory (plan 14 phase 2) - IMPLEMENTED (backend, migrations 0020 and 0021)
+## 16. Payroll statutory (plan 14 phase 2) - IMPLEMENTED (backend, migrations 0023 and 0024)
 
 All endpoints are under `/api/admin/payroll/statutory`. Only PUBLISHED runs are used (one published copy per employee). A month without a run is 404 `NOT_FOUND`; a run that is not published is 409 `RUN_NOT_PUBLISHED` (the dues list shows `run_status` and no items instead). Money in responses is a 2-decimal string. Money, UAN, ESI IP and PAN are never written to the audit log or application logs.
 
@@ -1025,7 +1062,7 @@ All endpoints are under `/api/admin/payroll/statutory`. Only PUBLISHED runs are 
 | POST | /statutory/pf_ecr?period= | `payroll.view_all` + step-up | Body `{current_password}` REQUIRED (422 `VALIDATION_ERROR` when missing, 403 `REAUTH_FAILED` when wrong; the step-up limit of 5/min applies). PF ECR text file (`text/plain`, `\r\n` lines, fields joined by `#~#`, no header): UAN, member name, gross wages, EPF wages, EPS wages, EDLI wages, EPF contribution (employee), EPS contribution, EPF-EPS difference (employer), NCP days, refund of advances. Whole rupees. EPF wages = basic capped at `payroll.pf_wage_ceiling` (full basic when the structure says so); EPS / EDLI wages = EPF wages capped at 15,000; EPS = 8.33% of EPS wages; difference = employer share - EPS; NCP days = ceil(basis days - paid days); refund = 0. Only employees with PF > 0. Member name: ASCII letters, space, `.`, `'` and `-` only (other ASCII characters become a space, spaces collapsed, max 85 chars); a name with non-ASCII characters or nothing left after cleaning is a `NAME` blocker (never written as `?`). Identifiers (UAN) are read from the employee's CURRENT payroll details. |
 | POST | /statutory/esi?period= | `payroll.view_all` + step-up | Body `{current_password}` REQUIRED (as for pf_ecr). .xlsx, sheets `ESI Contribution` (IP Number, IP Name, No of Days, Total Monthly Wages, Reason Code for 0 wages, Last Working Day) and `Reconciliation` (wages, employee, employer share). Only employees with ESI > 0. ESI IP numbers are read from the employee's CURRENT payroll details. |
 | POST | /statutory/pt?period= | `payroll.view_all` | .xlsx, sheets `PT by Employee` (id, name, department, gross, slab, PT) and `PT by Slab` (slab, PT, employees, total). Slab is matched on the PT amount against the run's `pt_slabs` snapshot (TN half-yearly slabs apply to the 6-month gross). No identifiers needed, no password (an optional body is ignored). |
-| PUT | /statutory/challans | `payroll.manage` | Body `{type, period:"YYYY-MM", status:"paid"\|"unpaid", paid_on?, reference?, amount?, current_password}`. `current_password` (step-up) always required. `paid`: `paid_on` required (not before the period start, not in the future), `reference` 1-60 chars `[A-Za-z0-9 ._/-]`, `amount` (string, must be > 0, else 422) defaults to the computed due; 409 `NOTHING_DUE` when no `amount` is given and the computed due is 0; 409 `CHALLAN_ALREADY_PAID` if already paid. `unpaid`: no other fields; clears paid_on and reference; 409 `CHALLAN_NOT_PAID` if not paid. Returns `{type, period, status, paid_on, reference}`. Audit `payroll.statutory.challan_paid` / `challan_unpaid` (entity_id = challan id; type, period, status and, for paid, `paid_on`; never amount or reference). EVERY change also appends a row to `statutory_challan_events` (migration 0021: action, status, paid_on, encrypted reference and amount, plus the `prev_*` values that were overwritten or cleared, actor, time). The table is append-only (UPDATE / DELETE / TRUNCATE revoked from `app_user` and blocked by trigger, except key rotation of the encrypted columns); `statutory_challans` rows can no longer be deleted by `app_user`. Not exposed through the API. |
+| PUT | /statutory/challans | `payroll.manage` | Body `{type, period:"YYYY-MM", status:"paid"\|"unpaid", paid_on?, reference?, amount?, current_password}`. `current_password` (step-up) always required. `paid`: `paid_on` required (not before the period start, not in the future), `reference` 1-60 chars `[A-Za-z0-9 ._/-]`, `amount` (string, must be > 0, else 422) defaults to the computed due; 409 `NOTHING_DUE` when no `amount` is given and the computed due is 0; 409 `CHALLAN_ALREADY_PAID` if already paid. `unpaid`: no other fields; clears paid_on and reference; 409 `CHALLAN_NOT_PAID` if not paid. Returns `{type, period, status, paid_on, reference}`. Audit `payroll.statutory.challan_paid` / `challan_unpaid` (entity_id = challan id; type, period, status and, for paid, `paid_on`; never amount or reference). EVERY change also appends a row to `statutory_challan_events` (migration 0024: action, status, paid_on, encrypted reference and amount, plus the `prev_*` values that were overwritten or cleared, actor, time). The table is append-only (UPDATE / DELETE / TRUNCATE revoked from `app_user` and blocked by trigger, except key rotation of the encrypted columns); `statutory_challans` rows can no longer be deleted by `app_user`. Not exposed through the API. |
 
 File endpoints: audit `payroll.statutory.export` (kind, period, row count), `Cache-Control: no-store`. `pf_ecr` and `esi` (they contain UAN / ESI IP numbers): rate limit `payroll:statutory_file` 10/min and 30/day (fail closed) plus the step-up limit, failed step-ups audited as `admin.reauth_failed`, and a best-effort `admin_alert` push to the `role.assign` holders after each download. `pt`: `payroll:report` 10/min (fail closed). Dues: `payroll:statutory` 30/min and 500/day (fail closed). Challan write: `payroll:write` 60/min (fail closed) plus the step-up limit.
 
@@ -1033,7 +1070,7 @@ File endpoints: audit `payroll.statutory.export` (kind, period, row count), `Cac
 
 Errors: `RUN_NOT_PUBLISHED` 409, `STATUTORY_BLOCKERS` 409, `CHALLAN_ALREADY_PAID` 409, `CHALLAN_NOT_PAID` 409, `INVALID_DATE` 422, `REAUTH_FAILED` 403.
 
-## 17. Payroll pay components (plan 15 = plan 14 phase 3) - 3a implemented in the backend (migration 0022; step 1 = 17.2, step 2 = 17.3 to 17.5), 3b implemented in the backend (migration 0023; 17.6 to 17.9, loan numbering fix in 17.3)
+## 17. Payroll pay components (plan 15 = plan 14 phase 3) - 3a implemented in the backend (migration 0025; step 1 = 17.2, step 2 = 17.3 to 17.5), 3b implemented in the backend (migration 0026; 17.6 to 17.9, loan numbering fix in 17.3)
 
 Plan: `docs/plans/15-payroll-phase3.md`. Section 13.0 conventions apply (money strings, `period` = `YYYY-MM`, labels 1-40 / reasons 3-200 chars cleaned, unknown fields 422,
 self rule 403 `FORBIDDEN`, admin unknown ids 404, employee routes 404 for anything not their own). Money, labels, reasons, descriptions and comments are never written to audit rows,
@@ -1041,7 +1078,7 @@ logs, push payloads or error messages. Sections marked **[3b]** ship with work p
 
 ### 17.0 Common
 **Permissions.** Reads `payroll.view_all`; admin writes `payroll.manage`; employee loan/overtime views `payroll.view_own`; NEW `reimbursement.submit` (seeded to admin, hr, manager,
-employee by 0023) for own claims and bill upload; manager claim step = `request.approve_team` (direct reports) or `request.approve_all`, list with `request.view_team` / `view_all`.
+employee by 0026) for own claims and bill upload; manager claim step = `request.approve_team` (direct reports) or `request.approve_all`, list with `request.view_team` / `view_all`.
 
 **Payable lifecycle** (`status` values that mean the same thing in every source table):
 | Table | before payable | payable ("pending") | in processed payslip | in published payslip | final, not paid |
@@ -1161,7 +1198,7 @@ Rules: principal 1.00..1000000.00; 0 < emi <= principal; ceil(principal/emi) <= 
 (`paid_on` not in the future; `reference` 1-60 `[A-Za-z0-9 ._/-]`, encrypted, stored in the event only). **cancel** `{ "reason","expected_version","current_password" }`.
 Errors: 409 `LOAN_NOT_ACTIVE`, `LOAN_HAS_RECOVERIES` (cancel), `ITEM_LOCKED` (an installment is processing), `PERIOD_LOCKED`, `VERSION_CONFLICT`, `LOAN_LIMIT_REACHED`; 422 (tenure, amounts); 403.
 Audit `payroll.loan.create|skip|reschedule|foreclose|cancel|close|view` (reference, kind, periods; never amounts, reasons or the external payment reference).
-**Implementation notes (3a step 2).** (1) `outstanding` is `0.00` for `closed` and `cancelled` loans (`principal - recovered` only while `active`); `recovered` is the sum of `paid` installments and `in_process` of `processing` ones. (2) Payslip labels: `Loan L-0007 (3/12)` / `Advance L-0007 (3/12)` (position among the live installments), `Loan L-0007 foreclosure`. (3) **skip** needs a `pending` `emi` installment (else 409 `ITEM_LOCKED`); the deferred copy lands in the month after the last live installment (after the skipped one when it was the last) and must satisfy the target month rule; installment `seq` numbers are unique per loan among the LIVE installments only (migration 0023: partial unique index on status not `cancelled`/`skipped`, check `seq >= 1`); a new installment (skip, reschedule, foreclosure) takes `max(live seq) + 1`, so skipping, rescheduling and foreclosing never use numbers up (the old 'numbers exhausted' 422 and the close-and-reissue workaround are gone). A skipped or cancelled installment may therefore share its `seq` with a live one; lists order by `seq`, then `period`. The tenure limit is checked on live installments (create, reschedule). (4) **reschedule** cancels the `pending` installments from `from_period` on and regenerates them from the amount still to schedule = `principal - paid - processing - pending installments before from_period`; `emi` must be <= that amount, `from_period` must be after the last paid / processing / kept installment month (422 `from_period`), the total installment count must respect `payroll.loan_max_tenure_months`. (5) **foreclose** `payroll`: `period` must not be a month that already has a `paid` installment (422); `outside`: no installment is created, the loan closes at once (`foreclosed_outside`); both refuse while an installment is `processing` (409 `ITEM_LOCKED`). The `payroll` foreclosure installment (`kind: foreclosure`) closes the loan as `foreclosed_payroll` when it is published. (6) **cancel** cancels the `pending` installments (409 `LOAN_HAS_RECOVERIES` if any is processing or paid). (7) A loan closes itself (`recovered`) in the publish that makes the paid installments add up to the principal (audit `payroll.loan.close`). (8) `reference` comes from the sequence `payroll_loan_ref_seq` on PostgreSQL and from "highest number + 1" on other databases (tests). (9) The caps of 17.0 (`TOO_MANY_ITEMS`, 20 / 40 lines per month) are checked for the first month of a (re)schedule, a skip target and a foreclosure month, not for every month of a long schedule. (10) A `pending` installment in a published month without an open revision shows `PERIOD_CLOSED`. (11) `skip` is a loan action (10/min `payroll:action`, no step-up); the step-up limiter counts every call that asks for a password. `GET /me/loans/{id}` answers 404 for another employee's loan and audits the probe (`payroll.denied`).
+**Implementation notes (3a step 2).** (1) `outstanding` is `0.00` for `closed` and `cancelled` loans (`principal - recovered` only while `active`); `recovered` is the sum of `paid` installments and `in_process` of `processing` ones. (2) Payslip labels: `Loan L-0007 (3/12)` / `Advance L-0007 (3/12)` (position among the live installments), `Loan L-0007 foreclosure`. (3) **skip** needs a `pending` `emi` installment (else 409 `ITEM_LOCKED`); the deferred copy lands in the month after the last live installment (after the skipped one when it was the last) and must satisfy the target month rule; installment `seq` numbers are unique per loan among the LIVE installments only (migration 0026: partial unique index on status not `cancelled`/`skipped`, check `seq >= 1`); a new installment (skip, reschedule, foreclosure) takes `max(live seq) + 1`, so skipping, rescheduling and foreclosing never use numbers up (the old 'numbers exhausted' 422 and the close-and-reissue workaround are gone). A skipped or cancelled installment may therefore share its `seq` with a live one; lists order by `seq`, then `period`. The tenure limit is checked on live installments (create, reschedule). (4) **reschedule** cancels the `pending` installments from `from_period` on and regenerates them from the amount still to schedule = `principal - paid - processing - pending installments before from_period`; `emi` must be <= that amount, `from_period` must be after the last paid / processing / kept installment month (422 `from_period`), the total installment count must respect `payroll.loan_max_tenure_months`. (5) **foreclose** `payroll`: `period` must not be a month that already has a `paid` installment (422); `outside`: no installment is created, the loan closes at once (`foreclosed_outside`); both refuse while an installment is `processing` (409 `ITEM_LOCKED`). The `payroll` foreclosure installment (`kind: foreclosure`) closes the loan as `foreclosed_payroll` when it is published. (6) **cancel** cancels the `pending` installments (409 `LOAN_HAS_RECOVERIES` if any is processing or paid). (7) A loan closes itself (`recovered`) in the publish that makes the paid installments add up to the principal (audit `payroll.loan.close`). (8) `reference` comes from the sequence `payroll_loan_ref_seq` on PostgreSQL and from "highest number + 1" on other databases (tests). (9) The caps of 17.0 (`TOO_MANY_ITEMS`, 20 / 40 lines per month) are checked for the first month of a (re)schedule, a skip target and a foreclosure month, not for every month of a long schedule. (10) A `pending` installment in a published month without an open revision shows `PERIOD_CLOSED`. (11) `skip` is a loan action (10/min `payroll:action`, no step-up); the step-up limiter counts every call that asks for a password. `GET /me/loans/{id}` answers 404 for another employee's loan and audits the probe (`payroll.denied`).
 **GET /me/loans** -> `{ "items":[ { "id","reference","kind","principal","emi","outstanding","status","start_period","next_installment":{period,amount}|null } ] }` (un-paginated, active first).
 **GET /me/loans/{id}** -> the same + `"installments":[ { "seq","period","amount","status":"scheduled|deducted|deferred|cancelled" } ]` (`pending`/`processing` -> `scheduled`,
 `paid` -> `deducted`, `skipped` -> `deferred`). No `reason`, no payslip ids, no actors.
@@ -1241,7 +1278,7 @@ Bills: `GET /api/files/{id}` is allowed for the owner, the owner's current manag
 holders; cross-user reads are audited `file.view_other`. Bills are kept (not purged).
 
 **Implementation notes (3b).**
-1. `reimbursement.submit` is granted to every existing role by 0023 (and is in `database/seed.py`); it is a self-service permission (does not make a role "elevated" in the admin role checks). `POST /files` with `purpose=reimbursement_bill` needs it, stores the file encrypted and writes a `file.upload` audit row.
+1. `reimbursement.submit` is granted to every existing role by 0026 (and is in `database/seed.py`); it is a self-service permission (does not make a role "elevated" in the admin role checks). `POST /files` with `purpose=reimbursement_bill` needs it, stores the file encrypted and writes a `file.upload` audit row.
 2. **Statuses.** The employee API shows `processing` as `approved`; filters `?status=approved` on `GET /reimbursements` match approved and processing. `GET /reimbursements?year=` filters on the YEAR of `expense_date`. A claim read that is not yours is 404 and audited `reimbursement.denied` (reason `not_owner`).
 3. **Submit** checks, in order: `INVALID_CATEGORY`, `INVALID_DATE` (expense date in the future or older than `payroll.reimbursement_max_age_days`, office timezone), `AMOUNT_ABOVE_LIMIT` (`details:[{field:"amount",message:"<category max>"}]`), the bill (`BILL_REQUIRED` when the category needs one and none is sent; a `bill_file_id` that is not your own unused `reimbursement_bill` upload is 422 `VALIDATION_ERROR` on `bill_file_id`), `DUPLICATE_BILL` (same sha256 on another live claim, any employee), `CLAIM_LIMIT_REACHED` (all claims created in the calendar month, cancelled and rejected ones included). `manager_step` is `pending` when the employee's manager is active and holds `request.approve_team` / `approve_all`, else `skipped` (decided again at approve time with the manager as he is then).
 4. **Manager scope.** `verify` works for DIRECT reports only, also for holders of `request.approve_all` (HR is not the manager of anybody else's team: 404, audited `reimbursement.denied` with `out_of_scope`). `reject` by a manager: direct reports, `submitted` with `manager_step = pending` only (else 409 `NOT_PENDING`); `reject` by `payroll.manage`: `submitted` / `verified`, any employee. `GET /admin/reimbursements?stage=manager` needs `request.view_team` (or `approve_team` / `approve_all`) and lists direct reports' `submitted` claims whose manager step is pending (explicit `status` overrides that default); `stage=hr|all` needs `payroll.view_all` (403 otherwise); `stage=hr` defaults to the HR queue (`verified`, or `submitted` with `manager_step = skipped`); the default stage is `all` for `payroll.view_all` holders, else `manager`. `GET /admin/reimbursements/{id}` is 404 outside that scope. `employee_id` is the employee code (case-insensitive), `period` the payout month.
@@ -1311,11 +1348,11 @@ Reused: `VERSION_CONFLICT`, `NOT_PENDING`, `INSUFFICIENT_BALANCE`, `REQUESTER_IN
 
 Plan: `docs/plans/16-payroll-phase4.md`. Sections 13.0 and 17.0 conventions apply (money strings, `period` = `YYYY-MM`, labels 1-40 / reasons and comments 3-200 chars cleaned,
 unknown fields 422, self rule 403 `FORBIDDEN` audited `payroll.denied`, admin unknown ids 404, employee routes 404 for anything not their own). Money, percents, labels, reasons and comments
-are never written to audit rows, logs, push payloads or error messages. **[4a]** = work package 4a (migration 0024), **[4b]** = 4b (migration 0025).
+are never written to audit rows, logs, push payloads or error messages. **[4a]** = work package 4a (migration 0027), **[4b]** = 4b (migration 0028).
 
 ### 18.0 Common
 **Permissions.** Reads, CTC calculator, gratuity, F&F preview / statement: `payroll.view_all`. Maker actions: `payroll.manage`. Checker actions (approve / reject increments, batches and F&F; F&F revoke):
-NEW `payroll.approve` (seeded to `admin` and `hr` by 0024). Employee F&F view: `payroll.view_own`.
+NEW `payroll.approve` (seeded to `admin` and `hr` by 0027). Employee F&F view: `payroll.view_own`.
 
 **Maker-checker.** The checker must not be the employee (403 `FORBIDDEN`), nor the creator or the submitter of the record (403 `SECOND_PERSON_REQUIRED`). The database enforces the same with CHECK constraints.
 Approve audits carry `maker_id` and `checker_id`.
@@ -1686,7 +1723,7 @@ Where the backend refines 18.0, 18.1 [4b] and 18.8 to 18.12 (Flutter should foll
 - **Push**: `payroll_approval` (`kind: "fnf"`): to approvers on submit (`<maker name> submitted a final settlement for <employee name>`) and to the maker on approve ("Final settlement approved") / reject ("Final settlement rejected", body = employee name). `fnf_settled` after the publish commit.
 - **Statements**: `GET /admin/payroll/fnf/{id}/statement` works in every status (watermark `DRAFT - NOT FINAL` unless `settled`); `GET /me/fnf/statement` only for the caller's settled F&F (anything else 404, audited `payroll.denied`; success audited `payroll.fnf.view_own`).
 - **Rate limits** as 18.0; reads, preview and list `payroll:admin_read`; the statement `payroll:report` (fail closed).
-- **Security review fixes (4b, migration 0025 edited in place; request / response shapes unchanged)**:
+- **Security review fixes (4b, migration 0028 edited in place; request / response shapes unchanged)**:
   - **Details last working day (H1)**: `employee_payroll_details.last_working_day` is written ONLY by `approve` (second person + step-up) and cleared by `revoke`; a draft, submitted, rejected or cancelled F&F keeps the LWD on the F&F row alone, so
     payroll eligibility, the ESI file, dashboard `leavers`, increment `AFTER_EXIT` and gratuity ignore it until it is approved. The employment window is `min(month end, LWD, deactivation / deletion date - 1)`: an LWD can never extend pay past the deactivation.
     Create / PUT / submit / approve refuse an LWD later than the deactivation (or deletion) date - 1 (422 `INVALID_DATE`, `details[0].field` `last_working_day`). An LWD before a month that is already processed / published is NOT refused (HR files late exits):
@@ -1704,7 +1741,7 @@ Where the backend refines 18.0, 18.1 [4b] and 18.8 to 18.12 (Flutter should foll
 Plan: `docs/plans/17-payroll-phase5.md`. Sections 13.0, 17.0 and 18.0 conventions apply (money strings, `period` = `YYYY-MM`, labels 1-40 / reasons and comments 3-200 chars cleaned, unknown fields 422,
 self rule 403 `FORBIDDEN` audited `payroll.denied`, admin unknown ids 404, employee routes 404 for anything not their own, audited probe). `fy` = financial year `YYYY-YY` (`"2026-27"` = 1 Apr 2026 .. 31 Mar 2027).
 Money, PAN, bank accounts, IFSC, landlord / lender PAN, bank references, file names, labels, reasons and comments are never written to audit rows, logs, push payloads or error messages.
-**[5a]** = work package 5a (migration 0026), **[5b]** = 5b (0027), **[5c]** = 5c (0028).
+**[5a]** = work package 5a (migration 0029), **[5b]** = 5b (0029), **[5c]** = 5c (0029).
 
 ### 19.0 Common
 **Permissions.** Reads `payroll.view_all`; maker actions `payroll.manage`; publish checker `payroll.publish`; payment batch, tax rules and Form 16 checker `payroll.approve`; employee tax self-service `payroll.view_own`.
@@ -2058,7 +2095,7 @@ Where the backend refines 19.0 to 19.5 (Flutter should follow these). Errors kee
 - **Push**: `payroll_approval` with `kind` `publish` / `payment_batch`; request pushes go to `payroll.publish` holders outside the maker set (max 20, coalesced 10 minutes, body "<maker name> asked to publish payroll for June 2025") and to the requester on approve / reject / stale (body = month label). Batch pushes: submit -> `payroll.approve` holders
   who are not parties ("<maker name> submitted payment batch PAY-2025-06-01"), approve / reject -> the submitter (title "Payment batch approved|rejected", body = reference). `admin_alert`: bank file download (body "PAY-2025-06-01: 2 lines"; title "Bank file downloaded again" for a re-download), bank account created ("A company bank account was added"), reactivated or default changed ("The default or active state of a company bank account was changed"; never the label), `bank_change_alert_days` changed ("... changed the bank detail change window.").
 - **Delivery (19.3)**: `first_viewed_at` is set by `GET /payslips/{id}` only (the list does not count); `/pdf` sets `first_downloaded_at` and, when still empty, `first_viewed_at`. `pushed_at` / `push_count` are stamped after the publish push when it reached at least one registered device. Reminder skip order:
-  `NOT_PUBLISHED`, `VIEWED`, `NO_DEVICE`, `LIMIT_REACHED`, `TOO_SOON`. With `user_ids: null` only not-viewed employees with a device are considered (others are not listed in `skipped`). `skipped` in the audit row is a count. A payslip published before migration 0026 gets its delivery row on first view / remind.
+  `NOT_PUBLISHED`, `VIEWED`, `NO_DEVICE`, `LIMIT_REACHED`, `TOO_SOON`. With `user_ids: null` only not-viewed employees with a device are considered (others are not listed in `skipped`). `skipped` in the audit row is a count. A payslip published before migration 0029 gets its delivery row on first view / remind.
 - **Bank accounts (19.4)**: `IN_USE` covers batches in `draft`, `submitted`, `approved`; deactivating clears `is_default`; an inactive account cannot be made default (422); creating with `is_default: true` clears the previous default; `PUT` sends at least one of `label`, `is_default`, `active` (nulls and any account / IFSC / bank name field are 422).
 - **PaymentBatch (19.5)**: `lines[].account` / `ifsc` are ALWAYS the snapshot (what the publish reviewed), `current` is the employee's current pair (masked) on `BANK_DETAILS_CHANGED` lines, `account_source` says which one the file uses. `lines[].reference` is masked; `total` = sum of the non-excluded lines; `counts.lines` = non-excluded lines.
   `reference` is `PAY-YYYY-MM-NN` with the run's month and a running number. `blockers` is returned by create and by a `draft` batch's detail (live), empty for other statuses. `NOTHING_TO_PAY` carries `details: [{field: <employee_id>, message: <blocker code>}]` (<= 200). A user in `user_ids` without a published payslip is 422 `VALIDATION_ERROR`.
@@ -2069,14 +2106,14 @@ Where the backend refines 19.0 to 19.5 (Flutter should follow these). Errors kee
 - **Decisions**: `reject` returns the batch to `draft` and keeps `decided_by`; that person (and every party) gets 403 `SECOND_PERSON_REQUIRED` on `PUT` / `submit` / `withdraw`; the next `submit` clears the decision. `withdraw` keeps `submitted_by`. A checker who cancels an approved batch is not added to `contributors`. `cancel` is allowed in `draft` / `submitted` / `approved`
   (else 409 `NOT_DRAFT`). `file` on `draft` / `submitted` / `cancelled`, and `confirm` on anything but `exported`, answer 409 `NOT_APPROVED`. A stored line that no longer reproduces the exported bytes answers 409 `CONFLICT` (audited failure `payroll.payment_batch.download`).
 - **Confirm**: `lines` entries override `all_paid`; unlisted `exported` lines become `paid` only when `all_paid` is true; a line not `exported` is 409 `CONFLICT`; `failed` lines keep `paid_on` null and may carry a reference; `paid_on` must be today or earlier and not before the day of the download (office time zone).
-- **Second approver**: unconditional. The setting `payroll.bank_file_requires_second_person` was removed before deployment (the database CHECKs of migration 0026 always require a different approver); it is now an unknown key (422).
-- **Bank change control (security review)**: `payroll.bank_change_alert_days` is 7..90 and guarded (`role.assign` + step-up + `admin_alert`); the services and the database trigger use `max(setting, 7)`. Every change of the payment mode / bank details is appended to the append-only table `employee_bank_changes` (by the database trigger; migration 0026) and an approver who appears in it within the window is refused, not only the person of the latest change. `RECENT_BANK_CHANGE` uses the same window. A bank change always needs a marker newer than the previous one.
+- **Second approver**: unconditional. The setting `payroll.bank_file_requires_second_person` was removed before deployment (the database CHECKs of migration 0029 always require a different approver); it is now an unknown key (422).
+- **Bank change control (security review)**: `payroll.bank_change_alert_days` is 7..90 and guarded (`role.assign` + step-up + `admin_alert`); the services and the database trigger use `max(setting, 7)`. Every change of the payment mode / bank details is appended to the append-only table `employee_bank_changes` (by the database trigger; migration 0029) and an approver who appears in it within the window is refused, not only the person of the latest change. `RECENT_BANK_CHANGE` uses the same window. A bank change always needs a marker newer than the previous one.
 - **Failed payments (security review)**: only the confirm endpoint creates a `failed` line; it applies the self rule per line (see 19.5), records `failed_by` and the confirmer is excluded from the re-batch of that payslip. A second person is NOT required to mark a line failed (not implemented: the exclusions above and the audit trail are the control). `PREVIOUSLY_FAILED` is shown to the checker.
 - **Approve / first download**: the value date (today or later) and the active debit account are re-checked at approve and at the first download; the batch then has to be cancelled and remade. The download of a `closed` batch is 409 `BATCH_CLOSED`.
 - **Dashboard**: `calendar.alerts` gains `PUBLISH_PENDING_APPROVAL` (any open request), `PAYMENT_NOT_EXPORTED` (published run, pay date passed, a payslip still has something to pay and no exported / paid line), `PAYMENT_FAILED_LINES`, `PAYMENT_UNDERPAID` (an `UNDERPAID_CHAIN` payslip exists).
 - **Rate limits** as 19.0: reads `payroll:admin_read`; request create / withdraw, batch create / edit / submit / withdraw / cancel / confirm, bank account create / update `payroll:write`; request approve / reject, batch approve / reject, remind `payroll:action`; file `payroll:bank_file` (10/min + 30/day), all fail closed (503 `TEMPORARILY_UNAVAILABLE`).
 - **Audit actions** (never amounts, accounts, IFSC, names, references of lines or comments): `payroll.publish_request.create|withdraw|approve|reject|expire|stale|list|view|check`, `payroll.delivery.view|remind`, `payroll.bank_account.list|create|update`, `payroll.payment_batch.list|view|create|update|submit|withdraw|approve|reject|cancel|export|redownload|confirm`.
-- **Migration 0026 downgrade** refuses while ANY publish request, payslip delivery, payment batch or payment line exists.
+- **Migration 0029 downgrade** refuses while ANY publish request, payslip delivery, payment batch or payment line exists.
 
 ### 19.15 Implementation notes, work package 5b (tax rules, declarations / proofs, Form 16) - IMPLEMENTED
 Where the backend refines 19.6 to 19.8 (Flutter should follow these). Errors keep the common shape `{"error":{"code","message","details":[{field,message}],"request_id"}}`.
@@ -2097,3 +2134,33 @@ Where the backend refines 19.6 to 19.8 (Flutter should follow these). Errors kee
   `withdraw` of a document of the caller's own: 403 `FORBIDDEN`; an already withdrawn one: 409 `CONFLICT`. `payroll.form16_requires_second_person` is a guarded setting (`role.assign` + password + `admin_alert`); each document keeps the value it was uploaded under.
 - **Audit** (never amounts, PANs, file names, comments, reasons, attestation): `payroll.tax_rules.*`, `payroll.tax_declaration.save|submit|unlock|view|list|view_own`, `payroll.tax_proof.create|cancel|verify|reject|list`, `payroll.form16.dry_run|commit|publish|withdraw|download|view_own|list`, `payroll.report.export` (`kind: tax_declarations`). Money history: `item_type` `tax_rules` / `tax_declaration` / `tax_proof` / `form16` (publish is action `approve`; `user_id` of a rules event is the actor).
 
+## 20. Tasks with reminders, manual attendance (plan 14) - IMPLEMENTED
+
+| Method | Path | Access / Perm |
+|---|---|---|
+| GET | /tasks?from=&to=&assigned_by_me=false | Self (default range: this month; max 92 days; office dates of `due_at`) |
+| POST | /tasks | Self; `user_id` of someone else needs `task.assign_team` (direct reports) or `task.assign_all` |
+| GET | /tasks/{id} | assignee or creator (else 404) |
+| PUT | /tasks/{id} | creator only (403 for the assignee) |
+| POST | /tasks/{id}/done `{done: bool}` | assignee or creator |
+| DELETE | /tasks/{id} | creator only |
+| GET | /admin/attendance/{user_id}/{work_date} | `attendance.manual` |
+| PUT | /admin/attendance/{user_id}/{work_date} | `attendance.manual` (not for yourself) |
+| DELETE | /admin/attendance/{user_id}/{work_date} | `attendance.manual` (manual entries without a real punch only) |
+
+**TaskIn** (POST/PUT, extra keys 422): `title` 1-150, `notes` <= 2000 or null, `due_at` (ISO-8601 WITH offset),
+`remind_minutes_before` 0..10080 or null (no reminder), `user_id` (POST only, optional). `due_at` within 366 days back /
+3 years ahead (422 `INVALID_DATE_RANGE`). Assigning outside your scope -> 422 `VALIDATION_ERROR` field `user_id`; without any
+assign permission -> 403.
+
+**Task** -> `{id, title, notes, due_at, remind_at, remind_minutes_before, done, done_at, assigned, user, created_by, can_edit,
+created_at}` (`user` / `created_by` are person summaries). GET /tasks -> `{from, to, items}` sorted by `due_at`.
+
+Push types: `task_assigned` (to the assignee), `task_done` (to the creator, when the assignee completes it),
+`task_reminder` (worker job `tasks.reminders`, every minute, once per arming), `attendance_manual` (to the employee).
+
+**PUT /admin/attendance/{user_id}/{work_date}** `{check_in: "HH:MM", check_out: "HH:MM"|null, reason: 3-300}` -> 200
+`{user, work_date, record}` (record = attendance record + `manual_reason`). Errors: 422 `INVALID_DATE_RANGE` (future or > 366 days
+back), 422 `VALIDATION_ERROR` (times in the future, check-out before check-in on a day shift, reason), 409 `ON_LEAVE`,
+422 `NO_SHIFT_ASSIGNED`, 403 (own attendance), 404 (unknown employee). DELETE -> 204, 404 when no record, 409 for a punched day.
+All attendance records gain `manual: bool`. Export: the `Attendance` sheet ends with `Manual Entry` (Yes/No).

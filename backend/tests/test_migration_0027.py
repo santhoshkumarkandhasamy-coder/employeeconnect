@@ -1,16 +1,15 @@
-"""Migration 0027 (tax year rules, declarations, proofs, Form 16 documents; plan 17 work package 5b).
+"""Migration 0027 (publish requests, payment batches, payslip delivery; plan 17 work package 5a).
 
-The trigger / privilege behaviour needs PostgreSQL (not available in this harness). Here the SQL text, the model metadata, the seed,
-the settings and the generated schema.sql are cross-checked, and the CHECK constraints that SQLite can evaluate are exercised through the ORM.
+The trigger / privilege behaviour needs PostgreSQL (not available in this harness; it was probed by hand against PostgreSQL 16 when the
+migration was written: up / down / up, every CHECK, trigger, partial unique and the guarded downgrade). Here the SQL text, the model
+metadata, the settings catalogue and the generated schema.sql are cross-checked, and the CHECK constraints that SQLite can evaluate are
+exercised through the ORM.
 """
 
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
 import importlib.util
-import json
-import re
 import sys
 import uuid
 from pathlib import Path
@@ -19,14 +18,21 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 DB = Path(__file__).resolve().parents[2] / "database"
-MODEL_SRC = (Path(__file__).resolve().parents[1] / "app" / "models" / "payroll_tax.py").read_text(encoding="utf-8")
-NEW_TABLES = ("tax_year_rules", "tax_declarations", "tax_proofs", "form16_documents")
+MODEL_SRC = (Path(__file__).resolve().parents[1] / "app" / "models" / "payroll_controls.py").read_text(encoding="utf-8")
+NEW_TABLES = (
+    "payroll_publish_requests",
+    "payslip_deliveries",
+    "company_bank_accounts",
+    "payroll_payment_batches",
+    "payroll_payment_lines",
+    "employee_bank_changes",
+)
 
 
 def _load():
     sys.path.insert(0, str(DB))
     try:
-        spec = importlib.util.spec_from_file_location("mig0027", DB / "alembic" / "versions" / "0027_tax_rules_declarations_form16.py")
+        spec = importlib.util.spec_from_file_location("mig0027", DB / "alembic" / "versions" / "0027_publish_requests_payments.py")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
     finally:
@@ -45,208 +51,267 @@ def test_chain_and_reversible():
     finally:
         sys.path.remove(str(DB))
     assert all(up) and all(down)
-    for fn in ("tax_year_rules_lock", "tax_declarations_lock", "tax_proofs_lock", "form16_documents_lock"):
+    # trigger functions and DO blocks are kept whole (semicolons inside $$ ... $$)
+    for fn in (
+        "payroll_contributors_guard",
+        "company_bank_accounts_lock",
+        "employee_payroll_details_bank_guard",
+        "payroll_publish_requests_lock",
+        "payroll_publish_requests_tagged",
+        "payroll_publish_requests_checker_guard",
+        "employee_bank_changes_append_only",
+        "payroll_payslip_failed_by",
+        "payslip_deliveries_lock",
+        "payroll_payment_batches_lock",
+        "payroll_payment_batches_consistency",
+        "payroll_payment_lines_lock",
+    ):
         assert sum(s.startswith(f"CREATE FUNCTION {fn}(") for s in up) == 1, fn
-        assert f"DROP FUNCTION IF EXISTS {fn}();" in mod.DOWNGRADE, fn
+        assert f"DROP FUNCTION IF EXISTS {fn}(" in mod.DOWNGRADE, fn
     assert sum(s.startswith("DO $$") for s in up) == 1 and sum(s.startswith("DO $$") for s in down) == 1
     assert not any(s.startswith(("BEGIN", "DECLARE", "IF ")) for s in up + down)
-    # the seed insert is ONE statement
-    assert sum(s.startswith("INSERT INTO tax_year_rules") for s in up) == 1
     d = mod.DOWNGRADE
+    # the guard runs first; dependants go before what they reference
     assert d.lstrip().startswith("DO $$") and "cannot downgrade 0027" in d
+    # L6: the guarded downgrade refuses while ANY publish request, delivery, batch or line exists
     guard = d.split("$$;")[0]
-    for t in ("tax_declarations", "tax_proofs", "form16_documents"):
+    for t in ("payroll_publish_requests", "payslip_deliveries", "payroll_payment_batches", "payroll_payment_lines"):
         assert f"EXISTS (SELECT 1 FROM {t})" in guard, t
-    # only the untouched seed may exist in tax_year_rules
-    assert "created_by IS NULL AND last_edited_by IS NULL" in guard and "status = 'draft'" in guard and "version = 1" in guard
+    assert "WHERE status" not in guard
     for t in NEW_TABLES:
         assert f"DROP TABLE IF EXISTS {t};" in d, t
-    # dependants go before what they reference; the files rows go after form16_documents (RESTRICT) and before the CHECK is restored
-    assert d.index("DROP TABLE IF EXISTS form16_documents") < d.index("DELETE FROM files WHERE purpose IN ('tax_proof','form16')")
-    assert d.index("DROP TABLE IF EXISTS tax_proofs") < d.index("DROP TABLE IF EXISTS tax_declarations")
-    assert d.index("DELETE FROM files WHERE purpose IN ('tax_proof','form16')") < d.index("ADD CONSTRAINT ck_files_purpose")
-    assert "'tax_proof','form16'" not in d.split("ADD CONSTRAINT ck_files_purpose")[1]
-    # events: append-only trigger disabled only around the DELETE; CHECKs restored afterwards
+    assert d.index("DROP TABLE IF EXISTS payroll_payment_lines") < d.index("DROP TABLE IF EXISTS payroll_payment_batches")
+    assert d.index("DROP TABLE IF EXISTS payroll_payment_batches") < d.index("DROP TABLE IF EXISTS company_bank_accounts")
+    assert d.index("DROP TABLE IF EXISTS payroll_publish_requests") < d.index("DROP FUNCTION IF EXISTS payroll_contributors_guard")
+    for col in ("payroll_runs.contributors", "payslips.contributors"):
+        t, c = col.split(".")
+        assert f"ALTER TABLE {t} DROP COLUMN IF EXISTS {c}" in d
+    assert "ALTER TABLE employee_payroll_details DROP COLUMN IF EXISTS bank_changed_by" in d
+    assert "DROP TRIGGER IF EXISTS trg_employee_payroll_details_bank_guard ON employee_payroll_details" in d
+    # the events CHECKs are restored after the new history rows are deleted (append-only trigger disabled for that statement)
     assert d.index("DISABLE TRIGGER trg_payroll_item_events_no_update_delete") < d.index("DELETE FROM payroll_item_events")
     assert d.index("DELETE FROM payroll_item_events") < d.index("ENABLE TRIGGER trg_payroll_item_events_no_update_delete")
     assert d.index("ENABLE TRIGGER trg_payroll_item_events_no_update_delete") < d.index("ADD CONSTRAINT ck_payroll_item_events_action")
-    assert "'unlock'" not in d.split("ck_payroll_item_events_action CHECK")[1].split(";")[0]
-    assert "'tax_rules'" not in d.split("ck_payroll_item_events_item_type CHECK")[1].split(";")[0]
-    for k in mod._SETTINGS:
-        assert f"'{k}'" in d, k
-    # no ON DELETE SET NULL, so no pg_trigger_depth() escape
-    assert "SET NULL" not in mod.UPGRADE and "pg_trigger_depth" not in mod.UPGRADE
-    # the DDL layer formats with %: every literal percent in a RAISE is doubled
-    for body in re.findall(r"RAISE EXCEPTION '([^']*(?:''[^']*)*)'", mod.UPGRADE):
-        assert not re.search(r"(?<!%)%(?!%)", body.replace("%%", "")), body
+    assert "'export','confirm','expire','stale'" not in d.split("ck_payroll_item_events_action CHECK")[1].split(";")[0]
+    # nothing in the new tables is ON DELETE SET NULL: no pg_trigger_depth() escape anywhere
+    assert "SET NULL" not in mod.UPGRADE.replace("ON DELETE SET NULL of", "") and "pg_trigger_depth" not in mod.UPGRADE.replace("pg_trigger_depth() escape", "")
 
 
-def test_tax_year_rules_maker_checker_in_the_database():
+def test_contributors_columns_backfill_and_guard():
     up = _load().UPGRADE
-    tbl = up.split("CREATE TABLE tax_year_rules (")[1].split("\n);")[0]
+    assert "ALTER TABLE payroll_runs ADD COLUMN contributors text[] NOT NULL DEFAULT '{}'" in up
+    assert "ALTER TABLE payslips ADD COLUMN contributors text[] NOT NULL DEFAULT '{}'" in up
+    # backfill with the lock triggers switched off (published rows are locked), switched back on afterwards
+    assert up.index("DISABLE TRIGGER trg_payslips_lock") < up.index("UPDATE payslips SET contributors") < up.index("ENABLE TRIGGER trg_payslips_lock")
+    assert up.index("DISABLE TRIGGER trg_payroll_runs_lock") < up.index("UPDATE payroll_runs SET contributors") < up.index("ENABLE TRIGGER trg_payroll_runs_lock")
+    assert "created_by::text, updated_by::text, processed_by::text" in up and "created_by::text, processed_by::text" in up
+    assert up.index("UPDATE payslips SET contributors") < up.index("CREATE TRIGGER trg_payslips_contributors")  # triggers come after the backfill
+    body = up.split("CREATE FUNCTION payroll_contributors_guard")[1].split("$$;")[0]
+    assert "NOT (NEW.contributors @> OLD.contributors)" in body  # only grows
+    assert "OLD.status NOT IN ('draft','processed')" in body  # frozen once published / superseded
+    assert "BEFORE UPDATE OF contributors ON payroll_runs" in up and "BEFORE UPDATE OF contributors ON payslips" in up
+
+
+def test_publish_request_maker_checker_in_the_database():
+    up = _load().UPGRADE
+    tbl = up.split("CREATE TABLE payroll_publish_requests (")[1].split("\n);")[0]
     for needle in (
-        "CONSTRAINT uq_tax_year_rules_fy_version UNIQUE (fy, version)",
-        "CHECK (fy ~ '^[0-9]{4}-[0-9]{2}$')",
-        "CHECK (status IN ('draft','submitted','verified','superseded'))",
-        "rules jsonb NOT NULL",
-        "windows jsonb NOT NULL DEFAULT '{}'::jsonb",
-        "CHECK (rules_sha256 ~ '^[0-9a-f]{64}$')",
-        "CHECK (attestation IS NULL OR char_length(attestation) BETWEEN 20 AND 500)",
-        "CHECK ((status IN ('verified','superseded')) = (verified_by IS NOT NULL))",
-        "CHECK (status NOT IN ('verified','superseded') OR attestation IS NOT NULL)",
-        "CHECK (status NOT IN ('submitted','verified','superseded') OR submitted_by IS NOT NULL)",
-        "CONSTRAINT ck_tax_year_rules_verifier CHECK (verified_by IS NULL OR (verified_by IS DISTINCT FROM created_by "
-        "AND verified_by IS DISTINCT FROM last_edited_by AND verified_by IS DISTINCT FROM submitted_by AND verified_by::text <> ALL (contributors)))",
-        "contributors text[] NOT NULL DEFAULT '{}'",
-        "version_row integer NOT NULL DEFAULT 1",
-        "created_by uuid REFERENCES users(id) ON DELETE RESTRICT",
+        "CONSTRAINT ck_payroll_publish_requests_checker CHECK (decided_by IS NULL OR decided_by <> requested_by)",
+        "CONSTRAINT ck_payroll_publish_requests_checker_history CHECK (decided_by IS NULL OR decided_by::text <> ALL (makers))",
+        "CONSTRAINT ck_payroll_publish_requests_requester_in_makers CHECK (decided_by IS NULL OR requested_by::text = ANY (makers))",
+        "CONSTRAINT ck_payroll_publish_requests_decided_status CHECK ((status IN ('approved','rejected')) = (decided_by IS NOT NULL))",
+        "CONSTRAINT ck_payroll_publish_requests_scope_payslip CHECK ((scope = 'payslip') = (payslip_id IS NOT NULL))",
+        "CONSTRAINT ck_payroll_publish_requests_status CHECK (status IN ('submitted','approved','rejected','withdrawn','stale'))",
+        "'RUN_REOPENED','RUN_REFRESHED','PAYSLIP_CHANGED','EXPIRED'",
+        "CONSTRAINT ck_payroll_publish_requests_stale_pair CHECK ((status = 'stale') = (stale_reason IS NOT NULL))",
+        "CONSTRAINT ck_payroll_publish_requests_mac CHECK (snapshot_mac ~ '^[0-9a-f]{64}$')",
+        "CONSTRAINT ck_payroll_publish_requests_rejected_comment CHECK (status <> 'rejected' OR decision_comment_enc IS NOT NULL)",
+        "snapshot_enc bytea NOT NULL",
+        "makers text[] NOT NULL DEFAULT '{}'",
+        "run_id uuid NOT NULL REFERENCES payroll_runs(id) ON DELETE RESTRICT",
+        "payslip_id uuid REFERENCES payslips(id) ON DELETE RESTRICT",
     ):
         assert needle in tbl, needle
-    # one verified and one open row per FY
-    assert "uq_tax_year_rules_verified ON tax_year_rules (fy) WHERE status = 'verified'" in up
-    assert "uq_tax_year_rules_open ON tax_year_rules (fy) WHERE status IN ('draft','submitted')" in up
-    lock = up.split("CREATE FUNCTION tax_year_rules_lock")[1].split("$$;")[0]
+    # one open request per run (scope run) and per payslip (scope payslip)
+    assert "uq_payroll_publish_requests_open_run ON payroll_publish_requests (run_id) WHERE scope = 'run' AND status = 'submitted'" in up
+    assert "uq_payroll_publish_requests_open_payslip ON payroll_publish_requests (payslip_id) WHERE scope = 'payslip' AND status = 'submitted'" in up
+    lock = up.split("CREATE FUNCTION payroll_publish_requests_lock")[1].split("$$;")[0]
     for needle in (
-        "NEW.status <> 'draft'",  # inserts are plain drafts
+        "NEW.status <> 'submitted' OR NEW.decided_by IS NOT NULL",  # inserts are plain submitted requests
+        "r.status = 'processed'",  # scope run needs a processed run
+        "r.status = 'published' AND p.id = NEW.payslip_id AND p.status = 'processed'",  # scope payslip: revision / held payslip of a published run
+        "NOT (NEW.makers @> OLD.makers)",
+        "app.key_rotation",
+        "payroll_strip_enc(to_jsonb(NEW)) IS NOT DISTINCT FROM payroll_strip_enc(to_jsonb(OLD))",
+        "('submitted>approved','submitted>rejected','submitted>withdrawn','submitted>stale')",
+        "ARRAY['status','decided_by','decided_at','decision_comment_enc','makers']",
+        "ARRAY['status','withdrawn_by','withdrawn_at']",
+        "ARRAY['status','stale_reason']",
+        "j_new IS DISTINCT FROM j_old",
+        "cannot be deleted",
+    ):
+        assert needle in lock, needle
+    guard = up.split("CREATE FUNCTION payroll_publish_requests_checker_guard")[1].split("$$;")[0]
+    assert "NEW.decided_by::text = ANY (r.contributors)" in guard and "NEW.decided_by::text = ANY (p.contributors)" in guard
+    assert "p.user_id = NEW.decided_by" in guard and "NOT p.hold" in guard
+    assert "BEFORE INSERT OR UPDATE OF decided_by ON payroll_publish_requests" in up
+    assert "p.run_id" in up.split("CREATE FUNCTION payroll_publish_requests_tagged")[1].split("$$;")[0]
+    assert "REVOKE DELETE, TRUNCATE ON payroll_publish_requests FROM app_user" in up
+
+
+def test_payment_batches_and_lines():
+    up = _load().UPGRADE
+    b = up.split("CREATE TABLE payroll_payment_batches (")[1].split("\n);")[0]
+    for needle in (
+        "CONSTRAINT uq_payroll_payment_batches_reference UNIQUE (reference)",
+        "CHECK (status IN ('draft','submitted','approved','exported','closed','cancelled'))",
+        "CONSTRAINT ck_payroll_payment_batches_file CHECK ((status IN ('exported','closed')) = (file_sha256 IS NOT NULL))",
+        "CONSTRAINT ck_payroll_payment_batches_exported CHECK ((status IN ('exported','closed')) = (exported_by IS NOT NULL))",
+        "CONSTRAINT ck_payroll_payment_batches_checker CHECK (decided_by IS NULL OR (decided_by IS DISTINCT FROM created_by "
+        "AND decided_by IS DISTINCT FROM last_edited_by AND decided_by IS DISTINCT FROM submitted_by))",
+        "CONSTRAINT ck_payroll_payment_batches_checker_history CHECK (decided_by IS NULL OR decided_by::text <> ALL (contributors))",
+        "CONSTRAINT ck_payroll_payment_batches_contributors CHECK (created_by::text = ANY (contributors) AND last_edited_by::text = ANY (contributors) "
+        "AND (submitted_by IS NULL OR submitted_by::text = ANY (contributors)))",
+        "CONSTRAINT ck_payroll_payment_batches_decided_status CHECK (status NOT IN ('approved','exported','closed') OR decided_by IS NOT NULL)",
+        "CONSTRAINT ck_payroll_payment_batches_live_mac CHECK (status NOT IN ('submitted','approved','exported','closed') OR lines_mac IS NOT NULL)",
+        "CONSTRAINT ck_payroll_payment_batches_draft_mac CHECK (status <> 'draft' OR lines_mac IS NULL)",
+        "CONSTRAINT ck_payroll_payment_batches_cancelled CHECK (status <> 'cancelled' OR cancel_reason_enc IS NOT NULL)",
+        "CHECK (reference ~ '^PAY-[0-9]{4}-[0-9]{2}-[0-9]{2,4}$')",
+        "format text NOT NULL DEFAULT 'generic_neft_csv'",
+        "payment_type text NOT NULL DEFAULT 'NEFT'",
+        "debit_account_id uuid NOT NULL REFERENCES company_bank_accounts(id) ON DELETE RESTRICT",
+    ):
+        assert needle in b, needle
+    lock = up.split("CREATE FUNCTION payroll_payment_batches_lock")[1].split("$$;")[0]
+    for needle in (
+        "NEW.status <> 'draft'",
+        "r.status = 'published'",
+        "a.active",
         "OLD.status <> 'draft'",  # only a draft can be deleted
-        "NEW.fy IS DISTINCT FROM OLD.fy OR NEW.version IS DISTINCT FROM OLD.version",
+        "NEW.reference IS DISTINCT FROM OLD.reference",
         "NOT (NEW.contributors @> OLD.contributors)",
-        "('draft>submitted','submitted>draft','submitted>verified','verified>superseded')",
-        "ARRAY['rules','rules_sha256','last_edited_by','contributors']",
-        "ARRAY['status','verified_by','verified_at','attestation']",
-        "'^\\s*UNVERIFIED'",
-        "ARRAY['windows','version_row','updated_by','updated_at']",  # windows stay editable on every status
+        "app.key_rotation",
+        "('draft>submitted','draft>cancelled','submitted>draft','submitted>approved','submitted>cancelled','approved>exported','approved>cancelled','exported>closed')",
+        "submitting clears an earlier decision",
+        "l.status = 'pending'",  # nothing to submit
+        "l.user_id = NEW.decided_by",  # the approver is paid by the batch
+        "h.changed_by = NEW.decided_by",  # M5: ANY recent bank change of the history by the approver
+        "JOIN employee_bank_changes h ON h.user_id = l.user_id",
+        "GREATEST(COALESCE(",  # H1: the look-back window has a floor of 7 days in the database too
+        "), 7) INTO alert_days",
+        "payroll_payslip_failed_by(l.payslip_id, NEW.decided_by)",  # H2: whoever failed the payment cannot approve the re-batch
+        "payroll_payslip_failed_by(l.payslip_id, NEW.submitted_by)",  # ... nor submit it
+        "the debit account must be active",  # L4
+        "payroll.bank_change_alert_days",
+        "ARRAY['status','exported_by','exported_at','file_sha256']",
         "j_new IS DISTINCT FROM j_old",
     ):
         assert needle in lock, needle
-    assert "BEFORE INSERT OR UPDATE OR DELETE ON tax_year_rules" in up
-    assert "trg_tax_year_rules_lock" < "trg_tax_year_rules_updated_at"  # the lock sees the row before set_updated_at bumps updated_at
-
-
-def test_seed_is_an_unverified_draft_with_a_matching_hash():
-    mod = _load()
-    rules = json.loads(mod.SEED_RULES_JSON)
-    assert rules["note"].startswith("UNVERIFIED seed copied from FY 2025-26")
-    assert hashlib.sha256(mod.SEED_RULES_JSON.encode("utf-8")).hexdigest() == mod.SEED_RULES_SHA256
-    assert mod.SEED_RULES_JSON == json.dumps(rules, sort_keys=True, separators=(",", ":"), ensure_ascii=False)  # canonical form
-    ins = [s for s in mod.UPGRADE.split(";\n") if s.lstrip().startswith("INSERT INTO tax_year_rules")]
-    assert len(ins) == 1
-    assert f"VALUES ('2026-27', 1, 'draft', '" in ins[0] and f"'{mod.SEED_RULES_SHA256}')" in ins[0]
-    assert "created_by" not in ins[0].split("VALUES")[0] and "windows" not in ins[0].split("VALUES")[0]  # system seed, windows closed
-    assert "'" not in mod.SEED_RULES_JSON and "%" not in mod.SEED_RULES_JSON
-    # shape of 19.6
-    assert set(rules["regimes"]) == {"old", "new"} and rules["cess_pct"] == "4" and rules["default_regime"] == "new"
-    for regime in rules["regimes"].values():
-        slabs = regime["slabs"]
-        assert slabs[0]["from"] == "0.00" and slabs[-1]["to"] is None
-        assert all(a["to"] == b["from"] for a, b in zip(slabs, slabs[1:], strict=False))
-    codes = [s["code"] for s in rules["sections"]]
-    assert len(codes) == len(set(codes)) and all(re.fullmatch(r"[A-Z0-9_]{2,16}", c) for c in codes)
-    for r in rules["regimes"].values():
-        assert set(r["allowed_sections"]) <= set(codes) | {"80C", "80CCC", "80CCD1", "80D_PARENTS", "80E", "80G", "80TTA"}
-
-
-def test_declarations_proofs_and_form16():
-    up = _load().UPGRADE
-    decl = up.split("CREATE TABLE tax_declarations (")[1].split("\n);")[0]
+    assert "CREATE CONSTRAINT TRIGGER trg_payroll_payment_batches_consistency AFTER INSERT OR UPDATE ON payroll_payment_batches DEFERRABLE INITIALLY DEFERRED" in up
+    ln = up.split("CREATE TABLE payroll_payment_lines (")[1].split("\n);")[0]
     for needle in (
-        "CONSTRAINT uq_tax_declarations_user_fy UNIQUE (user_id, fy)",
-        "draft_enc bytea",
-        "submitted_enc bytea",
-        "CHECK ((submitted_enc IS NULL) = (submitted_version IS NULL))",
-        "CHECK ((submitted_enc IS NULL) = (submitted_at IS NULL))",
-        "CHECK (submitted_enc IS NULL OR regime IS NOT NULL)",
-        "CHECK (regime_draft IS NULL OR regime_draft IN ('old','new'))",
-        "CHECK (regime IS NULL OR regime IN ('old','new'))",
-        "CHECK ((unlocked_until IS NULL) = (unlock_reason_enc IS NULL))",
-        "CHECK (entered_by IS NULL OR entered_by <> user_id)",
-        "user_id uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT",
-        "entered_by uuid REFERENCES users(id) ON DELETE RESTRICT",
+        "CONSTRAINT uq_payroll_payment_lines_batch_seq UNIQUE (batch_id, seq)",
+        "batch_id uuid NOT NULL REFERENCES payroll_payment_batches(id) ON DELETE RESTRICT",
+        "payslip_id uuid NOT NULL REFERENCES payslips(id) ON DELETE RESTRICT",
+        "amount_enc bytea NOT NULL",
+        "beneficiary_enc bytea NOT NULL",
+        "'BANK_DETAILS_CHANGED','RECENT_BANK_CHANGE','REVISION_DELTA','NO_PAN','PREVIOUSLY_FAILED'",
+        "failed_by uuid REFERENCES users(id) ON DELETE RESTRICT",
+        "CONSTRAINT ck_payroll_payment_lines_failed_by CHECK ((status = 'failed') = (failed_by IS NOT NULL))",
+        "CONSTRAINT ck_payroll_payment_lines_failed_self CHECK (failed_by IS NULL OR failed_by <> user_id)",
+        "CHECK (status IN ('pending','excluded','exported','paid','failed'))",
+        "CHECK (account_source = 'snapshot' OR 'BANK_DETAILS_CHANGED' = ANY (flags))",
     ):
-        assert needle in decl, needle
-    dl = up.split("CREATE FUNCTION tax_declarations_lock")[1].split("$$;")[0]
+        assert needle in ln, needle
+    # one live line per payslip
+    assert "uq_payroll_payment_lines_live ON payroll_payment_lines (payslip_id) WHERE status IN ('pending','exported','paid')" in up
+    ll = up.split("CREATE FUNCTION payroll_payment_lines_lock")[1].split("$$;")[0]
     for needle in (
-        "cannot be deleted",
-        "entered_by is set once",
-        "app.key_rotation",
-        "payroll_strip_enc(to_jsonb(NEW)) IS NOT DISTINCT FROM payroll_strip_enc(to_jsonb(OLD))",
-        "NEW.submitted_version <= COALESCE(OLD.submitted_version, 0)",  # T3: resubmitting needs a higher version
-        "NEW.regime IS DISTINCT FROM OLD.regime",
-        "p.verified_by = NEW.entered_by",  # verified_by differs from entered_by (declaration side)
-    ):
-        assert needle in dl, needle
-    pr = up.split("CREATE TABLE tax_proofs (")[1].split("\n);")[0]
-    for needle in (
-        "declaration_id uuid NOT NULL REFERENCES tax_declarations(id) ON DELETE RESTRICT",
-        "claimed_enc bytea NOT NULL",
-        "file_ids uuid[] NOT NULL",
-        "CHECK (cardinality(file_ids) BETWEEN 1 AND 10 AND array_position(file_ids, NULL::uuid) IS NULL)",
-        "CHECK (status IN ('submitted','verified','rejected','cancelled'))",
-        "CHECK ((status IN ('verified','rejected')) = (verified_by IS NOT NULL))",
-        "CHECK ((status = 'verified') = (verified_enc IS NOT NULL))",
-        "CHECK (verified_by IS NULL OR verified_by <> user_id)",
-        "CHECK (status <> 'rejected' OR comment_enc IS NOT NULL)",
-        "CHECK (section ~ '^[A-Z0-9_]{2,16}$')",
-    ):
-        assert needle in pr, needle
-    assert "uq_tax_proofs_live_item ON tax_proofs (declaration_id, item_id) WHERE status IN ('submitted','verified')" in up
-    pl = up.split("CREATE FUNCTION tax_proofs_lock")[1].split("$$;")[0]
-    for needle in (
-        "decl.user_id IS DISTINCT FROM NEW.user_id OR decl.fy IS DISTINCT FROM NEW.fy",  # tagged row: user / FY equal the declaration's
-        "('submitted>verified','submitted>rejected','submitted>cancelled')",
-        "ARRAY['claimed_enc','file_ids']",
-        "NEW.verified_by IS NOT DISTINCT FROM decl.entered_by",  # decider is not the person who entered it on behalf
-        "f.purpose = 'tax_proof'",
-        "<> cardinality(NEW.file_ids)",
-        "app.key_rotation",
-        "cannot be deleted",
+        "ps.run_id IS DISTINCT FROM b_run",  # tagged row: payslip of the batch's run
+        "ps.user_id IS DISTINCT FROM NEW.user_id",  # tagged row: same employee
+        "ps.status <> 'published' OR ps.hold",
+        "b_status IS DISTINCT FROM 'draft'",
+        "NEW.batch_id IS DISTINCT FROM OLD.batch_id OR NEW.payslip_id IS DISTINCT FROM OLD.payslip_id OR NEW.user_id IS DISTINCT FROM OLD.user_id",
+        "('pending>excluded','excluded>pending','pending>exported','exported>paid','exported>failed')",
+        "ARRAY['status','amount_enc','beneficiary_enc','flags','account_source']",
+        "ARRAY['status','reference_enc','paid_on','failed_by']",
+        "payroll_payslip_failed_by(NEW.payslip_id, NEW.updated_by)",
         "j_new IS DISTINCT FROM j_old",
     ):
-        assert needle in pl, needle
-    f16 = up.split("CREATE TABLE form16_documents (")[1].split("\n);")[0]
-    for needle in (
-        "file_id uuid NOT NULL REFERENCES files(id) ON DELETE RESTRICT",
-        "CONSTRAINT uq_form16_documents_file UNIQUE (file_id)",
-        "CHECK (kind IN ('form16','part_a','part_b','form12ba'))",
-        "CHECK (status IN ('uploaded','published','withdrawn'))",
-        "CHECK (sha256 ~ '^[0-9a-f]{64}$')",
-        "upload_batch_id uuid NOT NULL",
-        "second_person boolean NOT NULL DEFAULT true",
-        "CHECK (NOT second_person OR published_by IS NULL OR published_by <> uploaded_by)",
-        "CHECK (published_by IS NULL OR published_by <> user_id)",
-        "CHECK ((status = 'withdrawn') = (withdrawn_by IS NOT NULL))",
-        "CHECK (status <> 'withdrawn' OR withdraw_reason_enc IS NOT NULL)",
-    ):
-        assert needle in f16, needle
-    assert "uq_form16_documents_live ON form16_documents (user_id, fy, kind) WHERE status IN ('uploaded','published')" in up
-    fl = up.split("CREATE FUNCTION form16_documents_lock")[1].split("$$;")[0]
-    for needle in (
-        "f.purpose = 'form16'",
-        "NEW.second_person IS DISTINCT FROM OLD.second_person",
-        "('uploaded>published','uploaded>withdrawn','published>withdrawn')",
-        "ARRAY['status','published_by','published_at']",
-        "ARRAY['status','withdrawn_by','withdrawn_at','withdraw_reason_enc']",
-        "cannot be deleted",
-        "app.key_rotation",
-        "j_new IS DISTINCT FROM j_old",
-    ):
-        assert needle in fl, needle
-    for t in NEW_TABLES:
+        assert needle in ll, needle
+    for t in ("payroll_payment_batches", "payroll_payment_lines", "company_bank_accounts", "payslip_deliveries"):
         assert f"REVOKE DELETE, TRUNCATE ON {t} FROM app_user" in up, t
-        assert f"CREATE TRIGGER trg_{t}_updated_at BEFORE UPDATE ON {t}" in up, t
+    # alphabetical trigger order: the lock sees the row before set_updated_at bumps updated_at
+    assert "trg_payroll_payment_batches_lock" < "trg_payroll_payment_batches_updated_at"
 
 
-def test_files_events_and_settings():
+def test_delivery_accounts_and_details_marker():
+    up = _load().UPGRADE
+    dl = up.split("CREATE TABLE payslip_deliveries (")[1].split("\n);")[0]
+    assert "payslip_id uuid PRIMARY KEY REFERENCES payslips(id) ON DELETE RESTRICT" in dl
+    assert "push_count BETWEEN 0 AND 10" in dl and "reminders BETWEEN 0 AND 3" in dl
+    body = up.split("CREATE FUNCTION payslip_deliveries_lock")[1].split("$$;")[0]
+    assert "write-once" in body and "NEW.push_count < OLD.push_count" in body and "p.user_id" in body
+    acct = up.split("CREATE TABLE company_bank_accounts (")[1].split("\n);")[0]
+    for col in ("bank_name_enc bytea NOT NULL", "account_enc bytea NOT NULL", "ifsc_enc bytea NOT NULL"):
+        assert col in acct, col
+    assert "uq_company_bank_accounts_default ON company_bank_accounts (is_default) WHERE is_default AND active" in up
+    lock = up.split("CREATE FUNCTION company_bank_accounts_lock")[1].split("$$;")[0]
+    assert "NEW.account_enc IS DISTINCT FROM OLD.account_enc OR NEW.ifsc_enc IS DISTINCT FROM OLD.ifsc_enc" in lock and "app.key_rotation" in lock
+    assert "ALTER TABLE employee_payroll_details ADD COLUMN bank_changed_by uuid REFERENCES users(id) ON DELETE RESTRICT" in up
+    assert "ALTER TABLE employee_payroll_details ADD COLUMN bank_changed_at timestamptz" in up
+    assert "CREATE INDEX ix_employee_payroll_details_bank_changed_by ON employee_payroll_details (bank_changed_by)" in up
+    g = up.split("CREATE FUNCTION employee_payroll_details_bank_guard")[1].split("$$;")[0]
+    assert "NEW.bank_changed_at IS NULL OR NEW.bank_changed_by IS NULL OR NEW.bank_changed_at < OLD.bank_changed_at" in g
+    assert "NEW.payment_mode IS DISTINCT FROM OLD.payment_mode" in g and "app.key_rotation" in g
+    # L5: BEFORE INSERT too (bank data on insert), and every bank change needs a strictly newer marker
+    assert "BEFORE INSERT OR UPDATE ON employee_payroll_details" in up and "TG_OP = 'INSERT'" in g
+    assert "NEW.bank_changed_at <= OLD.bank_changed_at" in g
+    # M1: the history is written by the same trigger and is append-only
+    assert "INSERT INTO employee_bank_changes" in g and "BEFORE UPDATE OR DELETE ON employee_bank_changes" in up
+    assert "REVOKE DELETE, TRUNCATE ON employee_bank_changes FROM app_user" in up
+
+
+def test_events_and_settings():
     mod = _load()
     up = mod.UPGRADE
-    assert "'company_logo','reimbursement_bill','tax_proof','form16'))" in up.split("ADD CONSTRAINT ck_files_purpose")[1]
-    assert "'publish_request','payment_batch','tax_rules','tax_declaration','tax_proof','form16'" in up
-    assert "'export','confirm','expire','stale','unlock'" in up
-    for key, sql in (("payroll.form16_requires_second_person", "true"), ("payroll.tax_proof_max_files", "5")):
+    assert "'increment','fnf','publish_request','payment_batch'" in up
+    assert "'export','confirm','expire','stale'" in up
+    from app.services import payroll_settings as pset
+
+    expected = {
+        "payroll.publish_request_ttl_hours": ("72", 72),
+        "payroll.bank_file_format": ('"generic_neft_csv"', "generic_neft_csv"),
+        "payroll.bank_payment_type": ('"NEFT"', "NEFT"),
+        "payroll.bank_change_alert_days": ("30", 30),
+    }
+    for key, (sql, py) in expected.items():
         assert f"('{key}', '{sql}'::jsonb)" in up, key
         assert key in mod.DOWNGRADE, key
-    assert "INSERT INTO permissions" not in up  # payroll.manage / approve / view_all / view_own exist
-    assert "payroll.tds_engine_enabled" not in up  # 5c
+        assert pset.DEFAULTS[key] == py and type(pset.DEFAULTS[key]) is type(py), key
+    assert pset.validate("payroll.publish_request_ttl_hours", 1) == 1 and pset.validate("payroll.publish_request_ttl_hours", 336) == 336
+    assert pset.validate("payroll.bank_change_alert_days", 7) == 7 and pset.validate("payroll.bank_change_alert_days", 90) == 90
+    assert "bank_file_requires_second_person" not in up and "bank_file_requires_second_person" not in mod.DOWNGRADE  # L1
+    assert "payroll.bank_file_requires_second_person" not in pset.DEFAULTS
+    assert pset.validate("payroll.bank_payment_type", "RTGS") == "RTGS"
+    from app.core.errors import AppError
+
+    for key, bad in (
+        ("payroll.publish_request_ttl_hours", 0),
+        ("payroll.publish_request_ttl_hours", 337),
+        ("payroll.bank_change_alert_days", -1),
+        ("payroll.bank_change_alert_days", 0),
+        ("payroll.bank_change_alert_days", 6),
+        ("payroll.bank_change_alert_days", 91),
+        ("payroll.bank_payment_type", "UPI"),
+        ("payroll.bank_file_format", "swift"),
+        ("payroll.bank_file_requires_second_person", False),
+        ("payroll.bank_change_alert_days", True),
+    ):
+        with pytest.raises(AppError):
+            pset.validate(key, bad)
+    # no new permission in 5a: the approve / publish / manage codes already exist
+    assert "INSERT INTO permissions" not in up
 
 
 def test_models_match_migration():
@@ -277,25 +342,32 @@ def test_models_match_migration():
             for pre in ("CREATE UNIQUE INDEX ", "CREATE INDEX "):
                 if s.startswith(pre) and f" ON {name} " in s:
                     mig_obj.add(s[len(pre) :].split()[0])
+        # the SQLite harness (conftest) drops checks / partial indexes it cannot evaluate: look in the model source as well
         missing = {n for n in mig_obj if n not in model_names and n not in MODEL_SRC}
         assert not missing, (name, missing)
+    import re
+
     for n in re.findall(r'name="([a-z_0-9]+)"', MODEL_SRC) + re.findall(r'Index\(\s*"([a-z_0-9]+)"', MODEL_SRC):
         assert n in up, n  # includes the checks / partial indexes the SQLite harness drops
     enc = {
-        "tax_declarations": {"draft_enc": EncryptedJSON, "submitted_enc": EncryptedJSON, "unlock_reason_enc": EncryptedString},
-        "tax_proofs": {"claimed_enc": EncryptedJSON, "verified_enc": EncryptedJSON, "comment_enc": EncryptedString},
-        "form16_documents": {"withdraw_reason_enc": EncryptedString},
+        "payroll_publish_requests": {"snapshot_enc": EncryptedJSON, "comment_enc": EncryptedString, "decision_comment_enc": EncryptedString},
+        "company_bank_accounts": {"bank_name_enc": EncryptedString, "account_enc": EncryptedString, "ifsc_enc": EncryptedString},
+        "payroll_payment_batches": {"decision_comment_enc": EncryptedString, "cancel_reason_enc": EncryptedString},
+        "payroll_payment_lines": {"amount_enc": EncryptedString, "beneficiary_enc": EncryptedJSON, "reference_enc": EncryptedString},
     }
     for table, cols in enc.items():
         for c, typ in cols.items():
             assert isinstance(Base.metadata.tables[table].c[c].type, typ), (table, c)
-    rules = Base.metadata.tables["tax_year_rules"]
-    assert not any(c.name.endswith("_enc") for c in rules.columns)  # rules are plain JSON, not secret
+    for table in ("payroll_runs", "payslips"):
+        t = Base.metadata.tables[table]
+        assert "contributors" in t.c and not t.c.contributors.nullable
+    det = Base.metadata.tables["employee_payroll_details"]
+    assert {"bank_changed_by", "bank_changed_at"} <= set(det.c.keys())
+    assert any(i.name == "ix_employee_payroll_details_bank_changed_by" for i in det.indexes)
+    assert "ck_employee_payroll_details_bank_changed" in {c.name for c in det.constraints}
     ev = {c.name: str(c.sqltext) for c in Base.metadata.tables["payroll_item_events"].constraints if c.name}
-    assert "'tax_rules','tax_declaration','tax_proof','form16'" in ev["ck_payroll_item_events_item_type"]
-    assert "'export','confirm','expire','stale','unlock'" in ev["ck_payroll_item_events_action"]
-    files = {c.name: str(c.sqltext) for c in Base.metadata.tables["files"].constraints if c.name}
-    assert "'tax_proof','form16'" in files["ck_files_purpose"]
+    assert "'publish_request','payment_batch'" in ev["ck_payroll_item_events_item_type"]
+    assert "'export','confirm','expire','stale'" in ev["ck_payroll_item_events_action"]
 
 
 def test_schema_sql_mirror():
@@ -304,11 +376,12 @@ def test_schema_sql_mirror():
     for t in NEW_TABLES:
         assert f"CREATE TABLE {t} (" in sql, t
         assert f"REVOKE DELETE, TRUNCATE ON {t} FROM app_user" in sql, t
-    for fn in ("tax_year_rules_lock", "tax_declarations_lock", "tax_proofs_lock", "form16_documents_lock"):
+    for fn in ("payroll_contributors_guard", "payroll_publish_requests_lock", "payroll_payment_batches_lock", "payroll_payment_lines_lock"):
         assert f"CREATE FUNCTION {fn}()" in sql, fn
-    assert "ck_tax_year_rules_verifier" in sql and "uq_form16_documents_live" in sql and "uq_tax_proofs_live_item" in sql
-    assert "'payroll.form16_requires_second_person'" in sql and "UNVERIFIED seed copied from FY 2025-26" in sql
-    assert "tax rules % (% v%) are % and locked" in sql  # the %% escapes of the DDL layer are resolved
+    assert "uq_payroll_payment_lines_live" in sql and "ck_payroll_publish_requests_checker_history" in sql
+    assert "'payroll.bank_change_alert_days'" in sql
+    # the %% escapes of the DDL layer are resolved in the generated script
+    assert "payment batch % is % and locked" in sql
 
 
 # ---- CHECK constraints SQLite can evaluate, through the ORM ----------------------------------------------------------------
@@ -333,29 +406,47 @@ async def _users(session, n: int):
 async def test_orm_defaults_and_checks(engine):
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from app.models import Form16Document, TaxDeclaration, TaxProof, TaxYearRule
+    from app.models import (
+        CompanyBankAccount,
+        PayrollPaymentBatch,
+        PayrollPaymentLine,
+        PayrollPublishRequest,
+        PayrollRun,
+        Payslip,
+        PayslipDelivery,
+    )
 
-    now = dt.datetime(2026, 11, 1, tzinfo=dt.UTC)
+    now = dt.datetime(2026, 10, 1, tzinfo=dt.UTC)
     async with AsyncSession(engine, expire_on_commit=False) as s:
         maker, checker, emp = await _users(s, 3)
-        rule = TaxYearRule(fy="2026-27", version=1, rules={"note": "x"}, rules_sha256="a" * 64)
-        s.add(rule)
-        decl = TaxDeclaration(user_id=emp.id, fy="2026-27", regime_draft="new", draft={"items": []})
-        s.add(decl)
+        run = PayrollRun(period=dt.date(2026, 9, 1), attendance_cutoff=dt.date(2026, 9, 30), config={}, status="published",
+                         published_by=checker.id, published_at=now)  # fmt: skip
+        s.add(run)
         await s.flush()
-        assert rule.status == "draft" and rule.windows == {} and rule.contributors == [] and rule.version_row == 1
-        assert rule.created_by is None and rule.attestation is None
-        assert decl.submitted is None and decl.version == 1 and decl.entered_by is None
-        assert decl.draft == {"items": []}  # encrypted at rest, transparent in python
-        proof = TaxProof(declaration_id=decl.id, user_id=emp.id, fy="2026-27", item_id="i1", section="80C", claimed={"amount": "1.00"},
-                         file_ids=[str(uuid.uuid4())])  # fmt: skip
-        s.add(proof)
-        doc = Form16Document(user_id=emp.id, fy="2026-27", kind="form16", file_id=uuid.uuid4(), sha256="b" * 64, upload_batch_id=uuid.uuid4(),
-                             uploaded_by=maker.id)  # fmt: skip
-        s.add(doc)
+        assert run.contributors == []
+        slip = Payslip(run_id=run.id, user_id=emp.id, status="published", employee_snapshot={}, basis_days=30, employed_days=30,
+                       paid_days=30, lop_breakdown={}, inputs={}, result={}, published_by=checker.id, published_at=now)  # fmt: skip
+        s.add(slip)
+        acct = CompanyBankAccount(label="Main", bank_name="HDFC", account="123456789012", ifsc="HDFC0001234", created_by=maker.id)
+        s.add(acct)
         await s.flush()
-        assert proof.status == "submitted" and proof.version == 1 and proof.claimed == {"amount": "1.00"}
-        assert doc.status == "uploaded" and doc.second_person is True and doc.version == 1
+        assert slip.contributors == [] and acct.is_default is False and acct.active is True
+        assert acct.account == "123456789012"  # encrypted at rest, transparent in python
+        s.add(PayslipDelivery(payslip_id=slip.id, user_id=emp.id))
+        batch = PayrollPaymentBatch(run_id=run.id, reference="PAY-2026-09-01", debit_account_id=acct.id, value_date=dt.date(2026, 10, 31),
+                                    created_by=maker.id, contributors=[str(maker.id)])  # fmt: skip
+        s.add(batch)
+        await s.flush()
+        assert batch.status == "draft" and batch.last_edited_by == maker.id and batch.format == "generic_neft_csv"
+        assert batch.payment_type == "NEFT" and batch.version == 1
+        line = PayrollPaymentLine(batch_id=batch.id, payslip_id=slip.id, user_id=emp.id, seq=1, amount="35300.00", beneficiary={"name": "A B"})
+        s.add(line)
+        req = PayrollPublishRequest(run_id=run.id, scope="run", snapshot={"payslips": []}, snapshot_mac="a" * 64, requested_by=maker.id,
+                                    expires_at=now + dt.timedelta(hours=72), requested_at=now)  # fmt: skip
+        s.add(req)
+        await s.flush()
+        assert line.status == "pending" and line.account_source == "snapshot" and line.flags == []
+        assert req.status == "submitted" and req.makers == [] and req.version == 1
         await s.commit()
 
         async def refused(obj):
@@ -364,52 +455,50 @@ async def test_orm_defaults_and_checks(engine):
                 with pytest.raises(IntegrityError):
                     await s2.flush()
 
-        def rules(**kw):
-            base = dict(fy="2027-28", version=1, rules={}, rules_sha256="a" * 64)
+        def request(**kw):
+            base = dict(run_id=run.id, scope="run", snapshot={}, snapshot_mac="a" * 64, requested_by=maker.id, requested_at=now,
+                        expires_at=now + dt.timedelta(hours=1))  # fmt: skip
             base.update(kw)
-            return TaxYearRule(**base)
+            return PayrollPublishRequest(**base)
 
-        await refused(rules(fy="2026-27"))  # (fy, version) unique
-        await refused(rules(status="open"))
-        await refused(rules(version=0))
-        await refused(rules(version_row=0))
-        await refused(rules(status="submitted"))  # submitted needs a submitter
-        await refused(rules(status="verified", verified_by=checker.id, verified_at=now, submitted_by=maker.id, submitted_at=now,
-                            contributors=[str(maker.id)]))  # fmt: skip  # verified needs an attestation
-        await refused(rules(verified_by=checker.id))  # decider / time pair, and draft carries no verifier
-        await refused(rules(submitted_by=maker.id))  # submitter / time pair
-        await refused(TaxDeclaration(user_id=emp.id, fy="2026-27"))  # one declaration per (employee, FY)
-        await refused(TaxDeclaration(user_id=maker.id, fy="2027-28", regime_draft="hybrid"))
-        await refused(TaxDeclaration(user_id=maker.id, fy="2027-28", regime="other"))
-        await refused(TaxDeclaration(user_id=maker.id, fy="2027-28", submitted_version=1))  # version without a submitted body
-        await refused(TaxDeclaration(user_id=maker.id, fy="2027-28", unlocked_until=dt.date(2027, 1, 1)))  # unlock needs a reason
-        await refused(TaxDeclaration(user_id=maker.id, fy="2027-28", version=0))
+        await refused(request(scope="batch"))
+        await refused(request(scope="payslip"))  # payslip scope needs a payslip
+        await refused(request(payslip_id=slip.id))  # run scope must not carry one
+        await refused(request(status="done"))
+        await refused(request(stale_reason="EXPIRED"))  # reason only on stale
+        await refused(request(status="stale"))  # stale needs a reason
+        await refused(request(expires_at=now - dt.timedelta(hours=1)))
+        await refused(request(status="approved"))  # approved needs a decider
+        await refused(request(decided_by=maker.id, decided_at=now))  # decider = requester (status/decision mismatch too)
+        await refused(request(status="rejected", decided_by=checker.id, decided_at=now, makers=[str(maker.id)]))  # reject needs a comment
+        await refused(request(status="withdrawn"))  # withdrawn needs who
+        await refused(request(version=0))
+        await refused(PayrollPaymentBatch(run_id=run.id, reference="PAY-2026-09-02", debit_account_id=acct.id, value_date=dt.date(2026, 10, 31),
+                                          created_by=maker.id, last_edited_by=maker.id, contributors=[str(maker.id)], status="exported"))  # fmt: skip
+        await refused(PayrollPaymentBatch(run_id=run.id, reference="PAY-2026-09-02", debit_account_id=acct.id, value_date=dt.date(2026, 10, 31),
+                                          created_by=maker.id, last_edited_by=maker.id, contributors=[str(maker.id)], status="submitted"))  # fmt: skip
+        await refused(PayrollPaymentBatch(run_id=run.id, reference="PAY-2026-09-02", debit_account_id=acct.id, value_date=dt.date(2026, 10, 31),
+                                          created_by=maker.id, last_edited_by=maker.id, contributors=[str(maker.id)], status="cancelled"))  # fmt: skip
+        await refused(PayrollPaymentBatch(run_id=run.id, reference="PAY-2026-09-02", debit_account_id=acct.id, value_date=dt.date(2026, 10, 31),
+                                          created_by=maker.id, last_edited_by=maker.id, contributors=[str(maker.id)], status="nope"))  # fmt: skip
+        await refused(PayrollPaymentBatch(run_id=run.id, reference="PAY-2026-09-02", debit_account_id=acct.id, value_date=dt.date(2026, 10, 31),
+                                          created_by=maker.id, last_edited_by=maker.id, contributors=[str(maker.id)], payment_type="UPI"))  # fmt: skip
+        await refused(PayrollPaymentBatch(run_id=run.id, reference="PAY-2026-09-01", debit_account_id=acct.id, value_date=dt.date(2026, 10, 31),
+                                          created_by=maker.id, contributors=[str(maker.id)]))  # fmt: skip  # duplicate reference
+        await refused(PayrollPaymentBatch(run_id=run.id, reference="PAY-2026-09-03", debit_account_id=acct.id, value_date=dt.date(2026, 10, 31),
+                                          created_by=maker.id, contributors=[str(maker.id)], decided_by=maker.id, decided_at=now))  # fmt: skip  # decider = creator
 
-        def tproof(**kw):
-            base = dict(declaration_id=decl.id, user_id=emp.id, fy="2026-27", item_id="i2", section="80D_SELF", claimed={},
-                        file_ids=[str(uuid.uuid4())])  # fmt: skip
+        def pline(**kw):
+            base = dict(batch_id=batch.id, payslip_id=slip.id, user_id=emp.id, seq=2, amount="1.00", beneficiary={})
             base.update(kw)
-            return TaxProof(**base)
+            return PayrollPaymentLine(**base)
 
-        await refused(tproof(status="done"))
-        await refused(tproof(status="verified"))  # verified needs a decider and verified amounts
-        await refused(tproof(status="rejected", verified_by=checker.id, verified_at=now))  # a rejection needs a comment
-        await refused(tproof(verified_by=checker.id))  # a submitted proof has no decider (and pair)
-        await refused(tproof(verified_by=emp.id, verified_at=now, status="rejected", comment="no"))  # the employee cannot decide
-        await refused(tproof(version=0))
-
-        def f16(**kw):
-            base = dict(user_id=emp.id, fy="2026-27", kind="part_a", file_id=uuid.uuid4(), sha256="c" * 64, upload_batch_id=uuid.uuid4(),
-                        uploaded_by=maker.id)  # fmt: skip
-            base.update(kw)
-            return Form16Document(**base)
-
-        await refused(f16(kind="form16b"))
-        await refused(f16(status="done"))
-        await refused(f16(status="published"))  # published needs who / when
-        await refused(f16(published_by=checker.id))  # who / when pair, and an uploaded document has no publisher
-        await refused(f16(status="published", published_by=maker.id, published_at=now))  # second person: uploader cannot publish
-        await refused(f16(status="published", published_by=emp.id, published_at=now, second_person=False))  # never the employee
-        await refused(f16(status="withdrawn"))  # withdrawn needs who and why
-        await refused(f16(file_id=doc.file_id))  # one document per file
-        await refused(f16(version=0))
+        await refused(pline(seq=1))  # (batch, seq) unique
+        await refused(pline(seq=0))
+        await refused(pline(status="settled"))
+        await refused(pline(account_source="other"))
+        await refused(pline(status="paid"))  # paid needs paid_on
+        await refused(pline(status="pending", paid_on=dt.date(2026, 10, 31)))  # confirmation fields only on paid / failed
+        await refused(pline(status="pending", reference="UTR1"))
+        await refused(PayslipDelivery(payslip_id=slip.id, user_id=emp.id))  # one row per payslip (primary key)
+        await refused(PayslipDelivery(payslip_id=uuid.uuid4(), user_id=emp.id, push_count=11))

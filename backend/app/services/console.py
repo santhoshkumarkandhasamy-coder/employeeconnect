@@ -20,6 +20,7 @@ from ..models import (
     FoodEnrollment,
     LeaveRequest,
     LeaveType,
+    OnDutyRequest,
     PasswordResetRequest,
     PermissionRequest,
     RefreshToken,
@@ -181,7 +182,10 @@ async def dashboard(session: AsyncSession, actor: Principal) -> dict[str, Any]:
                 select(func.count()).select_from(PermissionRequest).where(PermissionRequest.status == "pending")
             )
         ).scalar_one()
-        out["requests"] = {"leave_pending": lp, "permission_pending": pp}
+        op = (
+            await session.execute(select(func.count()).select_from(OnDutyRequest).where(OnDutyRequest.status == "pending"))
+        ).scalar_one()
+        out["requests"] = {"leave_pending": lp, "permission_pending": pp, "on_duty_pending": op}
     else:
         out["requests"] = None
 

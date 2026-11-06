@@ -1,7 +1,7 @@
 """Statutory challans (plan 14 phase 2): paid / unpaid tracking of PF, ESI, PT and TDS dues per month
 
-Revision ID: 0020
-Revises: 0019
+Revision ID: 0021
+Revises: 0020
 
 Added
 * statutory_challans  one row per (type, period): type pf|esi|pt|tds, period = first of month, status unpaid|paid.
@@ -13,8 +13,8 @@ Downgrade drops the table (ALL challan history is lost).
 
 from migration_sql import run
 
-revision = "0020"
-down_revision = "0019"
+revision = "0021"
+down_revision = "0020"
 branch_labels = None
 depends_on = None
 

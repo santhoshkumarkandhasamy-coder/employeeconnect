@@ -41,7 +41,7 @@ class TodayTab extends ConsumerWidget {
         message: e is ApiException ? e.message : 'Could not load today.',
         onRetry: () => ref.invalidate(todayAttendanceProvider),
       ),
-      data: (rec) => RefreshIndicator(
+      data: (t) => RefreshIndicator(
         onRefresh: () async {
           ref
             ..invalidate(todayAttendanceProvider)
@@ -51,14 +51,14 @@ class TodayTab extends ConsumerWidget {
         child: ListView(
           padding: const EdgeInsets.all(16),
           children: [
-            _StatusBlock(record: rec),
+            _StatusBlock(record: t.record, onDuty: t.onDuty),
             const SizedBox(height: 12),
             const _ProximityCard(),
             const SizedBox(height: 12),
-            if (rec == null) const _SelfieSection(),
+            if (t.record == null) const _SelfieSection(),
             const _FeedbackBanner(),
             const SizedBox(height: 16),
-            _ActionButton(record: rec, onRationale: () => _rationale(context)),
+            _ActionButton(record: t.record, onRationale: () => _rationale(context)),
           ],
         ),
       ),
@@ -67,8 +67,9 @@ class TodayTab extends ConsumerWidget {
 }
 
 class _StatusBlock extends StatelessWidget {
-  const _StatusBlock({required this.record});
+  const _StatusBlock({required this.record, this.onDuty});
   final AttendanceRecord? record;
+  final OnDutySite? onDuty;
 
   @override
   Widget build(BuildContext context) {
@@ -84,6 +85,25 @@ class _StatusBlock extends StatelessWidget {
             Text(formatDayLong(now), style: theme.textTheme.titleMedium),
             const SizedBox(height: 8),
             Text(todayStatusText(r), style: theme.textTheme.bodyLarge),
+            if (onDuty != null) ...[
+              const SizedBox(height: 8),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.business_center_outlined, size: 20, color: theme.colorScheme.primary),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'On duty today at ${onDuty!.name}'
+                      '${onDuty!.address == null || onDuty!.address!.isEmpty ? '' : ', ${onDuty!.address}'}. '
+                      'Check in and check out at the client location.',
+                      style: theme.textTheme.bodyMedium,
+                    ),
+                  ),
+                ],
+              ),
+            ] else if (r?.clientLocationName != null)
+              Text('Checked in at ${r!.clientLocationName}', style: theme.textTheme.bodySmall),
             if (r != null && r.shiftStart != null)
               Text('Shift ${r.shiftStart} - ${r.shiftEnd ?? ''}', style: theme.textTheme.bodySmall),
             if (r != null && r.workedMinutes != null)
@@ -125,9 +145,10 @@ class _ProximityCard extends ConsumerWidget {
             final inside = p.inside;
             if (inside == null) return (Icons.my_location, 'Location found.', false);
             // Coarse on purpose: no exact distance is shown.
+            final area = p.site == null ? 'the office area' : 'the client location (${p.site!.name})';
             return (
               inside ? Icons.location_on : Icons.wrong_location,
-              inside ? 'You are inside the office area.' : 'You are outside the office area.',
+              inside ? 'You are inside $area.' : 'You are outside $area.',
               !inside,
             );
         }

@@ -344,7 +344,7 @@ def _details_out(user_id: uuid.UUID, d: EmployeePayrollDetails | None, *, reveal
         "bank_name": d.bank_name if d else None,
         "bank_account": m(d.bank_account if d else None, pc.mask_tail),
         "bank_ifsc": d.bank_ifsc if d else None,
-        "bank_changed_at": pc.iso(d.bank_changed_at) if d else None,  # read-only (migration 0026)
+        "bank_changed_at": pc.iso(d.bank_changed_at) if d else None,  # read-only (migration 0027)
         "pan": m(d.pan if d else None, pc.mask_pan),
         "uan": m(d.uan if d else None, pc.mask_tail),
         "esi_ip_number": m(d.esi_ip_number if d else None, pc.mask_tail),
@@ -387,7 +387,7 @@ async def put_details(
             setattr(d, f, v)
             changed.append(f)
     d.updated_by = actor.id
-    if any(f in BANK_FIELDS for f in changed):  # migration 0026: the database refuses a bank change without a fresh marker
+    if any(f in BANK_FIELDS for f in changed):  # migration 0027: the database refuses a bank change without a fresh marker
         stamp = utcnow()
         d.bank_changed_by, d.bank_changed_at = actor.id, stamp
         await pc.flush(session)  # PostgreSQL: the bank guard trigger appends the history row now

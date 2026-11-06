@@ -1,4 +1,4 @@
-"""Payroll controls (migration 0026, plan docs/plans/17-payroll-phase5.md work package 5a): publish requests (maker-checker for
+"""Payroll controls (migration 0027, plan docs/plans/17-payroll-phase5.md work package 5a): publish requests (maker-checker for
 publish), payslip delivery tracking, company debit accounts, payment batches and their lines.
 
 The database repeats every maker-checker rule (CHECK constraints) and guards the lifecycles with triggers

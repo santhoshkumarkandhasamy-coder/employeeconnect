@@ -5,7 +5,7 @@ approval writes rows into the existing source tables (one-time items, leave enca
 so process / reopen / publish / revise and every payroll cap work unchanged. `settled` is set by `on_published` in the publish
 transaction of the payslip that carries the settlement.
 
-Maker-checker (enforced here, by CHECK constraints and trigger of migration 0025, and by the audit rows): the checker is not the
+Maker-checker (enforced here, by CHECK constraints and trigger of migration 0026, and by the audit rows): the checker is not the
 employee (403 FORBIDDEN, audited), nor the creator, the last editor, the submitter or anybody in the append-only `contributors`
 list (403 SECOND_PERSON_REQUIRED). The step-up password is verified before any state check. Approve and revoke are bound to the
 version the checker reviewed (`expected_version`; every edit bumps it, and the trigger freezes a submitted row).

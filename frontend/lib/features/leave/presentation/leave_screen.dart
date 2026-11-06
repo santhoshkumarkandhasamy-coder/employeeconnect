@@ -4,7 +4,7 @@ import 'balance_tab.dart';
 import 'my_requests_tab.dart';
 import 'request_tab.dart';
 
-/// Leave tab: Balance | Request | My Requests.
+/// Leave tab: Balance | Request (leave, permission, on duty) | My Requests.
 class LeaveScreen extends StatelessWidget {
   const LeaveScreen({super.key, this.initialTab = 0});
 
@@ -17,7 +17,7 @@ class LeaveScreen extends StatelessWidget {
         initialIndex: initialTab,
         child: Scaffold(
           appBar: AppBar(
-            title: const Text('Leave & Permission'),
+            title: const Text('Leave, Permission & On Duty'),
             bottom: const TabBar(
               tabs: [
                 Tab(text: 'Balance'),

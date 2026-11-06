@@ -54,3 +54,18 @@ class RejectBody(BaseModel):
     comment: str = Field(max_length=500)
 
     _c = field_validator("comment")(_clean)
+
+
+class OnDutyApply(BaseModel):
+    client_location_id: uuid.UUID
+    from_date: dt.date
+    to_date: dt.date
+    reason: str = Field(max_length=500)
+
+    _r = field_validator("reason")(_clean)
+
+    @model_validator(mode="after")
+    def _dates(self) -> OnDutyApply:
+        if self.to_date < self.from_date:
+            raise ValueError("to_date must be on or after from_date")
+        return self

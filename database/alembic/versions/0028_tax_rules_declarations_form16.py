@@ -1,7 +1,7 @@
 """Tax year rules, declarations, proofs and Form 16 documents (plan 17 work package 5b)
 
-Revision ID: 0027
-Revises: 0026
+Revision ID: 0028
+Revises: 0027
 
 Plan: docs/plans/17-payroll-phase5.md sections 2.2 and 7 (5b); contract: docs/api-contract.md section 19 (19.6 to 19.8, 19.10).
 
@@ -50,8 +50,8 @@ import json
 
 from migration_sql import run
 
-revision = "0027"
-down_revision = "0026"
+revision = "0028"
+down_revision = "0027"
 branch_labels = None
 depends_on = None
 
@@ -548,7 +548,7 @@ BEGIN
   REVOKE DELETE, TRUNCATE ON tax_proofs FROM app_user;
   REVOKE DELETE, TRUNCATE ON form16_documents FROM app_user;
 EXCEPTION WHEN undefined_object OR insufficient_privilege THEN
-  RAISE NOTICE 'revoke on the 0027 tables skipped';
+  RAISE NOTICE 'revoke on the 0028 tables skipped';
 END
 $$;
 """
@@ -559,12 +559,12 @@ DOWNGRADE = (
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM tax_declarations) OR EXISTS (SELECT 1 FROM tax_proofs) OR EXISTS (SELECT 1 FROM form16_documents) THEN
-    RAISE EXCEPTION 'cannot downgrade 0027: tax declarations, proofs or Form 16 documents exist (their evidence must not be dropped silently)';
+    RAISE EXCEPTION 'cannot downgrade 0028: tax declarations, proofs or Form 16 documents exist (their evidence must not be dropped silently)';
   END IF;
   IF EXISTS (SELECT 1 FROM tax_year_rules WHERE NOT (fy = '"""
     + SEED_FY
     + r"""' AND version = 1 AND status = 'draft' AND created_by IS NULL AND last_edited_by IS NULL)) THEN
-    RAISE EXCEPTION 'cannot downgrade 0027: tax year rules other than the untouched seed exist';
+    RAISE EXCEPTION 'cannot downgrade 0028: tax year rules other than the untouched seed exist';
   END IF;
 END
 $$;

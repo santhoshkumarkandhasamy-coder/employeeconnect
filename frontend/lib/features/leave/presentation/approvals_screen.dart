@@ -33,8 +33,10 @@ class _ApprovalsScreenState extends ConsumerState<ApprovalsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final user = ref.watch(authControllerProvider.select((s) => s is AuthAuthenticated ? s.user : null));
-    final perms = user?.permissions ?? const <String>[];
+    // The admin providers read the mobile session by default and the console
+    // session when overridden, so this screen works in both.
+    final selfId = ref.watch(adminSelfIdProvider);
+    final perms = ref.watch(adminPermissionsProvider);
     final canDecide = canDecideRequests(perms);
     final canClaims = canSeeTeamClaims(perms);
     final async = ref.watch(approvalsProvider(_query));
@@ -57,7 +59,7 @@ class _ApprovalsScreenState extends ConsumerState<ApprovalsScreen> {
     }
 
     void open(RequestItem item) {
-      final own = user != null && item.user?.id == user.id;
+      final own = selfId != null && item.user?.id == selfId;
       showRequestSheet(
         context,
         RequestDetailBody(
@@ -102,14 +104,19 @@ class _ApprovalsScreenState extends ConsumerState<ApprovalsScreen> {
                 segments: [
                   const ButtonSegment(value: 'leave', label: Text('Leave')),
                   const ButtonSegment(value: 'permission', label: Text('Permission')),
+                  const ButtonSegment(value: 'on_duty', label: Text('On duty')),
                   if (canClaims) const ButtonSegment(value: 'claims', label: Text('Claims')),
                 ],
-                selected: {_claims ? 'claims' : _kind.name},
+                selected: {_claims ? 'claims' : _kind == RequestKind.onDuty ? 'on_duty' : _kind.name},
                 onSelectionChanged: (s) => setState(() {
                   final v = s.first;
                   _claims = v == 'claims';
                   if (!_claims) {
-                    _kind = v == 'leave' ? RequestKind.leave : RequestKind.permission;
+                    _kind = v == 'leave'
+                        ? RequestKind.leave
+                        : v == 'permission'
+                            ? RequestKind.permission
+                            : RequestKind.onDuty;
                   }
                 }),
               ),

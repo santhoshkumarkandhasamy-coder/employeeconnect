@@ -5,7 +5,7 @@ recomputation (F3). Approval creates, replaces or removes a `salary_structures` 
 auto-arrears hook of plan 15 for backdated effective dates.
 
 Maker-checker is enforced three times: here (403 FORBIDDEN for the employee, 403 SECOND_PERSON_REQUIRED for the creator or the
-submitter), by the CHECK constraints of migration 0024, and by the audit rows (`maker_id`, `checker_id`).
+submitter), by the CHECK constraints of migration 0025, and by the audit rows (`maker_id`, `checker_id`).
 
 Lock order (F15, increments are outside run processing): salary_increment_batches -> salary_increments -> users ->
 salary_structures -> payroll_arrears. Money, percents, reasons and comments are encrypted columns; audit rows and push payloads

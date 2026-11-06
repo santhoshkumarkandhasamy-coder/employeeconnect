@@ -1,9 +1,8 @@
-"""Migration 0026 (publish requests, payment batches, payslip delivery; plan 17 work package 5a).
+"""Migration 0026 (full and final settlement; plan 16 work package 4b).
 
 The trigger / privilege behaviour needs PostgreSQL (not available in this harness; it was probed by hand against PostgreSQL 16 when the
-migration was written: up / down / up, every CHECK, trigger, partial unique and the guarded downgrade). Here the SQL text, the model
-metadata, the settings catalogue and the generated schema.sql are cross-checked, and the CHECK constraints that SQLite can evaluate are
-exercised through the ORM.
+migration was written, see the commit notes); here the SQL text, the model metadata, the settings catalogue and the generated schema.sql
+are cross-checked. The CHECK constraints that SQLite can evaluate are exercised through the ORM below.
 """
 
 from __future__ import annotations
@@ -18,21 +17,15 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 DB = Path(__file__).resolve().parents[2] / "database"
-MODEL_SRC = (Path(__file__).resolve().parents[1] / "app" / "models" / "payroll_controls.py").read_text(encoding="utf-8")
-NEW_TABLES = (
-    "payroll_publish_requests",
-    "payslip_deliveries",
-    "company_bank_accounts",
-    "payroll_payment_batches",
-    "payroll_payment_lines",
-    "employee_bank_changes",
+MODEL_SRC = "".join(
+    (Path(__file__).resolve().parents[1] / "app" / "models" / f).read_text(encoding="utf-8") for f in ("payroll.py", "payroll_items.py")
 )
 
 
 def _load():
     sys.path.insert(0, str(DB))
     try:
-        spec = importlib.util.spec_from_file_location("mig0026", DB / "alembic" / "versions" / "0026_publish_requests_payments.py")
+        spec = importlib.util.spec_from_file_location("mig0026", DB / "alembic" / "versions" / "0026_fnf_settlements.py")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
     finally:
@@ -43,275 +36,156 @@ def _load():
 def test_chain_and_reversible():
     mod = _load()
     assert (mod.revision, mod.down_revision) == ("0026", "0025")
+    assert "CREATE TABLE fnf_settlements (" in mod.UPGRADE
+    assert "DROP TABLE IF EXISTS fnf_settlements;" in mod.DOWNGRADE
     sys.path.insert(0, str(DB))
     try:
         from migration_sql import split_sql  # type: ignore
 
         up, down = split_sql(mod.UPGRADE), split_sql(mod.DOWNGRADE)
+        assert all(up) and all(down)
+        # trigger functions and DO blocks are kept whole (semicolons inside $$ ... $$)
+        assert sum(s.startswith("CREATE FUNCTION fnf_settlements_lock") for s in up) == 1
+        assert sum(s.startswith("CREATE FUNCTION payroll_fnf_id_immutable") for s in up) == 1
+        assert sum(s.startswith("DO $$") for s in up) == 1
+        assert sum(s.startswith("DO $$") for s in down) == 1
+        assert not any(s.startswith(("BEGIN", "DECLARE", "IF ")) for s in up + down)
     finally:
         sys.path.remove(str(DB))
-    assert all(up) and all(down)
-    # trigger functions and DO blocks are kept whole (semicolons inside $$ ... $$)
-    for fn in (
-        "payroll_contributors_guard",
-        "company_bank_accounts_lock",
-        "employee_payroll_details_bank_guard",
-        "payroll_publish_requests_lock",
-        "payroll_publish_requests_tagged",
-        "payroll_publish_requests_checker_guard",
-        "employee_bank_changes_append_only",
-        "payroll_payslip_failed_by",
-        "payslip_deliveries_lock",
-        "payroll_payment_batches_lock",
-        "payroll_payment_batches_consistency",
-        "payroll_payment_lines_lock",
-    ):
-        assert sum(s.startswith(f"CREATE FUNCTION {fn}(") for s in up) == 1, fn
-        assert f"DROP FUNCTION IF EXISTS {fn}(" in mod.DOWNGRADE, fn
-    assert sum(s.startswith("DO $$") for s in up) == 1 and sum(s.startswith("DO $$") for s in down) == 1
-    assert not any(s.startswith(("BEGIN", "DECLARE", "IF ")) for s in up + down)
     d = mod.DOWNGRADE
-    # the guard runs first; dependants go before what they reference
+    # the guard runs first; the tagged columns go before the table they reference
     assert d.lstrip().startswith("DO $$") and "cannot downgrade 0026" in d
-    # L6: the guarded downgrade refuses while ANY publish request, delivery, batch or line exists
-    guard = d.split("$$;")[0]
-    for t in ("payroll_publish_requests", "payslip_deliveries", "payroll_payment_batches", "payroll_payment_lines"):
-        assert f"EXISTS (SELECT 1 FROM {t})" in guard, t
-    assert "WHERE status" not in guard
-    for t in NEW_TABLES:
-        assert f"DROP TABLE IF EXISTS {t};" in d, t
-    assert d.index("DROP TABLE IF EXISTS payroll_payment_lines") < d.index("DROP TABLE IF EXISTS payroll_payment_batches")
-    assert d.index("DROP TABLE IF EXISTS payroll_payment_batches") < d.index("DROP TABLE IF EXISTS company_bank_accounts")
-    assert d.index("DROP TABLE IF EXISTS payroll_publish_requests") < d.index("DROP FUNCTION IF EXISTS payroll_contributors_guard")
-    for col in ("payroll_runs.contributors", "payslips.contributors"):
-        t, c = col.split(".")
-        assert f"ALTER TABLE {t} DROP COLUMN IF EXISTS {c}" in d
-    assert "ALTER TABLE employee_payroll_details DROP COLUMN IF EXISTS bank_changed_by" in d
-    assert "DROP TRIGGER IF EXISTS trg_employee_payroll_details_bank_guard ON employee_payroll_details" in d
-    # the events CHECKs are restored after the new history rows are deleted (append-only trigger disabled for that statement)
-    assert d.index("DISABLE TRIGGER trg_payroll_item_events_no_update_delete") < d.index("DELETE FROM payroll_item_events")
-    assert d.index("DELETE FROM payroll_item_events") < d.index("ENABLE TRIGGER trg_payroll_item_events_no_update_delete")
-    assert d.index("ENABLE TRIGGER trg_payroll_item_events_no_update_delete") < d.index("ADD CONSTRAINT ck_payroll_item_events_action")
-    assert "'export','confirm','expire','stale'" not in d.split("ck_payroll_item_events_action CHECK")[1].split(";")[0]
-    # nothing in the new tables is ON DELETE SET NULL: no pg_trigger_depth() escape anywhere
-    assert "SET NULL" not in mod.UPGRADE.replace("ON DELETE SET NULL of", "") and "pg_trigger_depth" not in mod.UPGRADE.replace("pg_trigger_depth() escape", "")
+    assert d.index("ALTER TABLE payroll_one_time_items DROP COLUMN IF EXISTS fnf_id") < d.index("DROP TABLE IF EXISTS fnf_settlements;")
+    assert d.index("ALTER TABLE leave_encashments DROP COLUMN IF EXISTS fnf_id") < d.index("DROP TABLE IF EXISTS fnf_settlements;")
+    assert d.index("ALTER TABLE payroll_loan_installments DROP COLUMN IF EXISTS fnf_id") < d.index("DROP TABLE IF EXISTS fnf_settlements;")
+    assert "DROP FUNCTION IF EXISTS fnf_settlements_lock()" in d and "DROP FUNCTION IF EXISTS payroll_fnf_id_immutable()" in d
+    # the old one-time item code CHECK is restored without NOTICE_RECOVERY, after the system rows are deleted
+    assert d.index("DELETE FROM payroll_one_time_items WHERE code = 'NOTICE_RECOVERY'") < d.index(
+        "ADD CONSTRAINT ck_payroll_one_time_items_code CHECK (code IN ('BONUS','INCENTIVE','OTHER_EARNING','OTHER_DEDUCTION'))"
+    )
+    assert "ALTER TABLE employee_payroll_details DROP COLUMN IF EXISTS last_working_day" in d
+    assert "ALTER TABLE employee_payroll_details DROP COLUMN IF EXISTS notice_period_days" in d
 
 
-def test_contributors_columns_backfill_and_guard():
+def test_maker_checker_checks_live_in_the_database():
     up = _load().UPGRADE
-    assert "ALTER TABLE payroll_runs ADD COLUMN contributors text[] NOT NULL DEFAULT '{}'" in up
-    assert "ALTER TABLE payslips ADD COLUMN contributors text[] NOT NULL DEFAULT '{}'" in up
-    # backfill with the lock triggers switched off (published rows are locked), switched back on afterwards
-    assert up.index("DISABLE TRIGGER trg_payslips_lock") < up.index("UPDATE payslips SET contributors") < up.index("ENABLE TRIGGER trg_payslips_lock")
-    assert up.index("DISABLE TRIGGER trg_payroll_runs_lock") < up.index("UPDATE payroll_runs SET contributors") < up.index("ENABLE TRIGGER trg_payroll_runs_lock")
-    assert "created_by::text, updated_by::text, processed_by::text" in up and "created_by::text, processed_by::text" in up
-    assert up.index("UPDATE payslips SET contributors") < up.index("CREATE TRIGGER trg_payslips_contributors")  # triggers come after the backfill
-    body = up.split("CREATE FUNCTION payroll_contributors_guard")[1].split("$$;")[0]
-    assert "NOT (NEW.contributors @> OLD.contributors)" in body  # only grows
-    assert "OLD.status NOT IN ('draft','processed')" in body  # frozen once published / superseded
-    assert "BEFORE UPDATE OF contributors ON payroll_runs" in up and "BEFORE UPDATE OF contributors ON payslips" in up
+    assert "CONSTRAINT ck_fnf_settlements_maker_not_employee CHECK (created_by <> user_id)" in up
+    # the checker must differ from the employee, creator, last editor, submitter and every contributor, for EVERY status
+    assert (
+        "CONSTRAINT ck_fnf_settlements_checker CHECK (decided_by IS NULL OR (decided_by <> user_id "
+        "AND decided_by IS DISTINCT FROM created_by AND decided_by IS DISTINCT FROM last_edited_by "
+        "AND decided_by IS DISTINCT FROM submitted_by))" in up
+    )
+    assert (
+        "CONSTRAINT ck_fnf_settlements_checker_history CHECK (decided_by IS NULL OR decided_by::text <> ALL (contributors))" in up
+    )
+    assert "last_edited_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT" in up
+    assert "created_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT" in up
+    assert "contributors text[] NOT NULL DEFAULT '{}'" in up
+    assert "CONSTRAINT ck_fnf_settlements_decided_status CHECK (status NOT IN ('approved','settled') OR decided_by IS NOT NULL)" in up
+    assert "CONSTRAINT ck_fnf_settlements_summary CHECK (status NOT IN ('approved','settled') OR summary_enc IS NOT NULL)" in up
+    assert "CONSTRAINT ck_fnf_settlements_settled CHECK ((status = 'settled') = (final_payslip_id IS NOT NULL))" in up
+    assert "CONSTRAINT ck_fnf_settlements_cancelled CHECK (status <> 'cancelled' OR cancel_reason_enc IS NOT NULL)" in up
+    assert "CREATE UNIQUE INDEX uq_fnf_settlements_live ON fnf_settlements (user_id) WHERE status IN ('draft','submitted','approved')" in up
+    assert "CONSTRAINT ck_fnf_settlements_resignation CHECK (resignation_date IS NULL OR resignation_date <= last_working_day)" in up
+    assert "CONSTRAINT ck_fnf_settlements_shortfall_reason CHECK (exit_reason = 'resignation' OR shortfall_days = 0)" in up
+    assert "CONSTRAINT ck_fnf_settlements_shortfall_waived CHECK (NOT notice_waived OR shortfall_days = 0)" in up
+    # settlement month: LWD month .. LWD month + 3, immutable arithmetic (no date_trunc -> timestamptz)
+    assert "make_date(extract(year from last_working_day)::int" in up and "INTERVAL '3 months'" in up
+    assert "date_trunc" not in up
 
 
-def test_publish_request_maker_checker_in_the_database():
+def test_lock_trigger_and_privileges():
     up = _load().UPGRADE
-    tbl = up.split("CREATE TABLE payroll_publish_requests (")[1].split("\n);")[0]
+    body = up.split("CREATE FUNCTION fnf_settlements_lock")[1].split("$$;")[0]
     for needle in (
-        "CONSTRAINT ck_payroll_publish_requests_checker CHECK (decided_by IS NULL OR decided_by <> requested_by)",
-        "CONSTRAINT ck_payroll_publish_requests_checker_history CHECK (decided_by IS NULL OR decided_by::text <> ALL (makers))",
-        "CONSTRAINT ck_payroll_publish_requests_requester_in_makers CHECK (decided_by IS NULL OR requested_by::text = ANY (makers))",
-        "CONSTRAINT ck_payroll_publish_requests_decided_status CHECK ((status IN ('approved','rejected')) = (decided_by IS NOT NULL))",
-        "CONSTRAINT ck_payroll_publish_requests_scope_payslip CHECK ((scope = 'payslip') = (payslip_id IS NOT NULL))",
-        "CONSTRAINT ck_payroll_publish_requests_status CHECK (status IN ('submitted','approved','rejected','withdrawn','stale'))",
-        "'RUN_REOPENED','RUN_REFRESHED','PAYSLIP_CHANGED','EXPIRED'",
-        "CONSTRAINT ck_payroll_publish_requests_stale_pair CHECK ((status = 'stale') = (stale_reason IS NOT NULL))",
-        "CONSTRAINT ck_payroll_publish_requests_mac CHECK (snapshot_mac ~ '^[0-9a-f]{64}$')",
-        "CONSTRAINT ck_payroll_publish_requests_rejected_comment CHECK (status <> 'rejected' OR decision_comment_enc IS NOT NULL)",
-        "snapshot_enc bytea NOT NULL",
-        "makers text[] NOT NULL DEFAULT '{}'",
-        "run_id uuid NOT NULL REFERENCES payroll_runs(id) ON DELETE RESTRICT",
-        "payslip_id uuid REFERENCES payslips(id) ON DELETE RESTRICT",
-    ):
-        assert needle in tbl, needle
-    # one open request per run (scope run) and per payslip (scope payslip)
-    assert "uq_payroll_publish_requests_open_run ON payroll_publish_requests (run_id) WHERE scope = 'run' AND status = 'submitted'" in up
-    assert "uq_payroll_publish_requests_open_payslip ON payroll_publish_requests (payslip_id) WHERE scope = 'payslip' AND status = 'submitted'" in up
-    lock = up.split("CREATE FUNCTION payroll_publish_requests_lock")[1].split("$$;")[0]
-    for needle in (
-        "NEW.status <> 'submitted' OR NEW.decided_by IS NOT NULL",  # inserts are plain submitted requests
-        "r.status = 'processed'",  # scope run needs a processed run
-        "r.status = 'published' AND p.id = NEW.payslip_id AND p.status = 'processed'",  # scope payslip: revision / held payslip of a published run
-        "NOT (NEW.makers @> OLD.makers)",
+        "NEW.status <> 'draft'",  # an insert must be a draft
+        "OLD.status <> 'draft'",  # only a draft can be deleted
+        "NEW.user_id IS DISTINCT FROM OLD.user_id OR NEW.created_by IS DISTINCT FROM OLD.created_by",
+        "NOT (NEW.contributors @> OLD.contributors)",  # contributors only grow
         "app.key_rotation",
         "payroll_strip_enc(to_jsonb(NEW)) IS NOT DISTINCT FROM payroll_strip_enc(to_jsonb(OLD))",
-        "('submitted>approved','submitted>rejected','submitted>withdrawn','submitted>stale')",
-        "ARRAY['status','decided_by','decided_at','decision_comment_enc','makers']",
-        "ARRAY['status','withdrawn_by','withdrawn_at']",
-        "ARRAY['status','stale_reason']",
-        "j_new IS DISTINCT FROM j_old",
-        "cannot be deleted",
-    ):
-        assert needle in lock, needle
-    guard = up.split("CREATE FUNCTION payroll_publish_requests_checker_guard")[1].split("$$;")[0]
-    assert "NEW.decided_by::text = ANY (r.contributors)" in guard and "NEW.decided_by::text = ANY (p.contributors)" in guard
-    assert "p.user_id = NEW.decided_by" in guard and "NOT p.hold" in guard
-    assert "BEFORE INSERT OR UPDATE OF decided_by ON payroll_publish_requests" in up
-    assert "p.run_id" in up.split("CREATE FUNCTION payroll_publish_requests_tagged")[1].split("$$;")[0]
-    assert "REVOKE DELETE, TRUNCATE ON payroll_publish_requests FROM app_user" in up
-
-
-def test_payment_batches_and_lines():
-    up = _load().UPGRADE
-    b = up.split("CREATE TABLE payroll_payment_batches (")[1].split("\n);")[0]
-    for needle in (
-        "CONSTRAINT uq_payroll_payment_batches_reference UNIQUE (reference)",
-        "CHECK (status IN ('draft','submitted','approved','exported','closed','cancelled'))",
-        "CONSTRAINT ck_payroll_payment_batches_file CHECK ((status IN ('exported','closed')) = (file_sha256 IS NOT NULL))",
-        "CONSTRAINT ck_payroll_payment_batches_exported CHECK ((status IN ('exported','closed')) = (exported_by IS NOT NULL))",
-        "CONSTRAINT ck_payroll_payment_batches_checker CHECK (decided_by IS NULL OR (decided_by IS DISTINCT FROM created_by "
-        "AND decided_by IS DISTINCT FROM last_edited_by AND decided_by IS DISTINCT FROM submitted_by))",
-        "CONSTRAINT ck_payroll_payment_batches_checker_history CHECK (decided_by IS NULL OR decided_by::text <> ALL (contributors))",
-        "CONSTRAINT ck_payroll_payment_batches_contributors CHECK (created_by::text = ANY (contributors) AND last_edited_by::text = ANY (contributors) "
-        "AND (submitted_by IS NULL OR submitted_by::text = ANY (contributors)))",
-        "CONSTRAINT ck_payroll_payment_batches_decided_status CHECK (status NOT IN ('approved','exported','closed') OR decided_by IS NOT NULL)",
-        "CONSTRAINT ck_payroll_payment_batches_live_mac CHECK (status NOT IN ('submitted','approved','exported','closed') OR lines_mac IS NOT NULL)",
-        "CONSTRAINT ck_payroll_payment_batches_draft_mac CHECK (status <> 'draft' OR lines_mac IS NULL)",
-        "CONSTRAINT ck_payroll_payment_batches_cancelled CHECK (status <> 'cancelled' OR cancel_reason_enc IS NOT NULL)",
-        "CHECK (reference ~ '^PAY-[0-9]{4}-[0-9]{2}-[0-9]{2,4}$')",
-        "format text NOT NULL DEFAULT 'generic_neft_csv'",
-        "payment_type text NOT NULL DEFAULT 'NEFT'",
-        "debit_account_id uuid NOT NULL REFERENCES company_bank_accounts(id) ON DELETE RESTRICT",
-    ):
-        assert needle in b, needle
-    lock = up.split("CREATE FUNCTION payroll_payment_batches_lock")[1].split("$$;")[0]
-    for needle in (
-        "NEW.status <> 'draft'",
-        "r.status = 'published'",
-        "a.active",
-        "OLD.status <> 'draft'",  # only a draft can be deleted
-        "NEW.reference IS DISTINCT FROM OLD.reference",
-        "NOT (NEW.contributors @> OLD.contributors)",
-        "app.key_rotation",
-        "('draft>submitted','draft>cancelled','submitted>draft','submitted>approved','submitted>cancelled','approved>exported','approved>cancelled','exported>closed')",
-        "submitting clears an earlier decision",
-        "l.status = 'pending'",  # nothing to submit
-        "l.user_id = NEW.decided_by",  # the approver is paid by the batch
-        "h.changed_by = NEW.decided_by",  # M5: ANY recent bank change of the history by the approver
-        "JOIN employee_bank_changes h ON h.user_id = l.user_id",
-        "GREATEST(COALESCE(",  # H1: the look-back window has a floor of 7 days in the database too
-        "), 7) INTO alert_days",
-        "payroll_payslip_failed_by(l.payslip_id, NEW.decided_by)",  # H2: whoever failed the payment cannot approve the re-batch
-        "payroll_payslip_failed_by(l.payslip_id, NEW.submitted_by)",  # ... nor submit it
-        "the debit account must be active",  # L4
-        "payroll.bank_change_alert_days",
-        "ARRAY['status','exported_by','exported_at','file_sha256']",
+        "'draft>submitted','draft>cancelled','submitted>draft','submitted>approved','submitted>cancelled','approved>draft','approved>settled'",
+        "OLD.status = 'submitted' AND NEW.status = 'submitted'",  # frozen between submit and approve
+        "OLD.status = 'approved' AND NEW.status = 'approved'",
+        "ARRAY['status','decided_by','decided_at','decision_comment_enc','summary_enc']",  # approve changes only the decision columns
+        "allowed || ARRAY['final_payslip_id']",  # arrays, not an untyped literal (malformed array literal on PostgreSQL 16)
         "j_new IS DISTINCT FROM j_old",
     ):
-        assert needle in lock, needle
-    assert "CREATE CONSTRAINT TRIGGER trg_payroll_payment_batches_consistency AFTER INSERT OR UPDATE ON payroll_payment_batches DEFERRABLE INITIALLY DEFERRED" in up
-    ln = up.split("CREATE TABLE payroll_payment_lines (")[1].split("\n);")[0]
-    for needle in (
-        "CONSTRAINT uq_payroll_payment_lines_batch_seq UNIQUE (batch_id, seq)",
-        "batch_id uuid NOT NULL REFERENCES payroll_payment_batches(id) ON DELETE RESTRICT",
-        "payslip_id uuid NOT NULL REFERENCES payslips(id) ON DELETE RESTRICT",
-        "amount_enc bytea NOT NULL",
-        "beneficiary_enc bytea NOT NULL",
-        "'BANK_DETAILS_CHANGED','RECENT_BANK_CHANGE','REVISION_DELTA','NO_PAN','PREVIOUSLY_FAILED'",
-        "failed_by uuid REFERENCES users(id) ON DELETE RESTRICT",
-        "CONSTRAINT ck_payroll_payment_lines_failed_by CHECK ((status = 'failed') = (failed_by IS NOT NULL))",
-        "CONSTRAINT ck_payroll_payment_lines_failed_self CHECK (failed_by IS NULL OR failed_by <> user_id)",
-        "CHECK (status IN ('pending','excluded','exported','paid','failed'))",
-        "CHECK (account_source = 'snapshot' OR 'BANK_DETAILS_CHANGED' = ANY (flags))",
-    ):
-        assert needle in ln, needle
-    # one live line per payslip
-    assert "uq_payroll_payment_lines_live ON payroll_payment_lines (payslip_id) WHERE status IN ('pending','exported','paid')" in up
-    ll = up.split("CREATE FUNCTION payroll_payment_lines_lock")[1].split("$$;")[0]
-    for needle in (
-        "ps.run_id IS DISTINCT FROM b_run",  # tagged row: payslip of the batch's run
-        "ps.user_id IS DISTINCT FROM NEW.user_id",  # tagged row: same employee
-        "ps.status <> 'published' OR ps.hold",
-        "b_status IS DISTINCT FROM 'draft'",
-        "NEW.batch_id IS DISTINCT FROM OLD.batch_id OR NEW.payslip_id IS DISTINCT FROM OLD.payslip_id OR NEW.user_id IS DISTINCT FROM OLD.user_id",
-        "('pending>excluded','excluded>pending','pending>exported','exported>paid','exported>failed')",
-        "ARRAY['status','amount_enc','beneficiary_enc','flags','account_source']",
-        "ARRAY['status','reference_enc','paid_on','failed_by']",
-        "payroll_payslip_failed_by(NEW.payslip_id, NEW.updated_by)",
-        "j_new IS DISTINCT FROM j_old",
-    ):
-        assert needle in ll, needle
-    for t in ("payroll_payment_batches", "payroll_payment_lines", "company_bank_accounts", "payslip_deliveries"):
-        assert f"REVOKE DELETE, TRUNCATE ON {t} FROM app_user" in up, t
+        assert needle in body, needle
+    # no FK of the table is ON DELETE SET NULL, hence no pg_trigger_depth() escape
+    assert "pg_trigger_depth" not in body
+    assert "SET NULL" not in up.split("CREATE TABLE fnf_settlements (")[1].split("CREATE UNIQUE INDEX")[0]
+    assert "trg_fnf_settlements_lock BEFORE INSERT OR UPDATE OR DELETE ON fnf_settlements" in up
     # alphabetical trigger order: the lock sees the row before set_updated_at bumps updated_at
-    assert "trg_payroll_payment_batches_lock" < "trg_payroll_payment_batches_updated_at"
+    assert "trg_fnf_settlements_lock" < "trg_fnf_settlements_updated_at"
+    assert "trg_fnf_settlements_updated_at BEFORE UPDATE ON fnf_settlements" in up
+    assert "REVOKE DELETE, TRUNCATE ON fnf_settlements FROM app_user" in up
 
 
-def test_delivery_accounts_and_details_marker():
-    up = _load().UPGRADE
-    dl = up.split("CREATE TABLE payslip_deliveries (")[1].split("\n);")[0]
-    assert "payslip_id uuid PRIMARY KEY REFERENCES payslips(id) ON DELETE RESTRICT" in dl
-    assert "push_count BETWEEN 0 AND 10" in dl and "reminders BETWEEN 0 AND 3" in dl
-    body = up.split("CREATE FUNCTION payslip_deliveries_lock")[1].split("$$;")[0]
-    assert "write-once" in body and "NEW.push_count < OLD.push_count" in body and "p.user_id" in body
-    acct = up.split("CREATE TABLE company_bank_accounts (")[1].split("\n);")[0]
-    for col in ("bank_name_enc bytea NOT NULL", "account_enc bytea NOT NULL", "ifsc_enc bytea NOT NULL"):
-        assert col in acct, col
-    assert "uq_company_bank_accounts_default ON company_bank_accounts (is_default) WHERE is_default AND active" in up
-    lock = up.split("CREATE FUNCTION company_bank_accounts_lock")[1].split("$$;")[0]
-    assert "NEW.account_enc IS DISTINCT FROM OLD.account_enc OR NEW.ifsc_enc IS DISTINCT FROM OLD.ifsc_enc" in lock and "app.key_rotation" in lock
-    assert "ALTER TABLE employee_payroll_details ADD COLUMN bank_changed_by uuid REFERENCES users(id) ON DELETE RESTRICT" in up
-    assert "ALTER TABLE employee_payroll_details ADD COLUMN bank_changed_at timestamptz" in up
-    assert "CREATE INDEX ix_employee_payroll_details_bank_changed_by ON employee_payroll_details (bank_changed_by)" in up
-    g = up.split("CREATE FUNCTION employee_payroll_details_bank_guard")[1].split("$$;")[0]
-    assert "NEW.bank_changed_at IS NULL OR NEW.bank_changed_by IS NULL OR NEW.bank_changed_at < OLD.bank_changed_at" in g
-    assert "NEW.payment_mode IS DISTINCT FROM OLD.payment_mode" in g and "app.key_rotation" in g
-    # L5: BEFORE INSERT too (bank data on insert), and every bank change needs a strictly newer marker
-    assert "BEFORE INSERT OR UPDATE ON employee_payroll_details" in up and "TG_OP = 'INSERT'" in g
-    assert "NEW.bank_changed_at <= OLD.bank_changed_at" in g
-    # M1: the history is written by the same trigger and is append-only
-    assert "INSERT INTO employee_bank_changes" in g and "BEFORE UPDATE OR DELETE ON employee_bank_changes" in up
-    assert "REVOKE DELETE, TRUNCATE ON employee_bank_changes FROM app_user" in up
-
-
-def test_events_and_settings():
+def test_tagged_columns_and_reserved_code():
     mod = _load()
     up = mod.UPGRADE
-    assert "'increment','fnf','publish_request','payment_batch'" in up
-    assert "'export','confirm','expire','stale'" in up
+    for t in ("payroll_one_time_items", "leave_encashments", "payroll_loan_installments"):
+        assert f"ALTER TABLE {t} ADD COLUMN fnf_id uuid REFERENCES fnf_settlements(id) ON DELETE RESTRICT" in up, t
+        assert f"CREATE INDEX ix_{t}_fnf_id ON {t} (fnf_id)" in up, t
+        assert f"trg_{t}_fnf_id_immutable BEFORE UPDATE OF fnf_id ON {t}" in up, t
+        assert f"DROP TRIGGER IF EXISTS trg_{t}_fnf_id_immutable ON {t}" in mod.DOWNGRADE, t
+    body = up.split("CREATE FUNCTION payroll_fnf_id_immutable")[1].split("$$;")[0]
+    assert "IF NEW.fnf_id IS DISTINCT FROM OLD.fnf_id THEN" in body  # INSERT-only: NULL -> value on UPDATE is refused too (review L2)
+    assert "CHECK (code IN ('BONUS','INCENTIVE','OTHER_EARNING','OTHER_DEDUCTION','NOTICE_RECOVERY'))" in up
+    assert "CHECK (code <> 'NOTICE_RECOVERY' OR fnf_id IS NOT NULL)" in up  # system-only
+    assert "CHECK (fnf_id IS NULL OR batch_id IS NULL)" in up
+    assert "ck_leave_encashments_fnf_source CHECK (fnf_id IS NULL OR source = 'fnf')" in up
+    assert "ck_payroll_loan_installments_fnf_kind CHECK (fnf_id IS NULL OR kind = 'foreclosure')" in up
+    # payroll_item_events: 0025 already allows 'fnf' and the F&F actions, 0026 does not touch the CHECKs
+    assert "payroll_item_events" not in up
+    prev = (DB / "alembic" / "versions" / "0025_salary_increments.py").read_text(encoding="utf-8")
+    assert "'overtime','increment','fnf'" in prev and "'submit','withdraw','settle','revoke','remove'" in prev
+
+
+def test_details_columns_and_encrypted_columns():
+    up = _load().UPGRADE
+    assert "ALTER TABLE employee_payroll_details ADD COLUMN last_working_day date" in up
+    assert "ALTER TABLE employee_payroll_details ADD COLUMN notice_period_days smallint" in up
+    assert "notice_period_days IS NULL OR notice_period_days BETWEEN 0 AND 365" in up
+    tbl = up.split("CREATE TABLE fnf_settlements (")[1].split(");")[0]
+    for col in (
+        "plan_enc bytea NOT NULL",
+        "summary_enc bytea",
+        "remarks_enc bytea",
+        "decision_comment_enc bytea",
+        "cancel_reason_enc bytea",
+    ):
+        assert col in tbl, col
+
+
+def test_settings():
+    mod = _load()
+    up = mod.UPGRADE
     from app.services import payroll_settings as pset
 
-    expected = {
-        "payroll.publish_request_ttl_hours": ("72", 72),
-        "payroll.bank_file_format": ('"generic_neft_csv"', "generic_neft_csv"),
-        "payroll.bank_payment_type": ('"NEFT"', "NEFT"),
-        "payroll.bank_change_alert_days": ("30", 30),
-    }
-    for key, (sql, py) in expected.items():
-        assert f"('{key}', '{sql}'::jsonb)" in up, key
-        assert key in mod.DOWNGRADE, key
-        assert pset.DEFAULTS[key] == py and type(pset.DEFAULTS[key]) is type(py), key
-    assert pset.validate("payroll.publish_request_ttl_hours", 1) == 1 and pset.validate("payroll.publish_request_ttl_hours", 336) == 336
-    assert pset.validate("payroll.bank_change_alert_days", 7) == 7 and pset.validate("payroll.bank_change_alert_days", 90) == 90
-    assert "bank_file_requires_second_person" not in up and "bank_file_requires_second_person" not in mod.DOWNGRADE  # L1
-    assert "payroll.bank_file_requires_second_person" not in pset.DEFAULTS
-    assert pset.validate("payroll.bank_payment_type", "RTGS") == "RTGS"
+    keys = ("notice_period_days", "notice_recovery_basis", "notice_recovery_divisor")
+    for k in keys:
+        assert f"payroll.{k}" in up and f"payroll.{k}" in mod.DOWNGRADE and f"payroll.{k}" in pset.DEFAULTS, k
+    assert "('payroll.notice_period_days', '30'::jsonb)" in up and pset.DEFAULTS["payroll.notice_period_days"] == 30
+    assert "('payroll.notice_recovery_basis', '\"gross\"'::jsonb)" in up and pset.DEFAULTS["payroll.notice_recovery_basis"] == "gross"
+    assert "('payroll.notice_recovery_divisor', '30'::jsonb)" in up and pset.DEFAULTS["payroll.notice_recovery_divisor"] == 30
+    # ranges of 18.11
+    assert pset.validate("payroll.notice_period_days", 365) == 365 and pset.validate("payroll.notice_period_days", 0) == 0
+    assert pset.validate("payroll.notice_recovery_divisor", 31) == 31
+    assert pset.validate("payroll.notice_recovery_basis", "basic") == "basic"
     from app.core.errors import AppError
 
     for key, bad in (
-        ("payroll.publish_request_ttl_hours", 0),
-        ("payroll.publish_request_ttl_hours", 337),
-        ("payroll.bank_change_alert_days", -1),
-        ("payroll.bank_change_alert_days", 0),
-        ("payroll.bank_change_alert_days", 6),
-        ("payroll.bank_change_alert_days", 91),
-        ("payroll.bank_payment_type", "UPI"),
-        ("payroll.bank_file_format", "swift"),
-        ("payroll.bank_file_requires_second_person", False),
-        ("payroll.bank_change_alert_days", True),
+        ("payroll.notice_period_days", 366),
+        ("payroll.notice_period_days", -1),
+        ("payroll.notice_recovery_divisor", 0),
+        ("payroll.notice_recovery_divisor", 32),
+        ("payroll.notice_recovery_basis", "net"),
     ):
         with pytest.raises(AppError):
             pset.validate(key, bad)
-    # no new permission in 5a: the approve / publish / manage codes already exist
-    assert "INSERT INTO permissions" not in up
 
 
 def test_models_match_migration():
@@ -319,69 +193,50 @@ def test_models_match_migration():
     from app.models import Base
 
     up = _load().UPGRADE
-    for name in NEW_TABLES:
-        t = Base.metadata.tables[name]
-        for idx in t.indexes:
-            assert idx.name in up, (name, idx.name)
-        for con in t.constraints:
-            if con.name:
-                assert con.name in up, (name, con.name)
-        for col in t.columns:
-            assert col.name in up, (name, col.name)
-        fk_cols = {c.name for fk in t.foreign_key_constraints for c in fk.columns}
-        indexed = {c.name for i in t.indexes for c in i.columns} | {c.name for c in t.primary_key.columns}
-        indexed |= {c.name for con in t.constraints if con.__class__.__name__ == "UniqueConstraint" for c in con.columns}
-        assert fk_cols <= indexed, (name, fk_cols - indexed)
-        # the reverse: every constraint / index the migration creates for the table is in the model
-        model_names = {c.name for c in t.constraints if c.name} | {i.name for i in t.indexes}
-        mig_obj = set()
-        for line in up.splitlines():
-            s = line.strip()
-            if s.startswith("CONSTRAINT ") and s.split()[1].startswith((f"ck_{name}_", f"uq_{name}_")):
-                mig_obj.add(s.split()[1])
-            for pre in ("CREATE UNIQUE INDEX ", "CREATE INDEX "):
-                if s.startswith(pre) and f" ON {name} " in s:
-                    mig_obj.add(s[len(pre) :].split()[0])
-        # the SQLite harness (conftest) drops checks / partial indexes it cannot evaluate: look in the model source as well
-        missing = {n for n in mig_obj if n not in model_names and n not in MODEL_SRC}
-        assert not missing, (name, missing)
-    import re
-
-    for n in re.findall(r'name="([a-z_0-9]+)"', MODEL_SRC) + re.findall(r'Index\(\s*"([a-z_0-9]+)"', MODEL_SRC):
-        assert n in up, n  # includes the checks / partial indexes the SQLite harness drops
-    enc = {
-        "payroll_publish_requests": {"snapshot_enc": EncryptedJSON, "comment_enc": EncryptedString, "decision_comment_enc": EncryptedString},
-        "company_bank_accounts": {"bank_name_enc": EncryptedString, "account_enc": EncryptedString, "ifsc_enc": EncryptedString},
-        "payroll_payment_batches": {"decision_comment_enc": EncryptedString, "cancel_reason_enc": EncryptedString},
-        "payroll_payment_lines": {"amount_enc": EncryptedString, "beneficiary_enc": EncryptedJSON, "reference_enc": EncryptedString},
-    }
-    for table, cols in enc.items():
-        for c, typ in cols.items():
-            assert isinstance(Base.metadata.tables[table].c[c].type, typ), (table, c)
-    for table in ("payroll_runs", "payslips"):
-        t = Base.metadata.tables[table]
-        assert "contributors" in t.c and not t.c.contributors.nullable
-    det = Base.metadata.tables["employee_payroll_details"]
-    assert {"bank_changed_by", "bank_changed_at"} <= set(det.c.keys())
-    assert any(i.name == "ix_employee_payroll_details_bank_changed_by" for i in det.indexes)
-    assert "ck_employee_payroll_details_bank_changed" in {c.name for c in det.constraints}
-    ev = {c.name: str(c.sqltext) for c in Base.metadata.tables["payroll_item_events"].constraints if c.name}
-    assert "'publish_request','payment_batch'" in ev["ck_payroll_item_events_item_type"]
-    assert "'export','confirm','expire','stale'" in ev["ck_payroll_item_events_action"]
+    t = Base.metadata.tables["fnf_settlements"]
+    for idx in t.indexes:
+        assert idx.name in up, idx.name
+    for con in t.constraints:
+        if con.name:
+            assert con.name in up, con.name
+    for col in t.columns:
+        assert col.name in up, col.name
+    fk_cols = {c.name for fk in t.foreign_key_constraints for c in fk.columns}
+    indexed = {c.name for i in t.indexes for c in i.columns} | {c.name for c in t.primary_key.columns}
+    assert fk_cols <= indexed, fk_cols - indexed
+    assert isinstance(t.c.plan_enc.type, EncryptedJSON) and isinstance(t.c.summary_enc.type, EncryptedJSON)
+    for c in ("remarks_enc", "decision_comment_enc", "cancel_reason_enc"):
+        assert isinstance(t.c[c].type, EncryptedString), c
+    for name, cols, chk in (
+        ("payroll_one_time_items", ("fnf_id",), ("ck_payroll_one_time_items_notice_system", "ck_payroll_one_time_items_fnf_batch")),
+        ("leave_encashments", ("fnf_id",), ("ck_leave_encashments_fnf_source",)),
+        ("payroll_loan_installments", ("fnf_id",), ("ck_payroll_loan_installments_fnf_kind",)),
+        ("employee_payroll_details", ("last_working_day", "notice_period_days"),
+         ("ck_employee_payroll_details_lwd_year", "ck_employee_payroll_details_notice_days")),
+    ):  # fmt: skip
+        tab = Base.metadata.tables[name]
+        for c in cols:
+            assert c in tab.c and c in up
+        for c in chk:
+            # the SQLite harness (conftest) drops checks it cannot evaluate (DATE literals ...): look in the model source as well
+            assert c in up and (c in {x.name for x in tab.constraints} or c in MODEL_SRC), c
+        if "fnf_id" in cols:
+            assert any(i.name == f"ix_{name}_fnf_id" for i in tab.indexes), name
+    ck = {c.name: str(c.sqltext) for c in Base.metadata.tables["payroll_one_time_items"].constraints if c.name}
+    assert "'NOTICE_RECOVERY'" in ck["ck_payroll_one_time_items_code"]
 
 
 def test_schema_sql_mirror():
     sql = (DB / "schema.sql").read_text(encoding="utf-8")
     assert "Running upgrade 0025 -> 0026" in sql and "version_num='0026'" in sql
-    for t in NEW_TABLES:
-        assert f"CREATE TABLE {t} (" in sql, t
-        assert f"REVOKE DELETE, TRUNCATE ON {t} FROM app_user" in sql, t
-    for fn in ("payroll_contributors_guard", "payroll_publish_requests_lock", "payroll_payment_batches_lock", "payroll_payment_lines_lock"):
-        assert f"CREATE FUNCTION {fn}()" in sql, fn
-    assert "uq_payroll_payment_lines_live" in sql and "ck_payroll_publish_requests_checker_history" in sql
-    assert "'payroll.bank_change_alert_days'" in sql
+    assert "CREATE TABLE fnf_settlements (" in sql
+    assert "REVOKE DELETE, TRUNCATE ON fnf_settlements FROM app_user" in sql
+    assert "CREATE FUNCTION fnf_settlements_lock()" in sql and "CREATE FUNCTION payroll_fnf_id_immutable()" in sql
+    assert "ck_fnf_settlements_checker_history" in sql
+    assert "ALTER TABLE payroll_one_time_items ADD COLUMN fnf_id uuid REFERENCES fnf_settlements(id) ON DELETE RESTRICT" in sql
+    assert "'payroll.notice_recovery_divisor'" in sql
     # the %% escapes of the DDL layer are resolved in the generated script
-    assert "payment batch % is % and locked" in sql
+    assert "final settlement % is % and locked" in sql
 
 
 # ---- CHECK constraints SQLite can evaluate, through the ORM ----------------------------------------------------------------
@@ -402,103 +257,46 @@ async def _users(session, n: int):
     return out
 
 
+def _fnf(emp, maker, **kw):
+    from app.models import FnfSettlement
+
+    base = dict(
+        user_id=emp.id, last_working_day=dt.date(2026, 12, 15), exit_reason="resignation", settlement_period=dt.date(2026, 12, 1),
+        notice_required_days=30, plan={"items": []}, created_by=maker.id, contributors=[str(maker.id)],
+    )  # fmt: skip
+    base.update(kw)
+    return FnfSettlement(**base)
+
+
 @pytest.mark.asyncio
-async def test_orm_defaults_and_checks(engine):
+async def test_orm_checks(engine):
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from app.models import (
-        CompanyBankAccount,
-        PayrollPaymentBatch,
-        PayrollPaymentLine,
-        PayrollPublishRequest,
-        PayrollRun,
-        Payslip,
-        PayslipDelivery,
-    )
-
-    now = dt.datetime(2026, 10, 1, tzinfo=dt.UTC)
     async with AsyncSession(engine, expire_on_commit=False) as s:
-        maker, checker, emp = await _users(s, 3)
-        run = PayrollRun(period=dt.date(2026, 9, 1), attendance_cutoff=dt.date(2026, 9, 30), config={}, status="published",
-                         published_by=checker.id, published_at=now)  # fmt: skip
-        s.add(run)
+        emp, maker, checker = await _users(s, 3)
+        ok = _fnf(emp, maker)
+        s.add(ok)
         await s.flush()
-        assert run.contributors == []
-        slip = Payslip(run_id=run.id, user_id=emp.id, status="published", employee_snapshot={}, basis_days=30, employed_days=30,
-                       paid_days=30, lop_breakdown={}, inputs={}, result={}, published_by=checker.id, published_at=now)  # fmt: skip
-        s.add(slip)
-        acct = CompanyBankAccount(label="Main", bank_name="HDFC", account="123456789012", ifsc="HDFC0001234", created_by=maker.id)
-        s.add(acct)
-        await s.flush()
-        assert slip.contributors == [] and acct.is_default is False and acct.active is True
-        assert acct.account == "123456789012"  # encrypted at rest, transparent in python
-        s.add(PayslipDelivery(payslip_id=slip.id, user_id=emp.id))
-        batch = PayrollPaymentBatch(run_id=run.id, reference="PAY-2026-09-01", debit_account_id=acct.id, value_date=dt.date(2026, 10, 31),
-                                    created_by=maker.id, contributors=[str(maker.id)])  # fmt: skip
-        s.add(batch)
-        await s.flush()
-        assert batch.status == "draft" and batch.last_edited_by == maker.id and batch.format == "generic_neft_csv"
-        assert batch.payment_type == "NEFT" and batch.version == 1
-        line = PayrollPaymentLine(batch_id=batch.id, payslip_id=slip.id, user_id=emp.id, seq=1, amount="35300.00", beneficiary={"name": "A B"})
-        s.add(line)
-        req = PayrollPublishRequest(run_id=run.id, scope="run", snapshot={"payslips": []}, snapshot_mac="a" * 64, requested_by=maker.id,
-                                    expires_at=now + dt.timedelta(hours=72), requested_at=now)  # fmt: skip
-        s.add(req)
-        await s.flush()
-        assert line.status == "pending" and line.account_source == "snapshot" and line.flags == []
-        assert req.status == "submitted" and req.makers == [] and req.version == 1
+        assert ok.last_edited_by == maker.id  # defaults to the creator
+        assert ok.status == "draft" and ok.version == 1 and ok.shortfall_days == 0 and ok.notice_waived is False
         await s.commit()
 
-        async def refused(obj):
+        async def refused(**kw):
             async with AsyncSession(engine) as s2:
-                s2.add(obj)
+                s2.add(_fnf(emp, maker, **kw))
                 with pytest.raises(IntegrityError):
                     await s2.flush()
 
-        def request(**kw):
-            base = dict(run_id=run.id, scope="run", snapshot={}, snapshot_mac="a" * 64, requested_by=maker.id, requested_at=now,
-                        expires_at=now + dt.timedelta(hours=1))  # fmt: skip
-            base.update(kw)
-            return PayrollPublishRequest(**base)
-
-        await refused(request(scope="batch"))
-        await refused(request(scope="payslip"))  # payslip scope needs a payslip
-        await refused(request(payslip_id=slip.id))  # run scope must not carry one
-        await refused(request(status="done"))
-        await refused(request(stale_reason="EXPIRED"))  # reason only on stale
-        await refused(request(status="stale"))  # stale needs a reason
-        await refused(request(expires_at=now - dt.timedelta(hours=1)))
-        await refused(request(status="approved"))  # approved needs a decider
-        await refused(request(decided_by=maker.id, decided_at=now))  # decider = requester (status/decision mismatch too)
-        await refused(request(status="rejected", decided_by=checker.id, decided_at=now, makers=[str(maker.id)]))  # reject needs a comment
-        await refused(request(status="withdrawn"))  # withdrawn needs who
-        await refused(request(version=0))
-        await refused(PayrollPaymentBatch(run_id=run.id, reference="PAY-2026-09-02", debit_account_id=acct.id, value_date=dt.date(2026, 10, 31),
-                                          created_by=maker.id, last_edited_by=maker.id, contributors=[str(maker.id)], status="exported"))  # fmt: skip
-        await refused(PayrollPaymentBatch(run_id=run.id, reference="PAY-2026-09-02", debit_account_id=acct.id, value_date=dt.date(2026, 10, 31),
-                                          created_by=maker.id, last_edited_by=maker.id, contributors=[str(maker.id)], status="submitted"))  # fmt: skip
-        await refused(PayrollPaymentBatch(run_id=run.id, reference="PAY-2026-09-02", debit_account_id=acct.id, value_date=dt.date(2026, 10, 31),
-                                          created_by=maker.id, last_edited_by=maker.id, contributors=[str(maker.id)], status="cancelled"))  # fmt: skip
-        await refused(PayrollPaymentBatch(run_id=run.id, reference="PAY-2026-09-02", debit_account_id=acct.id, value_date=dt.date(2026, 10, 31),
-                                          created_by=maker.id, last_edited_by=maker.id, contributors=[str(maker.id)], status="nope"))  # fmt: skip
-        await refused(PayrollPaymentBatch(run_id=run.id, reference="PAY-2026-09-02", debit_account_id=acct.id, value_date=dt.date(2026, 10, 31),
-                                          created_by=maker.id, last_edited_by=maker.id, contributors=[str(maker.id)], payment_type="UPI"))  # fmt: skip
-        await refused(PayrollPaymentBatch(run_id=run.id, reference="PAY-2026-09-01", debit_account_id=acct.id, value_date=dt.date(2026, 10, 31),
-                                          created_by=maker.id, contributors=[str(maker.id)]))  # fmt: skip  # duplicate reference
-        await refused(PayrollPaymentBatch(run_id=run.id, reference="PAY-2026-09-03", debit_account_id=acct.id, value_date=dt.date(2026, 10, 31),
-                                          created_by=maker.id, contributors=[str(maker.id)], decided_by=maker.id, decided_at=now))  # fmt: skip  # decider = creator
-
-        def pline(**kw):
-            base = dict(batch_id=batch.id, payslip_id=slip.id, user_id=emp.id, seq=2, amount="1.00", beneficiary={})
-            base.update(kw)
-            return PayrollPaymentLine(**base)
-
-        await refused(pline(seq=1))  # (batch, seq) unique
-        await refused(pline(seq=0))
-        await refused(pline(status="settled"))
-        await refused(pline(account_source="other"))
-        await refused(pline(status="paid"))  # paid needs paid_on
-        await refused(pline(status="pending", paid_on=dt.date(2026, 10, 31)))  # confirmation fields only on paid / failed
-        await refused(pline(status="pending", reference="UTR1"))
-        await refused(PayslipDelivery(payslip_id=slip.id, user_id=emp.id))  # one row per payslip (primary key)
-        await refused(PayslipDelivery(payslip_id=uuid.uuid4(), user_id=emp.id, push_count=11))
+        await refused(created_by=emp.id)  # maker is the employee
+        await refused(exit_reason="fired")
+        await refused(status="settled")  # settled needs a final payslip
+        await refused(status="cancelled")  # cancelled needs a reason
+        await refused(status="approved", submitted_by=checker.id, submitted_at=dt.datetime(2026, 12, 1, tzinfo=dt.UTC))  # no decision
+        await refused(notice_required_days=366)
+        await refused(shortfall_days=31)  # more than the notice
+        await refused(notice_required_days=30, shortfall_days=5, notice_waived=True)
+        await refused(resignation_date=dt.date(2026, 12, 20))  # after the last working day
+        await refused(decided_by=maker.id, decided_at=dt.datetime(2026, 12, 1, tzinfo=dt.UTC))  # checker = creator
+        await refused(decided_by=emp.id, decided_at=dt.datetime(2026, 12, 1, tzinfo=dt.UTC))  # checker = employee
+        await refused(decided_by=checker.id)  # decided_by without decided_at
+        await refused(version=0)

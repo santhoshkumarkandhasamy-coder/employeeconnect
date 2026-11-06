@@ -38,7 +38,7 @@ async def mark_seen(session: AsyncSession, ps: Payslip, *, downloaded: bool) -> 
     now = utcnow()
     try:
         async with session.begin_nested():
-            if await session.get(PayslipDelivery, ps.id) is None:  # published before migration 0026: create the row now
+            if await session.get(PayslipDelivery, ps.id) is None:  # published before migration 0027: create the row now
                 session.add(PayslipDelivery(payslip_id=ps.id, user_id=ps.user_id))
                 await session.flush()
             col = PayslipDelivery

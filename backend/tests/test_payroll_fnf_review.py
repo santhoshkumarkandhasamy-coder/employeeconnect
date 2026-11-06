@@ -298,7 +298,7 @@ async def test_revoke_checks_every_row_belongs_to_the_settlement(client, payroll
 
 
 def test_tagged_row_triggers_in_the_migration():
-    from tests.test_migration_0025 import _load
+    from tests.test_migration_0026 import _load
 
     up = _load().UPGRADE
     body = up.split("CREATE FUNCTION payroll_fnf_user_match")[1].split("$$;")[0]

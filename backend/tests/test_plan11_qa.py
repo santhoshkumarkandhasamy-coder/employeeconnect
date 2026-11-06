@@ -86,7 +86,7 @@ async def test_dashboard_counts_reflect_data(client, admin, seeded, db):
     assert d["employees"] == {"active": 3, "inactive": 1}
     a = d["attendance"]
     assert a["checked_in"] == 2 and a["checked_out"] == 1 and a["late"] == 1
-    assert d["requests"] == {"leave_pending": 1, "permission_pending": 0}
+    assert d["requests"] == {"leave_pending": 1, "permission_pending": 0, "on_duty_pending": 0}
     assert d["food"] == {"date": day.isoformat(), "count_yes": 1, "count_no": 1, "count_unanswered": 1, "tomorrow_yes": 1}
     assert d["announcements"] == {"active": 1}
     assert d["sessions"]["web"] == 1 and d["sessions"]["mobile"] >= 1

@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.rbac import Principal
-from ..models import LeaveRequest, PermissionRequest
+from ..models import LeaveRequest, OnDutyRequest, PermissionRequest
 from . import announcements, celebrations
 from . import attendance as att
 from . import food as food_svc
@@ -43,7 +43,7 @@ async def _attendance(session: AsyncSession, actor: Principal) -> dict[str, Any]
 
 async def _pending(session: AsyncSession, actor: Principal) -> int:
     total = 0
-    for model in (LeaveRequest, PermissionRequest):
+    for model in (LeaveRequest, PermissionRequest, OnDutyRequest):
         total += (
             await session.execute(
                 select(func.count()).select_from(model).where(model.user_id == actor.id, model.status == "pending")

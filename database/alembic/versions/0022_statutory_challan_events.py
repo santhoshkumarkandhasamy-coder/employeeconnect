@@ -1,7 +1,7 @@
 """Statutory challan event log + tighter privileges (security review of payroll statutory: M2, L5)
 
-Revision ID: 0021
-Revises: 0020
+Revision ID: 0022
+Revises: 0021
 
 Added
 * statutory_challan_events  APPEND-ONLY history of every paid / unpaid change of a statutory_challans row. Each event stores the
@@ -19,8 +19,8 @@ Downgrade drops the event table and restores the two privileges.
 
 from migration_sql import run
 
-revision = "0021"
-down_revision = "0020"
+revision = "0022"
+down_revision = "0021"
 branch_labels = None
 depends_on = None
 

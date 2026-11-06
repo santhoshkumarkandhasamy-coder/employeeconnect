@@ -1,7 +1,7 @@
 # 16 - Payroll phase 4: increments, structure import, CTC / gratuity, full and final settlement
 
 Status: PROPOSED. Branch `feature/payroll-phase2` (or `feature/payroll-phase4` cut from it). Source: plan 14 phase 4 (items 12-15).
-Contract: `docs/api-contract.md` section 18 (single source of truth; this plan only explains it). Migrations `0024` (4a) and `0025` (4b), split like 0022 / 0023.
+Contract: `docs/api-contract.md` section 18 (single source of truth; this plan only explains it). Migrations `0025` (4a) and `0026` (4b), split like 0023 / 0024.
 All plan 12 / 15 rules still apply: money as 2-decimal strings / `Decimal`, every amount encrypted at rest, no SQL aggregates on money (D2), audit every view/change
 without amounts, step-up (`current_password`) on sensitive writes, nobody acts on their own money (D9), published = locked (D4), component lifecycle P4-P9 of plan 15.
 Nothing is deployed until the user approves.
@@ -31,7 +31,7 @@ Nothing is deployed until the user approves.
 Common rules of plan 15 section 2 (uuid PK, `*_enc` money/labels/reasons, period checks, `version`, audit columns + `set_updated_at`, FK indexes, `REVOKE DELETE, TRUNCATE FROM app_user`,
 key rotation exception `app.key_rotation='on'` + `payroll_strip_enc` equality with `updated_at` unchanged, per commit f3cdaa5).
 
-### 2.1 Migration 0024 (work package 4a)
+### 2.1 Migration 0025 (work package 4a)
 **`salary_increment_batches`**: `kind CHECK IN ('percent','import')`, `effective_from date NULL` (percent: 1st of month; import: NULL), `percent_enc NULL`, `method CHECK IN (NULL,'proportional','split_from_gross')`,
 `file_sha256 text NULL CHECK ~ '^[0-9a-f]{64}$'`, `rows int CHECK BETWEEN 1 AND 500`, `reason_enc`, `created_by NOT NULL`, `created_at`, `cancelled_at`, `cancelled_by`.
 `CHECK ((kind='import') = (file_sha256 IS NOT NULL))`, partial unique `(file_sha256) WHERE kind='import'`.
@@ -48,10 +48,10 @@ Trigger `salary_increments_lock`: OLD.status IN ('approved','rejected','cancelle
 (added after `salary_increments` exists), `import_batch_id uuid NULL FK salary_increment_batches RESTRICT`. Existing `salary_structures_lock` unchanged (it already compares every column).
 
 **`payroll_item_events`**: `item_type` CHECK + `increment`, `fnf`; `action` CHECK + `submit`, `withdraw`, `settle`, `revoke`, `remove` (drop and recreate the two CHECKs).
-**Permission** `payroll.approve` (module `payroll`) granted to the `admin` and `hr` roles (pattern of 0023 line 186). Settings seeded (contract 18.11). Grants: SELECT, INSERT, UPDATE; no DELETE.
-Regenerate `database/schema.sql`; `test_migration_0024.py`.
+**Permission** `payroll.approve` (module `payroll`) granted to the `admin` and `hr` roles (pattern of 0024 line 186). Settings seeded (contract 18.11). Grants: SELECT, INSERT, UPDATE; no DELETE.
+Regenerate `database/schema.sql`; `test_migration_0025.py`.
 
-### 2.2 Migration 0025 (work package 4b)
+### 2.2 Migration 0026 (work package 4b)
 **`fnf_settlements`**: `user_id`, `resignation_date date NULL`, `last_working_day date NOT NULL`, `exit_reason CHECK IN ('resignation','termination','retirement','death','contract_end','absconding','other')`,
 `settlement_period date` (1st; `CHECK (settlement_period >= date_trunc('month', last_working_day))`), `notice_required_days smallint CHECK BETWEEN 0 AND 365`, `notice_waived bool NOT NULL DEFAULT false`,
 `shortfall_days smallint NOT NULL DEFAULT 0 CHECK BETWEEN 0 AND 365` (effective, after waiver / override; days are not money), `plan_enc bytea NOT NULL` (encrypted JSON: override reason, encashment lines,
@@ -63,7 +63,7 @@ Trigger `fnf_settlements_lock`: OLD.status IN ('settled','cancelled') -> only `f
 
 **Changes**: `employee_payroll_details.last_working_day date NULL` (written only by the F&F service), `notice_period_days smallint NULL CHECK BETWEEN 0 AND 365`;
 `payroll_one_time_items.code` CHECK + `NOTICE_RECOVERY`; `fnf_id uuid NULL FK fnf_settlements RESTRICT` + index on `payroll_one_time_items`, `leave_encashments`, `payroll_loan_installments`.
-Settings seeded (18.11). Grants/revokes; downgrade; `test_migration_0025.py`; regenerate `schema.sql`.
+Settings seeded (18.11). Grants/revokes; downgrade; `test_migration_0026.py`; regenerate `schema.sql`.
 
 ## 3. Business rules and edge cases
 **Increments (4a)**
@@ -138,17 +138,17 @@ Settings seeded (18.11). Grants/revokes; downgrade; `test_migration_0025.py`; re
 - **Lifecycle**: increment draft -> submit -> approve creates structure with `source`/`increment_id`; replace / remove; stale base; later structure; backdated approve creates an arrears proposal; batch approve partial failure; bulk arrears accept.
   F&F create sets LWD and run windows; approve writes tagged rows; process / reopen / publish settle; revision moves `final_payslip_id`; revoke restores loans / leave days; settlement-only payslip in a later month; PAID_AFTER_EXIT; activation rules.
 - **Concurrency** (two sessions, PostgreSQL): two checkers approve the same increment; approve vs structure PUT; batch approve vs run process (structure share lock); F&F approve vs run process; F&F approve vs leave apply (balance lock); publish-settle vs revoke; no deadlock in F15 order.
-- **PostgreSQL-only DB checks**: 0024/0025 up/down/up on PG 16; maker <> checker CHECKs reject a direct UPDATE; `salary_increments_lock` and `fnf_settlements_lock` (incl. FK `ON DELETE SET NULL` passing the lock, key rotation with `updated_at` unchanged, refusal otherwise);
+- **PostgreSQL-only DB checks**: 0025/0026 up/down/up on PG 16; maker <> checker CHECKs reject a direct UPDATE; `salary_increments_lock` and `fnf_settlements_lock` (incl. FK `ON DELETE SET NULL` passing the lock, key rotation with `updated_at` unchanged, refusal otherwise);
   partial uniques (live increment per month, live F&F per user, import sha); `payroll_item_events` new item types/actions and still append-only; no DELETE/TRUNCATE for `app_user`; circular FK `salary_structures.increment_id` / `salary_increments.structure_id`; `scripts/rotate_keys.py --verify-only` over new columns.
 - **Security / API**: permission matrix (manage vs approve vs view_all vs employee), self rule, second person (maker, submitter), step-up required / failed / limiter, rate limits fail-closed, unknown fields 422, no amounts in audit / log / push, F2 refusals, import `IMPORT_NOT_CHECKED` / `IMPORT_FILE_CHANGED` / `IMPORT_DUPLICATE`, employee F&F 404s.
 - **Integration**: register / statutory with NOTICE_RECOVERY and settlement-only payslips, ESI "Last Working Day" from LWD, dashboard leavers and new alerts, gratuity xlsx, statement PDF content and watermark.
 - **Flutter**: model / repository contract tests per endpoint; widget tests for increment form + diff, bulk wizard, import wizard states, approvals queue, CTC calculator, F&F editor sections and checklist, employee final settlement card; console smoke for Approvals, Increments, Exits.
 
 ## 7. Work packages (each: contract -> DB -> backend -> Flutter/console -> qa-tester -> security-reviewer -> fixes; suites green before the next)
-### 4a - increments, structure import, CTC calculator, gratuity (migration 0024)
+### 4a - increments, structure import, CTC calculator, gratuity (migration 0025)
 **database-engineer**
-1. 0024: `salary_increment_batches`, `salary_increments` (+ lock trigger, checks, partial uniques), `salary_structures` columns + circular FK, `payroll_item_events` CHECK changes, `payroll.approve` permission, settings seed, grants/revokes, downgrade.
-2. ORM models, `schema.sql`, `test_migration_0024.py` (PostgreSQL checks of section 6).
+1. 0025: `salary_increment_batches`, `salary_increments` (+ lock trigger, checks, partial uniques), `salary_structures` columns + circular FK, `payroll_item_events` CHECK changes, `payroll.approve` permission, settings seed, grants/revokes, downgrade.
+2. ORM models, `schema.sql`, `test_migration_0025.py` (PostgreSQL checks of section 6).
 **backend-developer**
 3. `services/payroll_increments.py`: arithmetic (pure), CRUD, submit / withdraw / approve / reject / cancel, structure create / replace / remove through the existing structure internals + arrears hook, events, warnings; F2 gate in `payroll_structures.py`; salary history.
 4. Batches (bulk hike) and arrears bulk accept (`payroll_arrears.py`).
@@ -158,8 +158,8 @@ Settings seeded (18.11). Grants/revokes; downgrade; `test_migration_0025.py`; re
 7. Models / repositories for 18.2-18.7; Approvals tab; Increments segment + forms; bulk wizard; import wizard; salary history; CTC calculator; gratuity screen; `gross_split.dart` from settings.
 **security-reviewer** 8. Review 4a (maker-checker bypasses incl. F2, import parser reuse, arithmetic, triggers, audit redaction). **qa-tester** 9. Contract + lifecycle + concurrency + Flutter suite.
 
-### 4b - full and final settlement (migration 0025)
-**database-engineer** 1. 0025: `fnf_settlements` (+ lock trigger, checks), details columns, `NOTICE_RECOVERY`, `fnf_id` columns, settings, downgrade, `test_migration_0025.py`.
+### 4b - full and final settlement (migration 0026)
+**database-engineer** 1. 0026: `fnf_settlements` (+ lock trigger, checks), details columns, `NOTICE_RECOVERY`, `fnf_id` columns, settings, downgrade, `test_migration_0026.py`.
 **backend-developer**
 2. `employment_window` / `_eligible` with LWD and settlement-only payslips (`payroll_days.py`, `payroll_runs.py`), statutory ESI LWD, dashboard leavers / alerts, activation rule in `employees.py`.
 3. `services/payroll_fnf.py`: create / edit / preview / submit / withdraw / approve (orchestrates `payroll_items`, `payroll_encashment`, `payroll_loans` internals with `fnf_id`) / reject / revoke / cancel; `on_published` hook in `_publish_one`; `NOTICE_RECOVERY` in calc codes (deduction, system-only, reserved).

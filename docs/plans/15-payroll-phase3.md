@@ -1,7 +1,7 @@
 # 15 - Payroll phase 3: pay components feeding the run
 
 Status: PROPOSED. Branch `feature/payroll-phase2` (or a new `feature/payroll-phase3` cut from it). Source: plan 14 phase 3.
-Contract: `docs/api-contract.md` section 17 (single source of truth; this plan only explains it). Migrations `0022` (3a) and `0023` (3b).
+Contract: `docs/api-contract.md` section 17 (single source of truth; this plan only explains it). Migrations `0023` (3a) and `0024` (3b).
 All plan 12 rules still apply: money as 2-decimal strings / `Decimal`, every amount encrypted at rest, no SQL aggregates on money (D2),
 audit every view/change without amounts, step-up (`current_password`) on sensitive writes, nobody acts on their own money (D9), published = locked (D4).
 Nothing is deployed until the user approves.
@@ -16,7 +16,7 @@ Nothing is deployed until the user approves.
 | P5 | **Pull rule** for payslip P (user U, period M): source rows of U with `period = M` and `status = 'pending'`, plus rows with `status = 'paid' AND payslip_id = P.supersedes_id`. Period-exact: a row whose month is published without a payslip for U stays `pending`, is flagged `PERIOD_CLOSED` in lists, and HR moves it (edit period / defer) or cancels it. Nothing catches up automatically. |
 | P6 | **State changes are in the payroll transaction.** Process: lock run -> payslips -> source rows (`FOR UPDATE`, fixed table order, `ORDER BY id`), re-pull, recompute, then set `processing`. Publish (run or payslip): `processing` (payslip_id = P) -> `paid`; `paid` rows of the superseded copy get `payslip_id = P`. Reopen (run or payslip): back to `pending`, `payslip_id = NULL`. Held payslips stay draft, so their rows stay `pending`. A publish that finds a referenced source row in an unexpected state fails with 409 `COMPONENTS_CHANGED` (defence in depth). |
 | P7 | **Global lock order** (extends plan 12): `payroll_runs` -> `payslips` -> `payroll_one_time_items` -> `payroll_loans` -> `payroll_loan_installments` -> `payroll_arrears` -> `leave_balances` -> `leave_encashments` -> `reimbursement_claims` -> `overtime_days`. Source-only actions lock only their own rows in this order (e.g. foreclose: loan -> installments; encashment cancel: balance -> encashment). |
-| P8 | **Money history is append-only.** Every create / edit / state change of any source row appends to `payroll_item_events` (encrypted amount + previous amount, period + previous period, encrypted detail). No DELETE on any phase 3 table for `app_user` (cancel is a status). Same trigger pattern as `statutory_challan_events` (0021), key rotation allowed. |
+| P8 | **Money history is append-only.** Every create / edit / state change of any source row appends to `payroll_item_events` (encrypted amount + previous amount, period + previous period, encrypted detail). No DELETE on any phase 3 table for `app_user` (cancel is a status). Same trigger pattern as `statutory_challan_events` (0022), key rotation allowed. |
 | P9 | **Where a new row may land.** Target month must be: no run yet, a `draft` run, a `processed` run (lands after reopen + process; the response says `run_status`), or a `published` run in which U has an open draft revision. Otherwise 409 `PERIOD_LOCKED`. Months more than 12 ahead of today are refused (422 `INVALID_PERIOD`). |
 | P10 | **Overtime** off by default (`payroll.overtime_enabled=false`), rate 2x the ordinary hourly rate of BASIC: `basic / overtime_month_days (26) / shift hours`. Per-employee eligibility flag (default false). Hours come from attendance; HR reviews every day row before it counts. Amount is computed inside `recompute()` from approved minutes and the structure the payslip adopts, so it always matches the payslip. |
 | P11 | **Reimbursement approval** = reporting manager first (`verify`), then HR (`payroll.manage`) approves the final amount (<= claimed) and the payout month. If the employee has no active manager holding `request.approve_team`/`approve_all`, the claim goes straight to HR (`manager_step: "skipped"`). A manager who also holds `payroll.manage` may do both steps in one `approve` call (audited `combined:true`). Never on your own claim. |
@@ -33,8 +33,8 @@ Common column rules for every new table: `id uuid PK default gen_random_uuid()`,
 Trigger `payroll_item_paid_lock` (shared function) on every source table: UPDATE of a row whose OLD.status = 'paid' is refused unless only `payslip_id`, `updated_*`, `version`
 change (revision carry-over) or it is a key rotation (`app.key_rotation='on'` and `payroll_strip_enc` equal). Labels / reasons follow plan 12 (1-40 / 3-200 chars, cleaned).
 
-### 2.1 Migration 0022 (work package 3a)
-**`payroll_item_events`** (append-only; 0021 pattern: trigger blocks UPDATE/DELETE/TRUNCATE except key rotation, `REVOKE UPDATE, DELETE, TRUNCATE`, column-level UPDATE on `*_enc` only)
+### 2.1 Migration 0023 (work package 3a)
+**`payroll_item_events`** (append-only; 0022 pattern: trigger blocks UPDATE/DELETE/TRUNCATE except key rotation, `REVOKE UPDATE, DELETE, TRUNCATE`, column-level UPDATE on `*_enc` only)
 `item_type text CHECK IN ('one_time','loan','loan_installment','arrears','encashment','reimbursement','overtime')`, `item_id uuid NOT NULL` (no FK, polymorphic),
 `user_id FK`, `action text CHECK IN ('create','update','cancel','skip','reschedule','foreclose','close','propose','accept','dismiss','verify','approve','reject','process','reopen','pay','carry')`,
 `status text NOT NULL`, `period date NULL`, `prev_period date NULL`, `amount_enc`, `prev_amount_enc`, `detail_enc bytea NULL` (encrypted JSON: reason, reference, minutes),
@@ -53,7 +53,7 @@ Index `(user_id, period, status)`, `(period, status)`, `(batch_id)`.
 
 **`payroll_loan_installments`**: `loan_id FK RESTRICT`, `user_id` (denormalised for the pull query), `seq smallint CHECK BETWEEN 1 AND 120`, `period`, `amount_enc`,
 `kind CHECK IN ('emi','foreclosure')`, `status CHECK IN ('pending','processing','paid','skipped','cancelled')`, `payslip_id`, `version`.
-`UNIQUE (loan_id, seq)` (3b/0023 replaces it with a partial unique index over live installments and relaxes the `seq` check to `>= 1`); partial unique `(loan_id, period) WHERE status IN ('pending','processing','paid')` (one live installment per loan per month). Index `(user_id, period, status)`.
+`UNIQUE (loan_id, seq)` (3b/0024 replaces it with a partial unique index over live installments and relaxes the `seq` check to `>= 1`); partial unique `(loan_id, period) WHERE status IN ('pending','processing','paid')` (one live installment per loan per month). Index `(user_id, period, status)`.
 
 **`payroll_arrears`**: `period NULL` (target month, set on accept), `from_period`, `to_period` (published months covered), `trigger_structure_id FK salary_structures NULL ON DELETE SET NULL`,
 `code CHECK IN ('ARREARS','OTHER_DEDUCTION')`, `amount_enc`, `breakdown_enc` (JSON per month: `{period, paid_structure_id, new_structure_id, paid_earnings, new_earnings, already_paid_arrears, diff, basic_diff}`),
@@ -67,7 +67,7 @@ Partial unique `(user_id) WHERE status = 'proposed'` (one open proposal per empl
 `leave_types.encashable boolean NOT NULL DEFAULT false`, `encash_max_days_per_year numeric(4,1) NULL CHECK > 0`, `encash_min_balance numeric(4,1) NOT NULL DEFAULT 0 CHECK >= 0`.
 Settings rows seeded (contract 17.9). Grants for `app_user` (SELECT, INSERT, UPDATE; no DELETE). Regenerate `database/schema.sql`.
 
-### 2.2 Migration 0023 (work package 3b)
+### 2.2 Migration 0024 (work package 3b)
 **`reimbursement_claims`**: `category text CHECK ~ '^[a-z][a-z0-9_]{1,19}$'`, `expense_date date`, `amount_enc` (claimed), `approved_amount_enc NULL`, `description_enc`,
 `bill_file_id FK files RESTRICT NULL`, `status CHECK IN ('submitted','verified','approved','processing','paid','rejected','cancelled')`,
 `manager_step CHECK IN ('pending','done','skipped')`, `verifier_id FK NULL`, `verified_at`, `approver_id FK NULL`, `decided_at`, `decision_comment_enc`, `period NULL`
@@ -181,7 +181,7 @@ For overtime the "pending" state is `approved` (P4 table in 17.0). `employee_pay
 - Rate limits fail closed on writes (section 17.0).
 - Known limitations (3a security review): (L6) the append-only and `paid`-immutability guarantees of the payroll tables rest on triggers and REVOKEs for `app_user`;
   the migration role and the application role are still the same database server account family, so a compromised migration credential could bypass them. Defence in depth
-  (a separate, non-owner DB role for the API with no DDL right) is deliberately not built now. (L7) FIXED in migration 0023: `payroll_loan_installments.seq` was unique per loan over all rows and limited to 1..120, so a loan skipped /
+  (a separate, non-owner DB role for the API with no DDL right) is deliberately not built now. (L7) FIXED in migration 0024: `payroll_loan_installments.seq` was unique per loan over all rows and limited to 1..120, so a loan skipped /
   rescheduled very often could run out of numbers. Numbers are now unique among LIVE installments only (partial unique index, check `seq >= 1`) and a new
   installment takes `max(live seq) + 1`; the 'close and re-issue' workaround is removed.
 
@@ -192,7 +192,7 @@ For overtime the "pending" state is `approved` (P4 table in 17.0). `employee_pay
 - **Lifecycle**: create/refresh pulls; PUT keeps components; process -> processing; reopen -> pending; publish -> paid; held payslip; deleted draft payslip; run delete;
   revision carries paid rows and pulls new pending ones; revision publish moves `payslip_id`; P5 period-closed rows; `COMPONENTS_CHANGED` guard.
 - **Concurrency** (two sessions): cancel vs process, foreclose vs process, encash vs leave apply, approve claim vs process; no deadlock with P7 order.
-- **DB**: migration 0022/0023 up/down/up; paid-row trigger; no DELETE/TRUNCATE for app_user; events append-only incl. key rotation exception; checks and partial uniques;
+- **DB**: migration 0023/0024 up/down/up; paid-row trigger; no DELETE/TRUNCATE for app_user; events append-only incl. key rotation exception; checks and partial uniques;
   leave balance constraint with `encashed`.
 - **Security / API**: every endpoint's permission, self rule, scope 404s, step-up required/failed, rate limits incl. fail-closed, unknown fields 422, no amounts in audit/log/push,
   bill access matrix, duplicate bill, import replay `IMPORT_DUPLICATE`, `file_sha256` mismatch.
@@ -201,11 +201,11 @@ For overtime the "pending" state is `approved` (P4 table in 17.0). `employee_pay
   automatic lines section; console smoke on the Pay items tab.
 
 ## 7. Work packages (each: contract -> DB -> backend -> Flutter/console -> qa-tester -> security-reviewer -> fixes; suites green before the next)
-### 3a - admin side (migration 0022)
+### 3a - admin side (migration 0023)
 **database-engineer**
-1. 0022: `payroll_item_events`, `payroll_import_batches`, `payroll_one_time_items`, `payroll_loans` (+ reference sequence), `payroll_loan_installments`, `payroll_arrears`,
+1. 0023: `payroll_item_events`, `payroll_import_batches`, `payroll_one_time_items`, `payroll_loans` (+ reference sequence), `payroll_loan_installments`, `payroll_arrears`,
    `leave_encashments`; shared `payroll_item_paid_lock` trigger; leave_balances / leave_types columns and replaced CHECK; settings seed; grants/revokes; downgrade.
-2. ORM models, `schema.sql`, migration test (`test_migration_0022.py`).
+2. ORM models, `schema.sql`, migration test (`test_migration_0023.py`).
 **backend-developer**
 3. Component engine: `services/payroll_components.py` (pull per payslip, state transitions, P5-P7), hook into `create_run`, `refresh_run`, `_recompute_open`, `process_payslip`,
    `revise`, `reopen_*`, `_publish_one`; `_pay_inputs` merges components; `admin_payslip_out` returns `inputs.components`; new warnings; calc codes (P3); `AdjustmentIn` refuses system codes;
@@ -220,8 +220,8 @@ For overtime the "pending" state is `approved` (P4 table in 17.0). `employee_pay
    employee Loans tab; leave balance `encashed` display.
 **security-reviewer** 10. Review 3a (locking, triggers, import parser, step-up, audit redaction, self rule). **qa-tester** 11. Contract + lifecycle + concurrency tests, Flutter suite.
 
-### 3b - reimbursements and overtime (migration 0023)
-**database-engineer** 1. 0023: `reimbursement_claims`, `overtime_days`, `files.purpose` CHECK, `employee_payroll_details.overtime_eligible`, `reimbursement.submit` permission seeded to all roles; downgrade; test.
+### 3b - reimbursements and overtime (migration 0024)
+**database-engineer** 1. 0024: `reimbursement_claims`, `overtime_days`, `files.purpose` CHECK, `employee_payroll_details.overtime_eligible`, `reimbursement.submit` permission seeded to all roles; downgrade; test.
 **backend-developer**
 2. File purpose `reimbursement_bill` (PURPOSES, GENERIC_PURPOSES, `authorize`, cross-user audit, `cleanup_orphans` refs).
 3. Claims: employee endpoints, manager verify/reject, HR approve/reject/reschedule, pushes `reimbursement_submitted` / `reimbursement_decision`, pull into payslips.

@@ -1,7 +1,7 @@
 """Plan 17 work package 5a: company bank accounts, payment batches, the bank file and confirmation (contract 19.4 / 19.5).
 
 "Today" is 2026-10-21 (office tz Asia/Kolkata); the payroll month is 2025-06. HR001 is the maker, ADM001 the checker. EMP001 (basic 20000,
-HRA 5000, net 21400.00) and MGR001 (net 36400.00) are paid. The database CHECKs and triggers are PostgreSQL-only (migration 0026 tests).
+HRA 5000, net 21400.00) and MGR001 (net 36400.00) are paid. The database CHECKs and triggers are PostgreSQL-only (migration 0027 tests).
 """
 
 from __future__ import annotations

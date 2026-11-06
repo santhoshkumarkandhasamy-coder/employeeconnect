@@ -1,5 +1,6 @@
-"""Departments, shifts, leave types, per-employee leave balances and the audit-log viewer (contract section 9).
-GET of the three masters is open to any signed-in user (pickers in forms); writes need the `*.manage` permission."""
+"""Departments, shifts, leave types, client locations, per-employee leave balances and the audit-log viewer (contract
+section 9 / 14). GET of departments, shifts and leave types is open to any signed-in user (pickers in forms); writes need the
+`*.manage` permission. Client locations carry geo coordinates, so every endpoint needs `client_location.manage`."""
 
 from __future__ import annotations
 
@@ -15,8 +16,9 @@ from ..core.db import get_session
 from ..core.pagination import PageParams
 from ..core.rbac import Principal, require_permission
 from ..core.redis import get_redis
-from ..schemas.admin import ApplyDefaultsIn, BalancesIn, DepartmentIn, LeaveTypeIn, ShiftIn
+from ..schemas.admin import ApplyDefaultsIn, BalancesIn, ClientLocationIn, DepartmentIn, LeaveTypeIn, ShiftIn
 from ..services import admin_masters as svc
+from ..services import onduty as onduty_svc
 
 router = APIRouter(prefix="/admin", tags=["admin-masters"])
 Self = Depends(require_permission())
@@ -72,6 +74,44 @@ async def delete_department(
     actor: Principal = Depends(require_permission("department.manage")),
 ):
     await svc.delete_department(session, actor, dept_id)
+    return Response(status_code=204)
+
+
+# ---- client locations (on duty). Coordinates are admin data: even GET needs client_location.manage.
+_LOC = Depends(require_permission("client_location.manage"))
+
+
+@router.get("/client-locations")
+async def list_client_locations(
+    params: MasterPage = Depends(),
+    q: str | None = Query(None, max_length=100),
+    is_active: bool | None = None,
+    session: AsyncSession = Depends(get_session),
+    _: Principal = _LOC,
+):
+    return await onduty_svc.list_locations(session, params, q, is_active)
+
+
+@router.post("/client-locations", status_code=201)
+async def create_client_location(body: ClientLocationIn, session: AsyncSession = Depends(get_session), actor: Principal = _LOC):
+    return await onduty_svc.create_location(session, actor, body)
+
+
+@router.get("/client-locations/{loc_id}")
+async def get_client_location(loc_id: uuid.UUID, session: AsyncSession = Depends(get_session), _: Principal = _LOC):
+    return await onduty_svc.get_location(session, loc_id)
+
+
+@router.put("/client-locations/{loc_id}")
+async def update_client_location(
+    loc_id: uuid.UUID, body: ClientLocationIn, session: AsyncSession = Depends(get_session), actor: Principal = _LOC
+):
+    return await onduty_svc.update_location(session, actor, loc_id, body)
+
+
+@router.delete("/client-locations/{loc_id}", status_code=204)
+async def delete_client_location(loc_id: uuid.UUID, session: AsyncSession = Depends(get_session), actor: Principal = _LOC):
+    await onduty_svc.delete_location(session, actor, loc_id)
     return Response(status_code=204)
 
 

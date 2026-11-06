@@ -247,7 +247,7 @@ async def my_loan(session: AsyncSession, actor: Principal, loan_id: uuid.UUID) -
 
 # ============================================================================================ helpers for the writes
 async def _next_reference(session: AsyncSession) -> str:
-    """L-0001 ... PostgreSQL: the sequence of migration 0022; other databases (tests): highest existing number + 1."""
+    """L-0001 ... PostgreSQL: the sequence of migration 0023; other databases (tests): highest existing number + 1."""
     if session.get_bind().dialect.name == "postgresql":
         n = (await session.execute(text("SELECT nextval('payroll_loan_ref_seq')"))).scalar_one()
     else:
@@ -263,7 +263,7 @@ async def _next_reference(session: AsyncSession) -> str:
 
 
 def _next_seq(insts: list[INST]) -> int:
-    """Installment numbers are unique among LIVE installments only (migration 0023): a new one follows the highest live number,
+    """Installment numbers are unique among LIVE installments only (migration 0024): a new one follows the highest live number,
     so skipped and cancelled installments never use up numbers. Call after the statuses of the dropped rows were changed."""
     return max((i.seq for i in insts if i.status in LIVE), default=0) + 1
 

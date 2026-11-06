@@ -267,9 +267,9 @@ services:
   nginx:
     <<: *hardening
     image: nginxinc/nginx-unprivileged:1.27-alpine   # runs as uid 101; listens on 8080/8443 inside
-    ports:
-      - "80:8080"
-      - "443:8443"
+    ports:   # host ports: change HTTP_PORT / HTTPS_PORT in .env when 80 / 443 are taken by another app on this server
+      - "${HTTP_PORT:-80}:8080"
+      - "${HTTPS_PORT:-443}:8443"
     # nginx.conf is a template: scripts/nginx-start.sh renders it into /tmp/nginx.conf from the variables below.
     entrypoint: ["/bin/sh", "/scripts/nginx-start.sh"]
     environment:
@@ -277,6 +277,7 @@ services:
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN}            # https://<PUBLIC_HOSTNAME>, accepted Origin for /api/auth/web/*
       CONSOLE_ALLOW_CIDRS: ${CONSOLE_ALLOW_CIDRS:-}                 # empty = no restriction on /console/ and /api/auth/web/
       RELAY_PEER_IP: ${RELAY_PEER_IP:-}                             # option D only (VPS relay WireGuard IP)
+      HTTPS_PORT: ${HTTPS_PORT:-443}                                # host HTTPS port, for the http -> https redirect
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf.tpl:ro
       - ./scripts/nginx-start.sh:/scripts/nginx-start.sh:ro

@@ -66,6 +66,9 @@ Rotation rule: before the leaf key changes, ship an app release that already con
 
 ### 1.4 Start
 ```bash
+# Ports: nginx publishes HTTP_PORT (80) and HTTPS_PORT (443) from .env. Other apps on the same server (e.g. the RFS
+# Generator on 8501) do not clash; change them only if 80/443 are taken, and then add the port to PUBLIC_ORIGIN,
+# the router port-forward and the app's server address (https://host:PORT).
 docker compose up -d --build
 docker compose ps                    # migrate/dbrole show "Exited (0)"; others "healthy"
 ```

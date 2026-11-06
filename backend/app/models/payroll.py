@@ -59,7 +59,7 @@ class SalaryStructure(TimestampMixin, Base):
     pf_on_full_basic: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     esi_applicable: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     pt_applicable: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
-    source: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'manual'"))  # migration 0024
+    source: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'manual'"))  # migration 0025
     # circular with salary_increments.structure_id: use_alter keeps create_all (test harness) able to order the two tables
     increment_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
@@ -71,7 +71,7 @@ class SalaryStructure(TimestampMixin, Base):
 
 
 class SalaryIncrementBatch(Base):
-    """One bulk hike (`percent`) or one committed structure import (`import`). Migration 0024."""
+    """One bulk hike (`percent`) or one committed structure import (`import`). Migration 0025."""
 
     __tablename__ = "salary_increment_batches"
     __table_args__ = (
@@ -112,7 +112,7 @@ class SalaryIncrementBatch(Base):
 
 class SalaryIncrement(TimestampMixin, Base):
     """A proposed salary change (maker-checker). `proposed` = StructureIn without effective_from (NULL for `remove`).
-    Migration 0024; the DB repeats the maker-checker rule in ck_salary_increments_checker."""
+    Migration 0025; the DB repeats the maker-checker rule in ck_salary_increments_checker."""
 
     __tablename__ = "salary_increments"
     __table_args__ = (
@@ -219,16 +219,16 @@ class EmployeePayrollDetails(TimestampMixin, Base):
     designation: Mapped[str | None] = mapped_column(Text)
     payment_mode: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'bank_transfer'"))
     include_in_payroll: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
-    overtime_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))  # migration 0023
-    last_working_day: Mapped[dt.date | None] = mapped_column(Date)  # migration 0025; written only by the F&F service
-    notice_period_days: Mapped[int | None] = mapped_column(SmallInteger)  # migration 0025
+    overtime_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))  # migration 0024
+    last_working_day: Mapped[dt.date | None] = mapped_column(Date)  # migration 0026; written only by the F&F service
+    notice_period_days: Mapped[int | None] = mapped_column(SmallInteger)  # migration 0026
     bank_name: Mapped[str | None] = mapped_column("bank_name_enc", EncryptedString)
     bank_account: Mapped[str | None] = mapped_column("bank_account_enc", EncryptedString)
     bank_ifsc: Mapped[str | None] = mapped_column("bank_ifsc_enc", EncryptedString)
     pan: Mapped[str | None] = mapped_column("pan_enc", EncryptedString)
     uan: Mapped[str | None] = mapped_column("uan_enc", EncryptedString)
     esi_ip_number: Mapped[str | None] = mapped_column("esi_ip_number_enc", EncryptedString)
-    # migration 0026: set by the details service whenever payment mode / bank name / account / IFSC change; can never be cleared
+    # migration 0027: set by the details service whenever payment mode / bank name / account / IFSC change; can never be cleared
     bank_changed_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
     bank_changed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     updated_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
@@ -265,7 +265,7 @@ class PayrollRun(TimestampMixin, Base):
     published_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
     processed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
-    # migration 0026: user ids (text) of everybody who created, refreshed, processed or reopened the run; append-only (trigger)
+    # migration 0027: user ids (text) of everybody who created, refreshed, processed or reopened the run; append-only (trigger)
     contributors: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default=text("'{}'"))
 
 
@@ -337,7 +337,7 @@ class Payslip(TimestampMixin, Base):
     superseded_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     created_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
     updated_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
-    # migration 0026: everybody who edited, processed, revised, refreshed or reopened it; append-only, frozen once published
+    # migration 0027: everybody who edited, processed, revised, refreshed or reopened it; append-only, frozen once published
     contributors: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default=text("'{}'"))
 
 
@@ -345,7 +345,7 @@ _LWD_MONTH = "make_date(extract(year from last_working_day)::int, extract(month 
 
 
 class FnfSettlement(TimestampMixin, Base):
-    """Full and final settlement of one employee (maker-checker). Migration 0025; the DB repeats the maker-checker rule in
+    """Full and final settlement of one employee (maker-checker). Migration 0026; the DB repeats the maker-checker rule in
     ck_fnf_settlements_checker / _checker_history and guards the lifecycle in fnf_settlements_lock.
     `plan` = encrypted JSON (override reason, encashment lines, loan modes, other items, move_open_items); `summary` = approval snapshot."""
 
@@ -434,7 +434,7 @@ class FnfSettlement(TimestampMixin, Base):
 
 
 class StatutoryChallan(TimestampMixin, Base):
-    """Paid / unpaid tracking of one statutory due (migration 0020). Amount and bank reference are encrypted."""
+    """Paid / unpaid tracking of one statutory due (migration 0021). Amount and bank reference are encrypted."""
 
     __tablename__ = "statutory_challans"
     __table_args__ = (
@@ -464,7 +464,7 @@ class StatutoryChallan(TimestampMixin, Base):
 
 
 class StatutoryChallanEvent(Base):
-    """APPEND-ONLY history of every paid / unpaid change of a challan (migration 0021). `*` = state after the change,
+    """APPEND-ONLY history of every paid / unpaid change of a challan (migration 0022). `*` = state after the change,
     `prev_*` = the state that was overwritten or cleared. Never updated or deleted by the application (privileges revoked)."""
 
     __tablename__ = "statutory_challan_events"
