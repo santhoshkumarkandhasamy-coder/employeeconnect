@@ -6,8 +6,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/api/api_exception.dart';
 import '../../../core/utils/dates.dart';
 import '../../../core/widgets/state_views.dart';
-import '../../on_duty/presentation/on_duty_panel.dart';
-import '../../on_duty/presentation/on_duty_providers.dart';
 import '../data/location_service.dart';
 import '../domain/attendance_models.dart';
 import 'attendance_providers.dart';
@@ -37,8 +35,6 @@ class TodayTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final today = ref.watch(todayAttendanceProvider);
-    final onDutyOn = ref.watch(onDutyConfigProvider.select((c) => c.showSwitch));
-    final mode = onDutyOn ? ref.watch(attendanceModeProvider) : AttendanceMode.office;
     return today.when(
       loading: () => const LoadingView(label: 'Loading today'),
       error: (e, _) => ErrorView(
@@ -49,56 +45,23 @@ class TodayTab extends ConsumerWidget {
         onRefresh: () async {
           ref
             ..invalidate(todayAttendanceProvider)
-            ..invalidate(proximityProvider)
-            ..invalidate(attendanceConfigProvider);
-          if (onDutyOn) {
-            ref
-              ..invalidate(onDutyTodayProvider)
-              ..invalidate(dutyLocationsProvider);
-          }
+            ..invalidate(proximityProvider);
           await ref.read(todayAttendanceProvider.future).then((_) {}, onError: (Object _) {});
         },
         child: ListView(
           padding: const EdgeInsets.all(16),
           children: [
-            if (onDutyOn) ...[
-              const _ModeSwitch(),
-              const SizedBox(height: 12),
-            ],
             _StatusBlock(record: rec),
             const SizedBox(height: 12),
-            if (mode == AttendanceMode.onDuty)
-              const OnDutyPanel()
-            else ...[
-              const _ProximityCard(),
-              const SizedBox(height: 12),
-              if (rec == null) const _SelfieSection(),
-              const _FeedbackBanner(),
-              const SizedBox(height: 16),
-              _ActionButton(record: rec, onRationale: () => _rationale(context)),
-            ],
+            const _ProximityCard(),
+            const SizedBox(height: 12),
+            if (rec == null) const _SelfieSection(),
+            const _FeedbackBanner(),
+            const SizedBox(height: 16),
+            _ActionButton(record: rec, onRationale: () => _rationale(context)),
           ],
         ),
       ),
-    );
-  }
-}
-
-/// Office | On Duty switch (only when the employee has On Duty sites).
-class _ModeSwitch extends ConsumerWidget {
-  const _ModeSwitch();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final mode = ref.watch(attendanceModeProvider);
-    return SegmentedButton<AttendanceMode>(
-      showSelectedIcon: false,
-      segments: const [
-        ButtonSegment(value: AttendanceMode.office, label: Text('Office'), icon: Icon(Icons.business_outlined)),
-        ButtonSegment(value: AttendanceMode.onDuty, label: Text('On Duty'), icon: Icon(Icons.place_outlined)),
-      ],
-      selected: {mode},
-      onSelectionChanged: (s) => ref.read(attendanceModeProvider.notifier).state = s.first,
     );
   }
 }
@@ -125,13 +88,6 @@ class _StatusBlock extends StatelessWidget {
               Text('Shift ${r.shiftStart} - ${r.shiftEnd ?? ''}', style: theme.textTheme.bodySmall),
             if (r != null && r.workedMinutes != null)
               Text('Worked ${formatDuration(r.workedMinutes!)}', style: theme.textTheme.bodySmall),
-            if (r != null && r.hasOnDuty)
-              Text(
-                r.onDutyLocations.isEmpty
-                    ? 'On Duty today'
-                    : 'On Duty: ${r.onDutyLocations.join(', ')}',
-                style: theme.textTheme.bodySmall,
-              ),
             if (r != null && r.autoClosed)
               Text(
                 'No check-out was recorded for this day.',
@@ -321,13 +277,8 @@ class _ActionButton extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final s = ref.watch(checkControllerProvider);
     final r = record;
-    // A check-out time set by an on-duty visit does not end the OFFICE day.
-    final done = r != null && r.officeClosed;
-    final checkOut = r != null && r.checkedIn && !r.officeClosed;
-    final onDutyOn = ref.watch(onDutyConfigProvider.select((c) => c.showSwitch));
-    final visitOpen =
-        onDutyOn && (ref.watch(onDutyTodayProvider).valueOrNull?.openVisit != null);
-    final endDay = r != null && checkOut && r.hasOnDuty;
+    final done = r != null && r.checkedOut;
+    final checkOut = r != null && r.checkedIn && !r.checkedOut;
     final label = done
         ? 'Done for today'
         : switch (s.step) {
@@ -335,39 +286,24 @@ class _ActionButton extends ConsumerWidget {
             CheckStep.selfie => 'Waiting for selfie',
             CheckStep.uploading => 'Uploading selfie',
             CheckStep.submitting => checkOut ? 'Checking out' : 'Checking in',
-            CheckStep.idle => endDay ? 'End day' : (checkOut ? 'Check out' : 'Check in'),
+            CheckStep.idle => checkOut ? 'Check out' : 'Check in',
           };
-    final blocked = checkOut && visitOpen;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Semantics(
-          button: true,
-          label: label,
-          excludeSemantics: true,
-          child: FilledButton.icon(
-            style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(64)),
-            onPressed: done || s.busy || blocked
-                ? null
-                : () => ref
-                    .read(checkControllerProvider.notifier)
-                    .submit(checkOut: checkOut, confirmRationale: onRationale),
-            icon: s.busy
-                ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
-                : Icon(checkOut ? Icons.logout : Icons.login),
-            label: Text(label, style: Theme.of(context).textTheme.titleMedium),
-          ),
-        ),
-        if (blocked)
-          Padding(
-            padding: const EdgeInsets.only(top: 8),
-            child: Text(
-              'Check out of your On Duty visit first, then end your day.',
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-          ),
-      ],
+    return Semantics(
+      button: true,
+      label: label,
+      excludeSemantics: true,
+      child: FilledButton.icon(
+        style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(64)),
+        onPressed: done || s.busy
+            ? null
+            : () => ref
+                .read(checkControllerProvider.notifier)
+                .submit(checkOut: checkOut, confirmRationale: onRationale),
+        icon: s.busy
+            ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+            : Icon(checkOut ? Icons.logout : Icons.login),
+        label: Text(label, style: Theme.of(context).textTheme.titleMedium),
+      ),
     );
   }
 }

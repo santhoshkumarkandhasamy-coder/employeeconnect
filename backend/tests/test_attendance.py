@@ -423,13 +423,7 @@ async def test_calendar_statuses(client, emp, clock, db):
     assert days["2026-10-02"]["status"] == "late"
     assert days["2026-10-03"]["status"] == "weekly_off" and days["2026-10-04"]["status"] == "weekly_off"
     assert days["2026-10-05"]["status"] == "half_day"
-    assert days["2026-10-06"] == {
-        "date": "2026-10-06",
-        "status": "holiday",
-        "holiday_name": "Fest",
-        "leave_type": None,
-        "on_duty": False,
-    }
+    assert days["2026-10-06"] == {"date": "2026-10-06", "status": "holiday", "holiday_name": "Fest", "leave_type": None, "on_duty": False}
     assert days["2026-10-07"]["status"] == "on_leave" and days["2026-10-07"]["leave_type"] == "Casual Leave"
     assert days["2026-10-08"]["status"] == "absent"
     assert days["2026-10-21"]["status"] == "future" and days["2026-10-22"]["status"] == "future"

@@ -8,22 +8,18 @@ import '../data/attachment_service.dart';
 import '../data/leave_repository.dart';
 import '../domain/leave_logic.dart';
 import '../domain/leave_models.dart';
-import '../../on_duty/presentation/on_duty_providers.dart' show onDutyConfigProvider;
-import '../../on_duty/presentation/on_duty_request_form.dart';
 import 'leave_providers.dart';
-import 'widgets/form_widgets.dart';
 
-/// Request tab: segmented Leave | Permission | On Duty (the last only when
-/// the employee has On Duty sites). All forms stay alive while switching so
-/// half-typed input is not lost.
-class RequestTab extends ConsumerStatefulWidget {
+/// Request tab: segmented Leave | Permission. Both forms stay alive while
+/// switching so half-typed input is not lost.
+class RequestTab extends StatefulWidget {
   const RequestTab({super.key});
 
   @override
-  ConsumerState<RequestTab> createState() => _RequestTabState();
+  State<RequestTab> createState() => _RequestTabState();
 }
 
-class _RequestTabState extends ConsumerState<RequestTab> with AutomaticKeepAliveClientMixin {
+class _RequestTabState extends State<RequestTab> with AutomaticKeepAliveClientMixin {
   RequestKind _kind = RequestKind.leave;
 
   @override
@@ -37,40 +33,89 @@ class _RequestTabState extends ConsumerState<RequestTab> with AutomaticKeepAlive
   @override
   Widget build(BuildContext context) {
     super.build(context);
-    final onDuty = ref.watch(onDutyConfigProvider).showSwitch;
-    final kind = !onDuty && _kind == RequestKind.onDuty ? RequestKind.leave : _kind;
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
         SegmentedButton<RequestKind>(
-          showSelectedIcon: false,
-          segments: [
-            const ButtonSegment(value: RequestKind.leave, label: Text('Leave'), icon: Icon(Icons.beach_access_outlined)),
-            const ButtonSegment(value: RequestKind.permission, label: Text('Permission'), icon: Icon(Icons.timer_outlined)),
-            if (onDuty)
-              const ButtonSegment(value: RequestKind.onDuty, label: Text('On duty'), icon: Icon(Icons.work_outline)),
+          segments: const [
+            ButtonSegment(value: RequestKind.leave, label: Text('Leave'), icon: Icon(Icons.beach_access_outlined)),
+            ButtonSegment(value: RequestKind.permission, label: Text('Permission'), icon: Icon(Icons.timer_outlined)),
           ],
-          selected: {kind},
+          selected: {_kind},
           onSelectionChanged: (s) => setState(() => _kind = s.first),
         ),
         const SizedBox(height: 16),
         Visibility(
-          visible: kind == RequestKind.leave,
+          visible: _kind == RequestKind.leave,
           maintainState: true,
           child: LeaveForm(onSubmitted: _done),
         ),
         Visibility(
-          visible: kind == RequestKind.permission,
+          visible: _kind == RequestKind.permission,
           maintainState: true,
           child: PermissionForm(onSubmitted: _done),
         ),
-        if (onDuty)
-          Visibility(
-            visible: kind == RequestKind.onDuty,
-            maintainState: true,
-            child: OnDutyRequestForm(onSubmitted: _done),
-          ),
       ],
+    );
+  }
+}
+
+/// Tappable read-only field used for dates and times.
+class PickerField extends StatelessWidget {
+  const PickerField({
+    required this.label,
+    required this.value,
+    required this.onTap,
+    required this.icon,
+    super.key,
+  });
+  final String label;
+  final String? value;
+  final VoidCallback? onTap;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+        button: true,
+        label: '$label: ${value ?? 'not set'}',
+        excludeSemantics: true,
+        onTap: onTap,
+        child: InkWell(
+          onTap: onTap,
+          child: InputDecorator(
+            decoration: InputDecoration(
+              labelText: label,
+              border: const OutlineInputBorder(),
+              suffixIcon: Icon(icon),
+            ),
+            child: Text(value ?? 'Select', overflow: TextOverflow.ellipsis),
+          ),
+        ),
+      );
+}
+
+class _ErrorBox extends StatelessWidget {
+  const _ErrorBox(this.message);
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = Theme.of(context).colorScheme;
+    return Semantics(
+      liveRegion: true,
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        margin: const EdgeInsets.only(bottom: 12),
+        decoration: BoxDecoration(color: c.errorContainer, borderRadius: BorderRadius.circular(8)),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.error_outline, color: c.onErrorContainer),
+            const SizedBox(width: 8),
+            Expanded(child: Text(message, style: TextStyle(color: c.onErrorContainer))),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -310,7 +355,7 @@ class _LeaveFormState extends ConsumerState<LeaveForm> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (_error != null) FormErrorBox(_error!),
+          if (_error != null) _ErrorBox(_error!),
           DropdownButtonFormField<String>(
             initialValue: type?.id,
             isExpanded: true,
@@ -404,7 +449,7 @@ class _LeaveFormState extends ConsumerState<LeaveForm> {
             ),
           if (crossing) ...[
             const SizedBox(height: 12),
-            FormErrorBox(yearCrossingMessage(from, to)),
+            _ErrorBox(yearCrossingMessage(from, to)),
             OutlinedButton(
               onPressed: _busy ? null : () => _submit(split: true),
               child: Text('Submit as ${splitByYear(from, to).length} requests'),
@@ -577,7 +622,7 @@ class _PermissionFormState extends ConsumerState<PermissionForm> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (_error != null) FormErrorBox(_error!),
+          if (_error != null) _ErrorBox(_error!),
           if (bal != null)
             Padding(
               padding: const EdgeInsets.only(bottom: 12),

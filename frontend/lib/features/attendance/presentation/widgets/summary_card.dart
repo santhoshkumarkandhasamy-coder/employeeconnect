@@ -45,11 +45,6 @@ class AttendanceSummaryCard extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             Text('Total worked: ${formatDuration(summary.totalWorkedMinutes)}'),
-            if (summary.onDutyDays > 0)
-              Text(
-                'On Duty days: ${summary.onDutyDays} (also counted above)',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
           ],
         ),
       ),

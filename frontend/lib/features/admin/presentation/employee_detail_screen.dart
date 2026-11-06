@@ -10,8 +10,6 @@ import '../domain/admin_models.dart';
 import '../domain/ops_models.dart';
 import 'admin_providers.dart';
 import 'admin_widgets.dart';
-import '../../on_duty/domain/duty_admin_models.dart' show canManageDutyLocations;
-import '../../on_duty/presentation/admin/duty_admin_providers.dart' show employeeDutyLocationsProvider;
 import 'employee_form_screen.dart';
 import 'leave_balances_screen.dart';
 import 'sessions_screen.dart';
@@ -139,7 +137,6 @@ class EmployeeDetailScreen extends ConsumerWidget {
                       ? '-'
                       : '${e.profile!.emergency!.name} ${e.profile!.emergency!.phone}',),
                 ],
-                if (canManageDutyLocations(perms)) _DutyLocationsSection(userId: e.id),
                 const SizedBox(height: 16),
                 if (perms.contains(AdminPerm.employeeUpdate))
                   _action(Icons.edit_outlined, 'Edit details', () async {
@@ -236,51 +233,4 @@ class EmployeeDetailScreen extends ConsumerWidget {
           onTap: onTap,
         ),
       );
-}
-
-/// Read-only list of the On Duty sites that apply to the employee.
-class _DutyLocationsSection extends ConsumerWidget {
-  const _DutyLocationsSection({required this.userId});
-  final String userId;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final async = ref.watch(employeeDutyLocationsProvider(userId));
-    final theme = Theme.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Divider(height: 24),
-        Text('On-duty locations', style: theme.textTheme.titleMedium),
-        const SizedBox(height: 4),
-        async.when(
-          loading: () => const Padding(padding: EdgeInsets.all(8), child: LinearProgressIndicator()),
-          error: (err, _) => Row(
-            children: [
-              Expanded(child: Text(adminMsg(err))),
-              TextButton(
-                onPressed: () => ref.invalidate(employeeDutyLocationsProvider(userId)),
-                child: const Text('Try again'),
-              ),
-            ],
-          ),
-          data: (list) => list.isEmpty
-              ? const Padding(padding: EdgeInsets.symmetric(vertical: 4), child: Text('None assigned.'))
-              : Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    for (final l in list)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 2),
-                        child: Text(
-                          '${l.name}${l.isActive ? '' : ' (inactive)'}'
-                          '${l.assignMode == 'all' ? ' - all employees' : ''}',
-                        ),
-                      ),
-                  ],
-                ),
-        ),
-      ],
-    );
-  }
 }

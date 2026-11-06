@@ -83,9 +83,6 @@ class _DashboardState extends ConsumerState<DashboardPage> with WidgetsBindingOb
                   _card("Today's attendance", {
                     'Checked in': d.attendance!['checked_in'],
                     'Late': d.attendance!['late'],
-                    if (d.attendance!.containsKey('on_duty')) 'On Duty': d.attendance!['on_duty'],
-                    if (d.attendance!.containsKey('on_duty_open'))
-                      'Open visits now': d.attendance!['on_duty_open'],
                     'On leave': d.attendance!['on_leave'],
                     'Not checked in': d.attendance!['not_checked_in'],
                   }),
@@ -93,8 +90,6 @@ class _DashboardState extends ConsumerState<DashboardPage> with WidgetsBindingOb
                   _card('Pending requests', {
                     'Leave': d.requests!['leave_pending'],
                     'Permission': d.requests!['permission_pending'],
-                    if (d.requests!.containsKey('on_duty_pending'))
-                      'On Duty': d.requests!['on_duty_pending'],
                     'Total': d.pendingRequests,
                   }),
                 if (d.sessions != null)

@@ -6,40 +6,21 @@ import '../../leave/domain/leave_models.dart' show PersonSummary, formatDays;
 /// has.
 
 class HomeAttendance {
-  const HomeAttendance({
-    this.checkInAt,
-    this.checkOutAt,
-    this.status,
-    this.openVisitLocation,
-    this.openVisitSince,
-  });
+  const HomeAttendance({this.checkInAt, this.checkOutAt, this.status});
   final DateTime? checkInAt;
   final DateTime? checkOutAt;
   final String? status;
 
-  /// Name and start of the open On Duty visit, when there is one.
-  final String? openVisitLocation;
-  final DateTime? openVisitSince;
-
-  static HomeAttendance? parse(Object? v) {
-    if (v is! Map) return null;
-    final open = v['open_visit'];
-    return HomeAttendance(
-      checkInAt: parseTimestamp(v['check_in_at']),
-      checkOutAt: parseTimestamp(v['check_out_at']),
-      status: v['status'] as String?,
-      openVisitLocation: open is Map && open['location_name'] is String ? open['location_name'] as String : null,
-      openVisitSince: open is Map ? parseTimestamp(open['check_in_at']) : null,
-    );
-  }
+  static HomeAttendance? parse(Object? v) => v is Map
+      ? HomeAttendance(
+          checkInAt: parseTimestamp(v['check_in_at']),
+          checkOutAt: parseTimestamp(v['check_out_at']),
+          status: v['status'] as String?,
+        )
+      : null;
 
   /// Same wording as the attendance card (`todayStatusText`).
   String get text {
-    final site = openVisitLocation;
-    if (site != null) {
-      final since = openVisitSince;
-      return since == null ? 'On duty at $site' : 'On duty at $site since ${formatTime(since)}';
-    }
     final inAt = checkInAt;
     if (inAt == null) return 'Not checked in yet';
     final late = status == 'late' ? ' (late)' : '';

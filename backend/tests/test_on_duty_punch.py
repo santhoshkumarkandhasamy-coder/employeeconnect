@@ -64,9 +64,7 @@ async def attendance_row(db, role="employee", day=WED) -> Attendance:
     uid = await user_id(db, role)
     return (
         await db.execute(
-            select(Attendance)
-            .where(Attendance.user_id == uid, Attendance.work_date == day)
-            .execution_options(populate_existing=True)
+            select(Attendance).where(Attendance.user_id == uid, Attendance.work_date == day).execution_options(populate_existing=True)
         )
     ).scalar_one()
 
@@ -152,9 +150,8 @@ async def test_unknown_inactive_unassigned_locations_look_identical(client, emp,
         answers.append((e["message"], e["details"]))
     assert len(set(map(repr, answers))) == 1  # no enumeration: same message and details for all three
     assert (await db.execute(select(OnDutyVisit))).first() is None
-    # review 11 L4: audited (reason only, no coordinates) but NOT a punch failure (not in PUNCH_FAIL_CODES, counter untouched)
-    rows = (await db.execute(select(AuditLog).where(AuditLog.action == "attendance.punch_rejected"))).scalars().all()
-    assert len(rows) == 3 and all(a.after == {"kind": "on_duty_check_in", "reason": "DUTY_LOCATION_UNAVAILABLE"} for a in rows)
+    # not a punch failure: no audit row, counter untouched
+    assert not (await db.execute(select(AuditLog).where(AuditLog.action == "attendance.punch_rejected"))).first()
 
 
 async def test_assign_mode_all_and_switching(client, emp, clock, db):
@@ -224,12 +221,7 @@ async def _request(db, role, d_from, d_to, loc=None, status="approved"):
     from app.models import OnDutyRequest
 
     r = OnDutyRequest(
-        user_id=await user_id(db, role),
-        from_date=d_from,
-        to_date=d_to,
-        location_id=loc.id if loc else None,
-        purpose="p",
-        status=status,
+        user_id=await user_id(db, role), from_date=d_from, to_date=d_to, location_id=loc.id if loc else None, purpose="p", status=status
     )
     db.add(r)
     await db.commit()
@@ -248,11 +240,7 @@ async def test_approval_required_matrix(client, emp, clock, loc, db):
     await _request(db, "employee", WED, WED, other)  # approved for another location
     assert code(await visit_in(client, emp, loc)) == "ON_DUTY_NOT_APPROVED"
     t = (await client.get("/api/on-duty/today", headers=emp)).json()
-    assert (
-        t["approval"]["covered"] is True
-        and t["approval"]["location_ids"] == [str(other.id)]
-        and not t["approval"]["any_location"]
-    )
+    assert t["approval"]["covered"] is True and t["approval"]["location_ids"] == [str(other.id)] and not t["approval"]["any_location"]
     assert t["can_check_in"] is True  # advisory: covered for at least one assigned location? other is not assigned -> see below
     # exact request for this location
     req = await _request(db, "employee", WED, WED + dt.timedelta(days=2), loc)
@@ -316,10 +304,7 @@ async def test_accuracy_stale_fix_and_mock_rules(client, emp, clock, loc, db):
     assert code(await visit_in(client, emp, loc, fix_time=future)) == "LOCATION_FIX_STALE"
     r = await visit_in(client, emp, loc, is_mock_location=True)
     assert r.status_code == 422 and code(r) == "MOCK_LOCATION_DETECTED"
-    reasons = [
-        a.after["reason"]
-        for a in (await db.execute(select(AuditLog).where(AuditLog.action == "attendance.punch_rejected"))).scalars()
-    ]
+    reasons = [a.after["reason"] for a in (await db.execute(select(AuditLog).where(AuditLog.action == "attendance.punch_rejected"))).scalars()]
     assert reasons == ["LOCATION_ACCURACY_LOW", "LOCATION_FIX_STALE", "LOCATION_FIX_STALE", "MOCK_LOCATION_DETECTED"]
     assert (await visit_in(client, emp, loc, accuracy_m=100)).status_code == 201
 
@@ -338,7 +323,9 @@ async def test_failure_counter_is_shared_with_office_and_success_resets(client, 
     assert get_settings().punch_fail_limit == 5
     # 3 office failures + 2 on-duty failures exhaust the single per-user budget
     for _ in range(3):
-        r = await client.post("/api/attendance/check-in", json={"lat": 1.0, "lng": 1.0, "accuracy_m": 10, **fix()}, headers=emp)
+        r = await client.post(
+            "/api/attendance/check-in", json={"lat": 1.0, "lng": 1.0, "accuracy_m": 10, **fix()}, headers=emp
+        )
         assert code(r) == "OUTSIDE_GEOFENCE"
     for _ in range(2):
         assert code(await visit_in(client, emp, loc, **FAR)) == "OUTSIDE_DUTY_LOCATION"
@@ -501,10 +488,7 @@ async def test_check_out_fix_rules_audited_with_check_out_kind(client, emp, cloc
     assert code(await visit_out(client, emp, is_mock_location=True)) == "MOCK_LOCATION_DETECTED"
     stale = (att_svc.utcnow() - dt.timedelta(seconds=300)).isoformat()
     assert code(await visit_out(client, emp, fix_time=stale)) == "LOCATION_FIX_STALE"
-    kinds = {
-        a.after["kind"]
-        for a in (await db.execute(select(AuditLog).where(AuditLog.action == "attendance.punch_rejected"))).scalars()
-    }
+    kinds = {a.after["kind"] for a in (await db.execute(select(AuditLog).where(AuditLog.action == "attendance.punch_rejected"))).scalars()}
     assert kinds == {"on_duty_check_out"}
     v = (await db.execute(select(OnDutyVisit))).scalar_one()
     assert v.check_out_at is None  # the visit is still open
@@ -566,9 +550,7 @@ async def test_suspicious_checkout_flags_visit(client, emp, clock, loc, db):
     await visit_out(client, emp, is_mock_location=True)
     v = (await db.execute(select(OnDutyVisit))).scalar_one()
     assert v.suspicious is True and v.check_out_mock_location is True
-    rows = (await db.execute(select(AuditLog).where(AuditLog.action == "on_duty.suspicious_punch"))).scalars().all()
-    mock_rows = [a for a in rows if a.after["reason"] == "mock_flag"]
-    assert len(mock_rows) == 1 and mock_rows[0].after["kind"] == "check_out"
+    assert (await db.execute(select(AuditLog).where(AuditLog.action == "on_duty.suspicious_punch"))).scalars().one().after["kind"] == "check_out"
 
 
 # ------------------------------------------------------------------ day model: half day, span, multiple visits
@@ -731,13 +713,7 @@ async def test_retention_purges_visit_locations_and_selfies(client, emp, clock, 
     now = ist(2026, 10, 21, 12, 0) + dt.timedelta(days=100)  # retention default 90 days
     out = await att_svc.purge_pii(db, now=now)
     assert out["locations"] >= 1 and out["selfies"] == 2
-    raw = (
-        await db.execute(
-            text(
-                "SELECT check_in_loc_enc, check_out_loc_enc, check_in_selfie_file_id, check_out_selfie_file_id FROM on_duty_visits"
-            )
-        )
-    ).one()
+    raw = (await db.execute(text("SELECT check_in_loc_enc, check_out_loc_enc, check_in_selfie_file_id, check_out_selfie_file_id FROM on_duty_visits"))).one()
     assert tuple(raw) == (None, None, None, None)
     assert (await db.execute(select(File))).scalars().all() == []
     a = (await db.execute(select(AuditLog).where(AuditLog.action == "on_duty.retention_purge"))).scalars().one()
@@ -804,9 +780,7 @@ async def test_visits_history_pagination_range_and_privacy(client, emp, clock, l
         clock(ist(2026, 10, 21, 11 + i * 2, 0))
         await visit_out(client, emp)
     r = (await client.get("/api/on-duty/visits?page_size=2", headers=emp)).json()
-    assert (
-        r["total"] == 3 and len(r["items"]) == 2 and r["items"][0]["check_in_at"] > r["items"][1]["check_in_at"]
-    )  # newest first
+    assert r["total"] == 3 and len(r["items"]) == 2 and r["items"][0]["check_in_at"] > r["items"][1]["check_in_at"]  # newest first
     assert (await client.get("/api/on-duty/visits?page=2&page_size=2", headers=emp)).json()["items"].__len__() == 1
     assert code(await client.get("/api/on-duty/visits?from=2026-10-10&to=2026-10-01", headers=emp)) == "INVALID_DATE_RANGE"
     assert code(await client.get("/api/on-duty/visits?from=2026-01-01&to=2026-10-21", headers=emp)) == "INVALID_DATE_RANGE"
@@ -865,18 +839,3 @@ async def test_bearer_user_cannot_touch_other_users_visit(client, emp, clock, lo
     await visit_in(client, emp, loc)
     mgr = bearer(await tokens_for("manager"))
     assert code(await visit_out(client, mgr)) == "NO_OPEN_VISIT"  # the manager has no open visit; employee's is untouched
-
-
-async def test_visit_open_across_midnight_closes_the_day_it_started_on(client, emp, clock, loc, db):
-    clock(ist(2026, 10, 21, 23, 50))
-    vid = (await visit_in(client, emp, loc)).json()["visit"]["id"]
-    clock(ist(2026, 10, 22, 0, 10))  # before the 00:30 job ran: the visit is still open
-    t = (await client.get("/api/on-duty/today", headers=emp)).json()
-    assert (
-        t["open_visit"]["id"] == vid and t["visits"] == [] and t["blocked_reason"] == "VISIT_OPEN"
-    )  # open_visit is not date-bound
-    r = await visit_out(client, emp, visit_id=vid)
-    assert r.status_code == 200
-    a = r.json()["attendance"]
-    assert a["work_date"] == "2026-10-21" and a["worked_minutes"] == 20 and a["status"] == "half_day"
-    assert r.json()["visit"]["work_date"] == "2026-10-21"

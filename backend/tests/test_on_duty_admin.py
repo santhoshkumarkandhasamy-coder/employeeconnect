@@ -14,6 +14,7 @@ from sqlalchemy import select
 from app.models import (
     AuditLog,
     Department,
+    DutyLocation,
     DutyLocationAssignment,
     OnDutyRequest,
     OnDutyVisit,
@@ -21,9 +22,8 @@ from app.models import (
     User,
 )
 from app.services import settings as settings_svc
-from tests.conftest import PASSWORD, bearer, login_tokens
+from tests.conftest import PASSWORD, bearer
 from tests.on_duty_helpers import WED, body_in, ist, make_loc, office_in, set_setting, user_id, visit_in, visit_out
-from tests.test_plan11_license import _expired, admin, vendor  # noqa: F401  (fixtures + helper reused for the read_only test)
 
 
 @pytest.fixture
@@ -92,22 +92,13 @@ async def test_create_get_update_delete_with_audit(client, H, db):
     lid = b["id"]
     assert (await client.get(f"/api/admin/duty-locations/{lid}", headers=hr)).json()["id"] == lid
     r = await client.put(
-        f"/api/admin/duty-locations/{lid}",
-        headers=await H("admin"),
-        json=loc_body(name="Acme HQ", radius_m=300, is_active=False, address=None),
+        f"/api/admin/duty-locations/{lid}", headers=await H("admin"), json=loc_body(name="Acme HQ", radius_m=300, is_active=False, address=None)
     )
-    assert (
-        r.status_code == 200 and r.json()["name"] == "Acme HQ" and r.json()["is_active"] is False and r.json()["address"] is None
-    )
+    assert r.status_code == 200 and r.json()["name"] == "Acme HQ" and r.json()["is_active"] is False and r.json()["address"] is None
     assert r.json()["updated_by"]["employee_id"] == "ADM001" and r.json()["created_by"]["employee_id"] == "HR001"
     assert (await client.delete(f"/api/admin/duty-locations/{lid}", headers=hr)).status_code == 204
     assert (await client.get(f"/api/admin/duty-locations/{lid}", headers=hr)).status_code == 404
-    acts = [
-        a
-        for a in (
-            await db.execute(select(AuditLog).where(AuditLog.entity_type == "duty_location").order_by(AuditLog.id))
-        ).scalars()
-    ]
+    acts = [a for a in (await db.execute(select(AuditLog).where(AuditLog.entity_type == "duty_location").order_by(AuditLog.id))).scalars()]
     assert [a.action for a in acts] == ["duty_location.create", "duty_location.update", "duty_location.delete"]
     assert acts[0].after["lat"] == 13.0067 and acts[0].actor_employee_id == "HR001"  # coordinates are business data
     assert acts[1].before["name"] == "Acme Client" and acts[1].after["name"] == "Acme HQ"
@@ -144,9 +135,7 @@ async def test_duplicate_name_case_insensitive_409(client, H):
     other = (await client.post("/api/admin/duty-locations", headers=hr, json=loc_body(name="Branch Two"))).json()
     r = await client.put(f"/api/admin/duty-locations/{other['id']}", headers=hr, json=loc_body(name="branch one"))
     assert r.status_code == 409
-    assert (
-        await client.put(f"/api/admin/duty-locations/{first['id']}", headers=hr, json=loc_body(name="BRANCH ONE"))
-    ).status_code == 200
+    assert (await client.put(f"/api/admin/duty-locations/{first['id']}", headers=hr, json=loc_body(name="BRANCH ONE"))).status_code == 200
 
 
 async def test_list_filters_search_pagination_and_counts(client, H, db):
@@ -161,13 +150,9 @@ async def test_list_filters_search_pagination_and_counts(client, H, db):
     assert by["beta_site"]["assigned_count"] == 4  # all active employees
     assert by["Gamma"]["assigned_count"] == 1 and by["Gamma"]["is_active"] is False
     assert [i["name"] for i in (await client.get("/api/admin/duty-locations?q=mount", headers=hr)).json()["items"]] == [
-        "Alpha Works",
-        "beta_site",
-        "Gamma",
+        "Alpha Works", "beta_site", "Gamma",
     ]  # the address matches too
-    assert [i["name"] for i in (await client.get("/api/admin/duty-locations?q=beta_", headers=hr)).json()["items"]] == [
-        "beta_site"
-    ]
+    assert [i["name"] for i in (await client.get("/api/admin/duty-locations?q=beta_", headers=hr)).json()["items"]] == ["beta_site"]
     assert (await client.get("/api/admin/duty-locations?q=%25", headers=hr)).json()["total"] == 0  # wildcard is escaped
     assert (await client.get("/api/admin/duty-locations?is_active=false", headers=hr)).json()["total"] == 1
     assert (await client.get("/api/admin/duty-locations?assign_mode=all", headers=hr)).json()["total"] == 1
@@ -183,25 +168,17 @@ async def test_delete_in_use_is_409_and_deactivate_works(client, H, db, clock):
     free = await make_loc(db, "Free")
     emp = await H("employee")
     assert (await visit_in(client, emp, used_by_visit)).status_code == 201
-    db.add(
-        OnDutyRequest(
-            user_id=await user_id(db, "employee"), from_date=WED, to_date=WED, location_id=used_by_request.id, purpose="p"
-        )
-    )
+    db.add(OnDutyRequest(user_id=await user_id(db, "employee"), from_date=WED, to_date=WED, location_id=used_by_request.id, purpose="p"))
     await db.commit()
     for loc in (used_by_visit, used_by_request):
         r = await client.delete(f"/api/admin/duty-locations/{loc.id}", headers=hr)
         assert r.status_code == 409 and code(r) == "IN_USE"
         assert (await client.get(f"/api/admin/duty-locations/{loc.id}", headers=hr)).json()["in_use"] is True
     assert (await client.delete(f"/api/admin/duty-locations/{free.id}", headers=hr)).status_code == 204
-    r = await client.put(
-        f"/api/admin/duty-locations/{used_by_visit.id}", headers=hr, json=loc_body(name="Visited", is_active=False)
-    )
+    r = await client.put(f"/api/admin/duty-locations/{used_by_visit.id}", headers=hr, json=loc_body(name="Visited", is_active=False))
     assert r.status_code == 200 and r.json()["is_active"] is False
     # editing coordinates never rewrites past visits
-    await client.put(
-        f"/api/admin/duty-locations/{used_by_visit.id}", headers=hr, json=loc_body(name="Visited Renamed", lat=1.0, lng=2.0)
-    )
+    await client.put(f"/api/admin/duty-locations/{used_by_visit.id}", headers=hr, json=loc_body(name="Visited Renamed", lat=1.0, lng=2.0))
     v = (await db.execute(select(OnDutyVisit).execution_options(populate_existing=True))).scalar_one()
     assert v.location_name == "Visited"  # snapshot
     items = (await client.get("/api/on-duty/visits", headers=emp)).json()["items"]
@@ -222,32 +199,19 @@ async def test_assignments_get_put_full_replace_and_audit(client, H, db):
     r = (await client.get(f"/api/admin/duty-locations/{loc.id}/assignments", headers=hr)).json()
     assert r["location_id"] == str(loc.id) and r["assign_mode"] == "selected"
     assert [i["user"]["employee_id"] for i in r["items"]] == ["EMP001"] and r["items"][0]["assigned_at"].endswith("Z")
-    mgr_id, adm_id, emp_id = (
-        str(await user_id(db, "manager")),
-        str(await user_id(db, "admin")),
-        str(await user_id(db, "employee")),
-    )
-    r = await client.put(  # the admin may include itself (review 11 M2: HR may not, see test_qa_review11_on_duty_fixes)
+    mgr_id, hr_id, emp_id = str(await user_id(db, "manager")), str(await user_id(db, "hr")), str(await user_id(db, "employee"))
+    r = await client.put(
         f"/api/admin/duty-locations/{loc.id}/assignments",
-        headers=await H("admin"),
-        json={"assign_mode": "selected", "user_ids": [mgr_id, adm_id]},
+        headers=hr,
+        json={"assign_mode": "selected", "user_ids": [mgr_id, hr_id]},
     )
     assert r.status_code == 200, r.text
-    assert [i["user"]["employee_id"] for i in r.json()["items"]] == [
-        "ADM001",
-        "MGR001",
-    ]  # replaced: EMP001 is gone, sorted by employee id
+    assert [i["user"]["employee_id"] for i in r.json()["items"]] == ["HR001", "MGR001"]  # replaced: EMP001 is gone, sorted by employee id
     a = (await db.execute(select(AuditLog).where(AuditLog.action == "duty_location.assignments"))).scalars().one()
-    assert (
-        a.after["assign_mode"] == "selected"
-        and sorted(a.after["added"]) == sorted([mgr_id, adm_id])
-        and a.after["removed"] == [emp_id]
-    )
+    assert a.after["assign_mode"] == "selected" and sorted(a.after["added"]) == sorted([mgr_id, hr_id]) and a.after["removed"] == [emp_id]
     assert "Test " not in repr(a.after)  # ids only, never names
     # clearing the list is allowed
-    r = await client.put(
-        f"/api/admin/duty-locations/{loc.id}/assignments", headers=hr, json={"assign_mode": "selected", "user_ids": []}
-    )
+    r = await client.put(f"/api/admin/duty-locations/{loc.id}/assignments", headers=hr, json={"assign_mode": "selected", "user_ids": []})
     assert r.status_code == 200 and r.json()["items"] == []
 
 
@@ -276,7 +240,7 @@ async def test_assignments_department_expansion_and_validation(client, H, db, se
     emp_id = str(await user_id(db, "employee"))
     r = await client.put(
         f"/api/admin/duty-locations/{loc.id}/assignments",
-        headers=await H("admin"),  # the department includes HR itself: only an admin may add itself (review 11 M2),
+        headers=hr,
         json={"assign_mode": "selected", "user_ids": [emp_id], "add_department_ids": [str(seeded["dept"])]},
     )
     assert r.status_code == 200
@@ -285,23 +249,14 @@ async def test_assignments_department_expansion_and_validation(client, H, db, se
     dept2 = Department(name="Ops", code="OPS")
     db.add(dept2)
     await db.commit()
-    newbie = User(
-        employee_id="NEW001",
-        password_hash="x",
-        full_name="New Person",
-        role_id=seeded["roles"]["employee"],
-        department_id=seeded["dept"],
-        status="active",
-    )
+    newbie = User(employee_id="NEW001", password_hash="x", full_name="New Person", role_id=seeded["roles"]["employee"], department_id=seeded["dept"], status="active")
     db.add(newbie)
     await db.commit()
     assert len((await client.get(f"/api/admin/duty-locations/{loc.id}/assignments", headers=hr)).json()["items"]) == 4
     # errors
     ghost, ghost2 = str(uuid.uuid4()), str(uuid.uuid4())
     r = await client.put(
-        f"/api/admin/duty-locations/{loc.id}/assignments",
-        headers=hr,
-        json={"assign_mode": "selected", "user_ids": [emp_id, ghost]},
+        f"/api/admin/duty-locations/{loc.id}/assignments", headers=hr, json={"assign_mode": "selected", "user_ids": [emp_id, ghost]}
     )
     assert r.status_code == 422 and code(r) == "VALIDATION_ERROR"
     assert r.json()["error"]["details"] == [{"field": "user_ids", "message": ghost}]
@@ -312,14 +267,10 @@ async def test_assignments_department_expansion_and_validation(client, H, db, se
     )
     assert r.status_code == 422 and r.json()["error"]["details"] == [{"field": "add_department_ids", "message": ghost2}]
     r = await client.put(
-        f"/api/admin/duty-locations/{loc.id}/assignments",
-        headers=hr,
-        json={"assign_mode": "selected", "user_ids": [emp_id, emp_id]},
+        f"/api/admin/duty-locations/{loc.id}/assignments", headers=hr, json={"assign_mode": "selected", "user_ids": [emp_id, emp_id]}
     )
     assert r.status_code == 422
-    assert (
-        len((await client.get(f"/api/admin/duty-locations/{loc.id}/assignments", headers=hr)).json()["items"]) == 4
-    )  # unchanged after errors
+    assert len((await client.get(f"/api/admin/duty-locations/{loc.id}/assignments", headers=hr)).json()["items"]) == 4  # unchanged after errors
     for bad in (
         {"user_ids": []},  # assign_mode required
         {"assign_mode": "selected"},  # user_ids required
@@ -329,11 +280,7 @@ async def test_assignments_department_expansion_and_validation(client, H, db, se
     ):
         r = await client.put(f"/api/admin/duty-locations/{loc.id}/assignments", headers=hr, json=bad)
         assert r.status_code == 422, list(bad)
-    assert (
-        await client.put(
-            f"/api/admin/duty-locations/{uuid.uuid4()}/assignments", headers=hr, json={"assign_mode": "all", "user_ids": []}
-        )
-    ).status_code == 404
+    assert (await client.put(f"/api/admin/duty-locations/{uuid.uuid4()}/assignments", headers=hr, json={"assign_mode": "all", "user_ids": []})).status_code == 404
 
 
 async def test_assignments_reject_inactive_users_and_listing_hides_them(client, H, db):
@@ -365,11 +312,7 @@ async def test_assignments_put_rate_limit_10_per_minute(client, H, db):
     hr = await H("hr")
     loc = await make_loc(db, assign=())
     codes = [
-        (
-            await client.put(
-                f"/api/admin/duty-locations/{loc.id}/assignments", headers=hr, json={"assign_mode": "selected", "user_ids": []}
-            )
-        ).status_code
+        (await client.put(f"/api/admin/duty-locations/{loc.id}/assignments", headers=hr, json={"assign_mode": "selected", "user_ids": []})).status_code
         for _ in range(11)
     ]
     assert codes[:10] == [200] * 10 and codes[10] == 429
@@ -378,8 +321,7 @@ async def test_assignments_put_rate_limit_10_per_minute(client, H, db):
 async def test_location_write_rate_limit_30_per_minute(client, H):
     hr = await H("hr")
     codes = [
-        (await client.post("/api/admin/duty-locations", headers=hr, json=loc_body(name=f"Site {i}"))).status_code
-        for i in range(31)
+        (await client.post("/api/admin/duty-locations", headers=hr, json=loc_body(name=f"Site {i}"))).status_code for i in range(31)
     ]
     assert codes[:30] == [201] * 30 and codes[30] == 429
 
@@ -435,34 +377,21 @@ async def test_admin_visits_scope_fields_and_filters(client, H, db, clock):
     rm = (await client.get("/api/admin/on-duty/visits?from=2026-10-20&to=2026-10-21", headers=mgr)).json()
     assert rm["total"] == 2 and {i["user"]["employee_id"] for i in rm["items"]} == {"EMP001"}
     for i in rm["items"]:
-        for k in (
-            "check_in_distance_m",
-            "check_out_distance_m",
-            "check_out_within_fence",
-            "check_in_accuracy_m",
-            "check_out_accuracy_m",
-            "suspicious",
-        ):
+        for k in ("check_in_distance_m", "check_out_distance_m", "check_out_within_fence", "check_in_accuracy_m", "check_out_accuracy_m", "suspicious"):
             assert i[k] is None, k
     assert (await client.get("/api/admin/on-duty/visits", headers=emp)).status_code == 403
     # filters
     q = "/api/admin/on-duty/visits"
     assert (await client.get(f"{q}?date=2026-10-20", headers=hr)).json()["total"] == 1
-    assert (await client.get(f"{q}?date=2026-10-20&from=2026-01-01&to=2026-01-02", headers=hr)).json()[
-        "total"
-    ] == 1  # date overrides
+    assert (await client.get(f"{q}?date=2026-10-20&from=2026-01-01&to=2026-01-02", headers=hr)).json()["total"] == 1  # date overrides
     assert (await client.get(f"{q}?date=2026-10-21&location_id={b.id}", headers=hr)).json()["total"] == 2
     assert (await client.get(f"{q}?date=2026-10-21&location_id={a.id}", headers=hr)).json()["total"] == 0
-    assert (await client.get(f"{q}?date=2026-10-21&location_id={uuid.uuid4()}", headers=hr)).json()[
-        "total"
-    ] == 0  # unknown -> empty, not 404
+    assert (await client.get(f"{q}?date=2026-10-21&location_id={uuid.uuid4()}", headers=hr)).json()["total"] == 0  # unknown -> empty, not 404
     assert (await client.get(f"{q}?date=2026-10-21&department_id={uuid.uuid4()}", headers=hr)).json()["total"] == 0
     assert (await client.get(f"{q}?date=2026-10-21&employee_id=emp001", headers=hr)).json()["total"] == 1
     assert (await client.get(f"{q}?date=2026-10-21&open=true", headers=hr)).json()["total"] == 2
     assert (await client.get(f"{q}?date=2026-10-20&open=true", headers=hr)).json()["total"] == 0
-    assert (await client.get(f"{q}?from=2026-10-21&to=2026-10-21&page_size=1&page=2", headers=hr)).json()["items"][0]["user"][
-        "employee_id"
-    ] == "EMP001"
+    assert (await client.get(f"{q}?from=2026-10-21&to=2026-10-21&page_size=1&page=2", headers=hr)).json()["items"][0]["user"]["employee_id"] == "EMP001"
     assert code(await client.get(f"{q}?from=2025-01-01&to=2026-10-21", headers=hr)) == "INVALID_DATE_RANGE"  # > 366 days
     assert (await client.get(f"{q}?from=2026-10-22&to=2026-10-21", headers=hr)).status_code == 422
     # defaults are bounded (no unbounded scan) and still answer
@@ -528,14 +457,9 @@ async def test_settings_keys_and_validation(client, H, db):
     assert {k: cur[k] for k in cur if k.startswith("on_duty.")} == {
         "on_duty.enabled": True, "on_duty.approval_required": False, "on_duty.apply_late_rule": False, "on_duty.checkout_geofence": False,
         "on_duty.selfie_required": False, "on_duty.max_visits_per_day": 10, "on_duty.request_backdate_days": 0,
-        "on_duty.request_max_advance_days": 60, "on_duty.all_mode_max_radius_m": 300,
+        "on_duty.request_max_advance_days": 60,
     }  # fmt: skip
-    ok = {
-        "on_duty.approval_required": True,
-        "on_duty.max_visits_per_day": 50,
-        "on_duty.request_backdate_days": 30,
-        "on_duty.request_max_advance_days": 365,
-    }
+    ok = {"on_duty.approval_required": True, "on_duty.max_visits_per_day": 50, "on_duty.request_backdate_days": 30, "on_duty.request_max_advance_days": 365}
     r = await client.put("/api/admin/settings", headers=adm, json={"settings": ok})
     assert r.status_code == 200 and r.json()["settings"]["on_duty.max_visits_per_day"] == 50
     bad = [
@@ -556,9 +480,7 @@ async def test_settings_keys_and_validation(client, H, db):
 
 def test_every_known_setting_has_a_spec():
     assert set(settings_svc.KNOWN) <= set(settings_svc.SPECS)
-    assert {k for k in settings_svc.KNOWN if k.startswith("on_duty.")} == {
-        k for k in settings_svc.SPECS if k.startswith("on_duty.")
-    }
+    assert {k for k in settings_svc.KNOWN if k.startswith("on_duty.")} == {k for k in settings_svc.SPECS if k.startswith("on_duty.")}
 
 
 async def test_settings_row_is_picked_up_live(client, H, db):
@@ -643,24 +565,3 @@ async def test_export_filters_for_on_duty(client, H, db, clock, redis):
     await redis.flushall()
     r = await client.get("/api/admin/export", headers=hr, params={**base, "department_id": str(uuid.uuid4())})
     assert r.status_code == 404
-
-
-# ------------------------------------------------------------------ license read_only
-
-
-async def test_license_read_only_refuses_visit_punches_and_request_writes(client, admin, vendor, db):  # noqa: F811
-    emp = bearer(await login_tokens(client, "EMP001"))
-    loc = await make_loc(db)
-    await _expired(client, admin, vendor, db, "read_only")
-    refused = lambda r: r.status_code == 403 and r.json()["error"]["code"] == "LICENSE_EXPIRED"  # noqa: E731
-    assert refused(await client.post("/api/on-duty/check-in", headers=emp, json=body_in(loc)))
-    assert refused(await client.post("/api/on-duty/check-out", headers=emp, json={}))
-    assert refused(
-        await client.post(
-            "/api/on-duty/requests", headers=emp, json={"from_date": "2026-12-01", "to_date": "2026-12-01", "purpose": "x"}
-        )
-    )
-    assert refused(await client.post(f"/api/on-duty/requests/{uuid.uuid4()}/cancel", headers=emp))
-    assert refused(await client.post("/api/admin/duty-locations", headers=admin, json=loc_body(name="Blocked")))
-    assert (await client.get("/api/on-duty/today", headers=emp)).status_code == 200  # reads keep working
-    assert (await client.get("/api/on-duty/locations", headers=emp)).status_code == 200

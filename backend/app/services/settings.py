@@ -81,7 +81,6 @@ SPECS: dict[str, Spec] = {
     "on_duty.max_visits_per_day": _i(1, 50),
     "on_duty.request_backdate_days": _i(0, 30),
     "on_duty.request_max_advance_days": _i(1, 365),
-    "on_duty.all_mode_max_radius_m": _i(10, 2000),
     "auth.offline_cache_max_hours": _i(0, 720),  # 0 = off, otherwise 12..720 (checked in validate)
     "console.session_max_hours": _i(1, 24),
     "console.inactivity_timeout_minutes": _i(5, 60),

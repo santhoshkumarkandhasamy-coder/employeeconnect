@@ -24,52 +24,13 @@ from ..models import (
     DutyLocationAssignment,
     OnDutyRequest,
     OnDutyVisit,
-    Setting,
     User,
 )
-from . import admin_security
 from . import attendance as att
 from . import files as files_svc
 
 MAX_ASSIGNED = 5000
 MAX_BAD_IDS_LISTED = 20
-# Review 11 M2. `role.assign` is held by the Admin role only (HR has `duty_location.manage` but not this), so it is the
-# "admin-only" permission that lets someone assign themselves to a duty location.
-SELF_ASSIGN_PERMISSION = "role.assign"
-# A location open to ALL employees may not be larger than this many metres (setting `on_duty.all_mode_max_radius_m`,
-# validated 10..2000 in services/settings.py; the DB check still caps every radius at 2000).
-ALL_MODE_MAX_RADIUS_KEY = "on_duty.all_mode_max_radius_m"
-ALL_MODE_MAX_RADIUS_DEFAULT = 300
-
-
-async def all_mode_max_radius(session: AsyncSession) -> int:
-    row = (await session.execute(select(Setting.value).where(Setting.key == ALL_MODE_MAX_RADIUS_KEY))).scalar_one_or_none()
-    try:
-        return int(row) if row is not None else ALL_MODE_MAX_RADIUS_DEFAULT
-    except (TypeError, ValueError):
-        return ALL_MODE_MAX_RADIUS_DEFAULT
-
-
-async def _check_all_mode_radius(session: AsyncSession, assign_mode: str, radius_m: int) -> None:
-    if assign_mode != "all":
-        return
-    cap = await all_mode_max_radius(session)
-    if radius_m > cap:
-        raise AppError(
-            "VALIDATION_ERROR",
-            f"A location open to all employees can have a radius of at most {cap} m",
-            details=[{"field": "radius_m", "message": f"at most {cap} m while assign_mode is 'all'"}],
-        )
-
-
-async def _alert_admins(session: AsyncSession, actor: Principal, loc: DutyLocation, what: str) -> None:
-    """Admin alert after commit (names only, never coordinates). Best effort."""
-    await admin_security.notify_admins(
-        session,
-        entity_id=loc.id,
-        title="Duty location changed",
-        body=f"{actor.user.full_name} ({actor.employee_id}) {what}: '{loc.name}'.",
-    )
 
 
 def _active_user() -> list:
@@ -238,7 +199,6 @@ def _audit_view(loc: DutyLocation) -> dict[str, Any]:
 async def create_location(session: AsyncSession, actor: Principal, body: Any) -> dict[str, Any]:
     if await _name_taken(session, body.name):
         raise _dup()
-    await _check_all_mode_radius(session, body.assign_mode, body.radius_m)
     loc = DutyLocation(
         name=body.name,
         address=body.address,
@@ -260,7 +220,6 @@ async def create_location(session: AsyncSession, actor: Principal, body: Any) ->
         session, action="duty_location.create", actor=actor, entity_type="duty_location", entity_id=loc.id, after=_audit_view(loc)
     )
     await session.commit()
-    await _alert_admins(session, actor, loc, "created a duty location")
     await session.refresh(loc)
     return (await _admin_items(session, [loc]))[0]
 
@@ -269,9 +228,7 @@ async def update_location(session: AsyncSession, actor: Principal, location_id: 
     loc = await _get_or_404(session, location_id, lock=True)
     if await _name_taken(session, body.name, loc.id):
         raise _dup()
-    await _check_all_mode_radius(session, body.assign_mode, body.radius_m)
     before = _audit_view(loc)
-    geo_changed = (loc.lat, loc.lng, loc.radius_m) != (body.lat, body.lng, body.radius_m)
     loc.name, loc.address, loc.lat, loc.lng = body.name, body.address, body.lat, body.lng
     loc.radius_m, loc.assign_mode, loc.is_active, loc.updated_by = body.radius_m, body.assign_mode, body.is_active, actor.id
     try:
@@ -281,11 +238,9 @@ async def update_location(session: AsyncSession, actor: Principal, location_id: 
         raise _dup() from None
     audit(
         session, action="duty_location.update", actor=actor, entity_type="duty_location", entity_id=loc.id,
-        before=before, after={**_audit_view(loc), "geo_changed": geo_changed},
+        before=before, after=_audit_view(loc),
     )  # fmt: skip
     await session.commit()
-    if geo_changed:
-        await _alert_admins(session, actor, loc, "changed the coordinates or radius of a duty location")
     await session.refresh(loc)  # updated_at is set by the database
     return (await _admin_items(session, [loc]))[0]
 
@@ -378,17 +333,6 @@ async def put_assignments(session: AsyncSession, actor: Principal, location_id: 
         ).scalars()
     )
     removed, added = current - wanted, wanted - current
-    # Review 11 M2: HR may not give itself presence. Adding the actor (directly or through a department) needs the admin-only
-    # permission; assign_mode 'all' includes the actor too, so it is flagged and limited by the radius cap instead.
-    self_added = actor.id in added
-    if self_added and not actor.has(SELF_ASSIGN_PERMISSION):
-        raise AppError(
-            "FORBIDDEN",
-            "You cannot assign yourself to a duty location. Ask an administrator.",
-            details=[{"field": "user_ids", "message": "self-assignment needs an administrator"}],
-        )
-    await _check_all_mode_radius(session, body.assign_mode, loc.radius_m)
-    self_assigned = self_added or body.assign_mode == "all"
     if removed:
         rm = list(removed)
         for i in range(0, len(rm), 500):
@@ -413,17 +357,9 @@ async def put_assignments(session: AsyncSession, actor: Principal, location_id: 
             "assign_mode": loc.assign_mode,
             "added": sorted(str(i) for i in added),
             "removed": sorted(str(i) for i in removed),
-            "self_assigned": self_assigned,
         },
     )
     await session.commit()
-    if self_added or (body.assign_mode == "all" and mode_before != "all"):
-        await _alert_admins(
-            session,
-            actor,
-            loc,
-            "assigned themselves to a duty location" if self_added else "opened a duty location to all employees",
-        )
     return await _assignment_payload(session, loc)
 
 
