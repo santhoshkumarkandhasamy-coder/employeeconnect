@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import '../../../core/api/api_exception.dart';
+import '../../devices/domain/device_errors.dart';
 import '../../../core/utils/dates.dart';
 import '../../attendance/domain/attendance_models.dart' show AttendanceRecord;
 import '../../profile/domain/profile_models.dart'
@@ -40,6 +41,9 @@ abstract final class AdminPerm {
   static const consoleAccess = 'console.access';
   static const attendanceViewAll = 'attendance.view_all';
   static const payrollViewAll = 'payroll.view_all';
+  static const deviceView = 'device.view';
+  static const deviceMap = 'device.map';
+  static const deviceManage = 'device.manage';
 }
 
 /// One entry of the Admin home. Shown only when the user holds [permission];
@@ -60,7 +64,8 @@ enum AdminSection {
   sessions('Sessions and devices', AdminPerm.sessionManage),
   license('License', AdminPerm.licenseManage),
   company('Company', AdminPerm.companyManage),
-  payroll('Payroll', AdminPerm.payrollViewAll);
+  payroll('Payroll', AdminPerm.payrollViewAll),
+  devices('Attendance devices', AdminPerm.deviceView);
 
   const AdminSection(this.label, this.permission);
   final String label;
@@ -803,7 +808,7 @@ Map<String, Object?> buildMasterBody(
 
 // ---- settings ------------------------------------------------------------------
 
-enum SettingKind { time, integer, decimal, boolean }
+enum SettingKind { time, integer, decimal, boolean, text }
 
 class SettingSpec {
   const SettingSpec(this.key, this.label, this.kind, {this.min, this.max, this.hint});
@@ -823,6 +828,7 @@ class SettingSpec {
       'auth' => 'Security',
       'permission' => 'Permission requests',
       'leave' => 'Leave',
+      'device' => 'Attendance devices',
       _ => 'Other',
     };
   }
@@ -854,6 +860,21 @@ const List<SettingSpec> settingSpecs = [
   SettingSpec('leave.max_advance_days', 'Leave advance days (0 = no limit)', SettingKind.integer, min: 0, max: 3650),
   SettingSpec('leave.reason_retention_days', 'Reason retention days (0 = keep)', SettingKind.integer, min: 0, max: 3650),
   SettingSpec('leave.allow_cancel_approved', 'Allow cancelling approved leave', SettingKind.boolean),
+  SettingSpec('device.sync_interval_minutes', 'Device sync every (minutes)', SettingKind.integer, min: 2, max: 60),
+  SettingSpec('device.sync_window_start', 'Device sync window start', SettingKind.time, hint: 'HH:MM, office time'),
+  SettingSpec('device.sync_window_end', 'Device sync window end', SettingKind.time, hint: 'HH:MM, office time'),
+  SettingSpec('device.off_window_interval_minutes', 'Device sync outside the window (minutes)', SettingKind.integer, min: 15, max: 240),
+  SettingSpec('device.apply_window_days', 'Days back that device punches are applied', SettingKind.integer, min: 0, max: 31),
+  SettingSpec('device.checkout_min_gap_minutes', 'Minimum gap before a check-out (minutes)', SettingKind.integer, min: 1, max: 120),
+  SettingSpec('device.drift_tolerance_s', 'Device clock tolerance (seconds)', SettingKind.integer, min: 0, max: 900),
+  SettingSpec('device.drift_invalid_s', 'Device clock too far off after (seconds)', SettingKind.integer, min: 900, max: 604800),
+  SettingSpec('device.future_tolerance_s', 'Future punch tolerance (seconds)', SettingKind.integer, min: 0, max: 3600),
+  SettingSpec('device.match_prefix', 'Employee ID prefix to ignore when matching', SettingKind.text, hint: 'Up to 10 letters, digits or dashes; may be empty'),
+  SettingSpec('device.apply_on_on_duty_days', 'Use device punches on on-duty days', SettingKind.boolean),
+  SettingSpec('device.use_punch_state', 'Use the in/out state sent by the device', SettingKind.boolean),
+  SettingSpec('device.push_on_punch', 'Notify employees when a punch is recorded', SettingKind.boolean),
+  SettingSpec('device.punch_retention_days', 'Punch retention (days, 0 = keep)', SettingKind.integer, min: 0, max: 3650, hint: '0 to keep, otherwise at least 90'),
+  SettingSpec('device.sync_history_retention_days', 'Sync history retention (days)', SettingKind.integer, min: 7, max: 366),
 ];
 
 String? validateSetting(SettingSpec s, String? raw) {
@@ -861,12 +882,18 @@ String? validateSetting(SettingSpec s, String? raw) {
   switch (s.kind) {
     case SettingKind.boolean:
       return null;
+    case SettingKind.text:
+      if (s.key == 'device.match_prefix' && !RegExp(r'^[A-Za-z0-9-]{0,10}$').hasMatch(v)) {
+        return 'Up to 10 letters, digits or dashes';
+      }
+      return null;
     case SettingKind.time:
       return isValidTime(v) ? null : 'Use HH:MM (24 hour)';
     case SettingKind.integer:
       final n = int.tryParse(v);
       if (n == null) return 'Enter a whole number';
       if (n < s.min! || n > s.max!) return 'Must be between ${s.min} and ${s.max}';
+      if (s.key == 'device.punch_retention_days' && n != 0 && n < 90) return 'Use 0 (keep) or at least 90';
       return null;
     case SettingKind.decimal:
       final n = double.tryParse(v);
@@ -883,6 +910,7 @@ Object parseSettingValue(SettingSpec s, String raw) {
     SettingKind.integer => int.parse(v),
     SettingKind.decimal => double.parse(v),
     SettingKind.time => v,
+    SettingKind.text => v,
     SettingKind.boolean => v == 'true',
   };
 }
@@ -1119,6 +1147,8 @@ List<T> mergeById<T>(List<T> current, List<T> next, String Function(T) idOf) {
 // ---- errors --------------------------------------------------------------------
 
 String adminErrorMessage(ApiException e) {
+  final device = deviceErrorText(e.code);
+  if (device != null) return device;
   switch (e.code) {
     case 'FORBIDDEN':
       // The server names the exact rule (admin role, system role rename or
@@ -1179,10 +1209,13 @@ String adminErrorMessage(ApiException e) {
 /// `GET/PUT /admin/attendance/{user_id}/{work_date}`: the employee and that
 /// day's record (null when there is none yet).
 class ManualAttendanceDay {
-  const ManualAttendanceDay({required this.workDate, this.user, this.record});
+  const ManualAttendanceDay({required this.workDate, this.user, this.record, this.devicePunches = const []});
   final String workDate;
   final EmployeeRef? user;
   final AttendanceRecord? record;
+
+  /// Device punches of the day (api-contract.md 21.6), newest data from the server.
+  final List<ManualDevicePunch> devicePunches;
 
   factory ManualAttendanceDay.fromJson(Map<String, dynamic> j) {
     final r = j['record'];
@@ -1190,8 +1223,29 @@ class ManualAttendanceDay {
       workDate: _s(j['work_date']),
       user: EmployeeRef.parse(j['user']),
       record: r is Map<String, dynamic> ? AttendanceRecord.fromJson(r) : null,
+      devicePunches: [
+        if (j['device_punches'] is List)
+          for (final p in j['device_punches'] as List)
+            if (p is Map<String, dynamic>) ManualDevicePunch.fromJson(p),
+      ],
     );
   }
+}
+
+/// One device punch listed on the manual attendance screen.
+class ManualDevicePunch {
+  const ManualDevicePunch({required this.punchAt, required this.deviceName, required this.method, required this.outcome});
+  final DateTime? punchAt;
+  final String deviceName;
+  final String method;
+  final String outcome;
+
+  factory ManualDevicePunch.fromJson(Map<String, dynamic> j) => ManualDevicePunch(
+        punchAt: parseTimestamp(j['punch_at']),
+        deviceName: _s(j['device_name']),
+        method: _s(j['method']),
+        outcome: _s(j['outcome']),
+      );
 }
 
 /// First problem with the manual attendance form, or null.

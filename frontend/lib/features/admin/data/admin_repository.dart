@@ -55,6 +55,12 @@ class AdminRepository {
         return ManualAttendanceDay.fromJson(res.data!);
       });
 
+  /// HR "Use device punches": clears the manual entry and recomputes from phone + device punches.
+  Future<ManualAttendanceDay> useDevicePunches(String userId, String workDate, {required String reason}) async =>
+      ManualAttendanceDay.fromJson(
+        await _send('POST', '/admin/attendance/$userId/$workDate/use-device', {'reason': reason.trim()}),
+      );
+
   Future<void> deleteManualAttendance(String userId, String workDate) => guardApi(() async {
         await _dio.delete<void>('/admin/attendance/$userId/$workDate');
       });

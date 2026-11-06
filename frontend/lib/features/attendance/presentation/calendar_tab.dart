@@ -5,6 +5,7 @@ import '../../../core/api/api_exception.dart';
 import '../../../core/utils/dates.dart';
 import '../../../core/widgets/month_selector.dart';
 import '../../../core/widgets/state_views.dart';
+import '../../devices/presentation/my_punches.dart';
 import '../domain/attendance_models.dart';
 import 'attendance_providers.dart';
 import 'widgets/month_grid.dart';
@@ -100,6 +101,7 @@ class CalendarTab extends ConsumerWidget {
                 const SizedBox(height: 4),
                 Text(d.note!),
               ],
+              if (d.status != DayStatus.future) DayPunchList(date: ymd(d.date)),
             ],
           ),
         ),

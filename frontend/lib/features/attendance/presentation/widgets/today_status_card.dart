@@ -15,7 +15,10 @@ String todayStatusText(AttendanceRecord? r) {
   final todayKey = '${today.year.toString().padLeft(4, '0')}-'
       '${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
   final prev = r.workDate.isNotEmpty && r.workDate != todayKey ? ' (${r.workDate})' : '';
-  if (!r.checkedOut) return 'Checked in at $inAt$prev$late';
+  final at = r.checkInSource == 'device' && r.checkInDeviceName != null
+      ? ' at Office device (${r.checkInDeviceName})'
+      : '';
+  if (!r.checkedOut) return 'Checked in at $inAt$at$prev$late';
   return 'In $inAt$late, out ${formatTime(r.checkOutAt!)}';
 }
 

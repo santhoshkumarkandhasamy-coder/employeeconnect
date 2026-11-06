@@ -5,6 +5,8 @@ import '../../../core/api/api_exception.dart';
 import '../../../core/security/screen_protect.dart';
 import '../../../core/utils/dates.dart';
 import '../../attendance/domain/attendance_models.dart';
+import '../../devices/domain/device_models.dart' show punchMethodLabel, punchOutcomeLabel, sourceLabel;
+import 'admin_widgets.dart' show adminSelfIdProvider, showAdminSnack;
 import '../data/admin_repository.dart';
 import '../domain/admin_models.dart';
 import 'employee_picker.dart';
@@ -177,10 +179,44 @@ class _ManualAttendanceScreenState extends ConsumerState<ManualAttendanceScreen>
     }
   }
 
+  /// HR: drop the manual entry and recompute the day from phone + device punches.
+  Future<void> _useDevice() async {
+    final e = _employee;
+    if (e == null) return;
+    final reason = await showDialog<String>(context: context, builder: (_) => const _UseDeviceDialog());
+    if (reason == null || !mounted) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final d = await ref.read(adminRepositoryProvider).useDevicePunches(e.id, ymd(_date), reason: reason);
+      if (!mounted) return;
+      final r = d.record;
+      setState(() {
+        _day = d;
+        _busy = false;
+        _checkIn = r?.checkInAt == null ? null : formatTime(r!.checkInAt!);
+        _checkOut = r?.checkOutAt == null ? null : formatTime(r!.checkOutAt!);
+        _reason.text = '';
+      });
+      showAdminSnack(context, 'The day now follows the phone and device punches.');
+    } on ApiException catch (err) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = adminErrorMessage(err);
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final rec = _day?.record;
+    final punches = _day?.devicePunches ?? const <ManualDevicePunch>[];
+    final self = ref.watch(adminSelfIdProvider);
+    final canUseDevice = rec != null && rec.manual && punches.isNotEmpty && _employee != null && _employee!.id != self;
     return SecureScreen(
       child: Scaffold(
         appBar: AppBar(title: const Text('Manual attendance')),
@@ -217,6 +253,17 @@ class _ManualAttendanceScreenState extends ConsumerState<ManualAttendanceScreen>
                 const Padding(padding: EdgeInsets.all(24), child: Center(child: CircularProgressIndicator()))
               else
                 _CurrentRecord(record: rec),
+              if (punches.isNotEmpty) _DevicePunches(punches: punches),
+              if (canUseDevice)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: OutlinedButton.icon(
+                    key: const ValueKey('use-device'),
+                    onPressed: _busy || _loading ? null : _useDevice,
+                    icon: const Icon(Icons.router_outlined),
+                    label: const Text('Use device punches'),
+                  ),
+                ),
               const SizedBox(height: 12),
               Row(
                 children: [
@@ -308,7 +355,7 @@ class _CurrentRecord extends StatelessWidget {
             Text('Current: in $inAt, out $outAt', style: theme.textTheme.titleSmall),
             Text(
               '${r.status.label}${r.minutesLate > 0 ? ', ${r.minutesLate} min late' : ''}'
-              '${r.manual ? ' - manual entry' : ' - punched in the app'}',
+              '${r.manual ? ' - manual entry' : ' - ${_sourceText(r)}'}',
             ),
             if (r.manualReason != null && r.manualReason!.isNotEmpty) Text('Reason: ${r.manualReason}'),
           ],
@@ -316,4 +363,95 @@ class _CurrentRecord extends StatelessWidget {
       ),
     );
   }
+}
+
+String _sourceText(AttendanceRecord r) {
+  final inSrc = r.checkInSource;
+  final outSrc = r.checkOutSource;
+  if (inSrc == 'device' || outSrc == 'device') {
+    final names = {if (r.checkInDeviceName != null) r.checkInDeviceName!, if (r.checkOutDeviceName != null) r.checkOutDeviceName!};
+    return 'from the office device${names.isEmpty ? '' : ' (${names.join(', ')})'}';
+  }
+  return 'punched in the app (${sourceLabel(inSrc)})';
+}
+
+/// The day's office machine punches (api-contract.md 21.6).
+class _DevicePunches extends StatelessWidget {
+  const _DevicePunches({required this.punches});
+  final List<ManualDevicePunch> punches;
+
+  @override
+  Widget build(BuildContext context) => Card(
+        key: const ValueKey('device-punches'),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Office machine punches', style: Theme.of(context).textTheme.titleSmall),
+              for (final p in punches)
+                Text('${p.punchAt == null ? '--:--' : formatTime(p.punchAt!)}  ${p.deviceName}  -  '
+                    '${punchMethodLabel(p.method)}  -  ${punchOutcomeLabel(p.outcome)}',),
+            ],
+          ),
+        ),
+      );
+}
+
+/// Asks for the reason (3 to 300 characters) before "Use device punches".
+/// Owns its controller so it is disposed only after the dialog is gone.
+class _UseDeviceDialog extends StatefulWidget {
+  const _UseDeviceDialog();
+
+  @override
+  State<_UseDeviceDialog> createState() => _UseDeviceDialogState();
+}
+
+class _UseDeviceDialogState extends State<_UseDeviceDialog> {
+  final _reason = TextEditingController();
+  String? _err;
+
+  @override
+  void dispose() {
+    _reason.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: const Text('Use device punches?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('The manual entry is removed and the day is calculated again from the '
+                'phone and office machine punches.',),
+            const SizedBox(height: 12),
+            TextField(
+              key: const ValueKey('use-device-reason'),
+              controller: _reason,
+              maxLength: 300,
+              decoration: InputDecoration(
+                labelText: 'Reason (required)',
+                errorText: _err,
+                border: const OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          FilledButton(
+            key: const ValueKey('use-device-confirm'),
+            onPressed: () {
+              final t = _reason.text.trim();
+              if (t.length < 3 || t.length > 300) {
+                setState(() => _err = 'Give a reason (3 to 300 characters)');
+                return;
+              }
+              Navigator.pop(context, t);
+            },
+            child: const Text('Use device punches'),
+          ),
+        ],
+      );
 }
