@@ -172,6 +172,8 @@ def build_items(
                 continue
             val = _detail(f"{p}.details.{k}", kind, k, v, fy)
             details[k] = tr._m(val) if isinstance(val, Decimal) else val
+        if "income" in fields and "tds" in details and Decimal(details["tds"]) > Decimal(details.get("income", "0")):
+            raise _bad(f"{p}.details.tds", "the TDS of the previous employer cannot exceed its income")
         flags: list[str] = []
         computed = {"monthly_rent", "from_month", "to_month"} <= set(fields)
         if computed:

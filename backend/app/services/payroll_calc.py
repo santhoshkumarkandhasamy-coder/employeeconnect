@@ -29,9 +29,13 @@ RESERVED_CODES = frozenset(
 )
 ESI_ADJUSTMENTS = frozenset({"INCENTIVE", "OTHER_EARNING", "OVERTIME"})  # adjustment earnings that are ESI wages
 # Codes that only the component engine may produce (plan 15 P3): refused in manual adjustments, structures and fixed deductions.
-SYSTEM_ONLY_CODES = frozenset({"OVERTIME", "LEAVE_ENCASH", "NOTICE_RECOVERY"})  # NOTICE_RECOVERY: written by the F&F approve only (plan 16)
+SYSTEM_ONLY_CODES = frozenset(
+    {"OVERTIME", "LEAVE_ENCASH", "NOTICE_RECOVERY"}
+)  # NOTICE_RECOVERY: written by the F&F approve only (plan 16)
 
-ERROR_CODES = frozenset({"STRUCTURE_MISSING", "NEGATIVE_NET_PAY"})
+# Blocking codes: processing refuses a payslip that carries one. RULES_CHANGED is cleared by refreshing the draft run (plan 17 5c);
+# TDS_SHORTFALL_FINAL only by an explicit TDS override with a reason.
+ERROR_CODES = frozenset({"STRUCTURE_MISSING", "NEGATIVE_NET_PAY", "RULES_CHANGED", "TDS_SHORTFALL_FINAL"})
 WARNING_CODES = frozenset(
     {
         "NO_SHIFT",
@@ -58,6 +62,10 @@ WARNING_CODES = frozenset(
         "PERQUISITE_REVIEW",
         "LEAVE_ENCASH_REVIEW",
         "RULES_CHANGED",
+        "RULES_SUPERSEDED",
+        "TDS_SHORTFALL_FINAL",
+        "TDS_MANUAL_REPLACED",
+        "PREV_EMPLOYER_UNVERIFIED",
     }
 )
 

@@ -30,6 +30,7 @@ from . import payroll_tds as ptds
 from . import tax_engine as tx
 from . import tax_rules as tr
 from .license import get_company
+from .tax_declarations import MAX_REPORT_ROWS
 
 ZERO = Decimal("0.00")
 _PERIOD = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])$")
@@ -66,12 +67,21 @@ async def _structs(session: AsyncSession, user_id: uuid.UUID, fy: str) -> list[t
     return [(s.effective_from, s) for s in (await session.execute(q)).scalars()]
 
 
-async def _live_payslip(session: AsyncSession, user_id: uuid.UUID, period: dt.date) -> Payslip | None:
+def _too_many(n: int) -> None:
+    if n > MAX_REPORT_ROWS:
+        raise AppError("TOO_MANY_ROWS", "Too many rows for one report")
+
+
+async def _live_payslip(
+    session: AsyncSession, user_id: uuid.UUID, period: dt.date, *, published_only: bool = False
+) -> Payslip | None:
     q = (
         select(Payslip)
         .join(PayrollRun, PayrollRun.id == Payslip.run_id)
         .where(Payslip.user_id == user_id, PayrollRun.period == period, Payslip.status != "superseded")
     )
+    if published_only:
+        q = q.where(Payslip.status == "published")
     best: Payslip | None = None
     for p in (await session.execute(q)).scalars():
         if p.result is None:
@@ -95,17 +105,19 @@ def compose(rc: ptds.RunCtx, figs: dict[str, Any], flags: list[str]) -> dict[str
 
 
 async def estimate(
-    session: AsyncSession, rc: ptds.RunCtx, user_id: uuid.UUID, period: dt.date, regime: str | None = None
-) -> tuple[dict[str, Any], dict[str, str]]:
+    session: AsyncSession, rc: ptds.RunCtx, user_id: uuid.UUID, period: dt.date, regime: str | None = None, *,
+    published_only: bool = False,
+) -> tuple[dict[str, Any], dict[str, str]]:  # fmt: skip
     """(TdsComputation, other regime summary) for one employee and month: the month's live payslip when there is one, else the
-    structure in force. Based on the SUBMITTED declaration and the verified proofs only."""
+    structure in force. Based on the SUBMITTED declaration and the verified proofs only. `published_only` (the employee's own
+    projection): only PUBLISHED payslips feed the figures (earlier months and this month), so nothing unpublished leaks."""
     assert rc.row is not None and rc.rules is not None
-    ud = (await ptds.load_data(session, rc.fy, period, [user_id]))[user_id]
+    ud = (await ptds.load_data(session, rc.fy, period, [user_id], published_only=published_only))[user_id]
     structs = await _structs(session, user_id, rc.fy)
     det = await session.get(EmployeePayrollDetails, user_id)
     lwd = det.last_working_day if det is not None else None
     treat = rc.rules["component_treatment"]
-    slip = await _live_payslip(session, user_id, period)
+    slip = await _live_payslip(session, user_id, period, published_only=published_only)
     if slip is not None:
         this = ptds.this_from_result(slip.result, treat)
         pan = bool((slip.identity or {}).get("pan"))
@@ -153,8 +165,9 @@ async def own_projection(session: AsyncSession, actor: Principal, fy: str | None
     fy = tr.check_fy(fy) if fy else tr.fy_of(await tr.today(session))
     rc = await ptds.current_ctx(session, fy)
     period = await resolve_period(session, fy, None)
-    comp, other = await estimate(session, rc, actor.id, period)
+    comp, other = await estimate(session, rc, actor.id, period, published_only=True)
     comp["override"] = None
+    comp["flags"] = [f for f in comp["flags"] if f not in ptds.HR_ONLY_FLAGS]  # HR review flags are not for the employee
     audit(session, action="payroll.tax.view_own", actor=actor, entity_type="payroll_tax", entity_id=actor.id, after={"fy": fy})
     await pc.commit(session)
     return {"estimate": True, "computation": comp, "other_regime": other}
@@ -177,8 +190,10 @@ async def summary(
             .join(Payslip, Payslip.id == PayrollTaxComputation.payslip_id)
             .join(PayrollRun, PayrollRun.id == Payslip.run_id)
             .where(PayrollTaxComputation.fy == fy, Payslip.status != "superseded")
+            .limit(MAX_REPORT_ROWS + 1)
         )
     ).all()
+    _too_many(len(rows))
     latest: dict[uuid.UUID, tuple[PayrollTaxComputation, Payslip, dt.date]] = {}
     for tc, ps, per in rows:
         cur = latest.get(tc.user_id)
@@ -246,32 +261,40 @@ async def statement_view(
         select(Payslip, PayrollRun.period)
         .join(PayrollRun, PayrollRun.id == Payslip.run_id)
         .where(Payslip.user_id == user_id, PayrollRun.period >= first, PayrollRun.period <= last, Payslip.status == "published")
+        .limit(MAX_REPORT_ROWS + 1)
     )
     months: dict[dt.date, Payslip] = {}
-    for p, per in (await session.execute(q)).all():
+    got = (await session.execute(q)).all()
+    _too_many(len(got))
+    for p, per in got:
         if p.result is not None and (per not in months or p.revision > months[per].revision):
             months[per] = p
     latest = (
         await session.execute(
-            select(PayrollTaxComputation, PayrollRun.period)
+            select(PayrollTaxComputation, PayrollRun.period, Payslip.status, Payslip.revision)
             .join(Payslip, Payslip.id == PayrollTaxComputation.payslip_id)
             .join(PayrollRun, PayrollRun.id == Payslip.run_id)
             .where(PayrollTaxComputation.fy == fy, PayrollTaxComputation.user_id == user_id, Payslip.status != "superseded")
+            .limit(MAX_REPORT_ROWS + 1)
         )
     ).all()
+    _too_many(len(latest))
     if latest:
-        tc = max(latest, key=lambda r: r[1])[0]
+        tc = max(latest, key=lambda r: (r[1], RANK.get(r[2], 0), r[3]))[
+            0
+        ]  # latest month, then published > processed > draft, then revision
         comp = ptds.computation_out(tc)
     else:
         comp, _ = await estimate(session, rc, user_id, await resolve_period(session, fy, None))
     ud = (await ptds.load_data(session, fy, last, [user_id]))[user_id]
     sections = {s["code"]: s["name"] for s in (rc.rules or {}).get("sections", [])}
+    verified = ptds.matched_verified(ud)
     decl = ud.declaration
     items = []
     if decl is not None and decl.submitted is not None:
         for it in decl.submitted.get("items", []):
             items.append({"section": it["section"], "name": sections.get(it["section"], it["section"]), "declared": it["amount"],
-                          "verified": tx.money(ud.verified[it["id"]]) if it["id"] in ud.verified else None})  # fmt: skip
+                          "verified": tx.money(verified[it["id"]]) if it["id"] in verified else None})  # fmt: skip
     company = await get_company(session)
     settings = await pc_settings(session)
     logo = await company_svc.logo_bytes(session)

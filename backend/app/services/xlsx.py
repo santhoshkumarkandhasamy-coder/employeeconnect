@@ -27,6 +27,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import aclosing
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 from typing import IO, Any
 
@@ -300,6 +301,8 @@ class _Builder:
                     c = WriteOnlyCell(ws, value=sv)
                     if isinstance(sv, str):
                         c.data_type = "s"  # never a formula or an error code, whatever the text looks like
+                    elif isinstance(v, Decimal):
+                        c.number_format = "0.00"  # money as a real number, never a float
                     elif isinstance(v, dt.datetime):
                         c.number_format = "yyyy-mm-dd hh:mm"
                     elif isinstance(v, dt.date):

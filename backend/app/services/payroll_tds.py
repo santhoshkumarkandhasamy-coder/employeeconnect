@@ -3,8 +3,10 @@
 `tax_engine` is pure; this module feeds it from the database and writes the result:
 
 * `run_ctx` reads the run snapshot (`config.tds_engine_enabled`, `tds_engine_mode`, `tax_rules {fy,id,version}`): None = the engine is off
-  for this run (exactly today's manual TDS). The rules row is the PINNED one of the snapshot (verified or later superseded); a newer
-  verified version only raises the warning `RULES_CHANGED` until the draft run is refreshed.
+  for this run (exactly today's manual TDS). The rules row is the PINNED one of the snapshot (verified or later superseded). When the
+  pinned rules are superseded (or a verified version exists that the run does not pin) the payslip gets the BLOCKING code `RULES_CHANGED`
+  (processing refuses it) until the draft run is refreshed. A superseded row is only ever used to READ / keep frozen payslips and to show
+  figures; a run that can no longer be refreshed (published, revisions) gets the non-blocking `RULES_SUPERSEDED` instead.
 * `evaluate` is called from `payroll_runs.recompute` after the normal calculation. It never touches the database: it leaves the
   computation on the payslip (`ps._tds`) and, in mode `apply`, sets `inputs.tds` (+ `tds_source`) so the caller recalculates.
 * `persist` (async) writes / updates / deletes the `payroll_tax_computations` row WHILE the payslip is still `draft`; the database trigger
@@ -24,6 +26,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..core.audit import audit
 from ..core.clock import utcnow
 from ..core.errors import AppError
 from ..models import (
@@ -54,8 +57,12 @@ ENGINE_KEYS = (
 )
 TDS_WARNINGS = (
     "TDS_OVERRIDDEN", "TDS_CAPPED_NET", "TDS_EXCESS", "TAX_RULES_NOT_VERIFIED", "NO_PAN_206AA", "PERQUISITE_REVIEW",
-    "LEAVE_ENCASH_REVIEW", "RULES_CHANGED",
+    "LEAVE_ENCASH_REVIEW", "RULES_CHANGED", "RULES_SUPERSEDED", "TDS_SHORTFALL_FINAL", "TDS_MANUAL_REPLACED",
+    "PREV_EMPLOYER_UNVERIFIED",
 )  # fmt: skip
+HR_ONLY_FLAGS = frozenset(
+    {"PERQUISITE_REVIEW", "LEAVE_ENCASH_REVIEW", "RULES_CHANGED", "RULES_SUPERSEDED"}
+)  # never shown to the employee
 LIVE = ("published", "processed")
 
 
@@ -72,6 +79,7 @@ class RunCtx:
     mode: str
     row: TaxYearRule | None  # None = no verified rules (TAX_RULES_NOT_VERIFIED)
     rules_changed: bool = False
+    refreshable: bool = True  # the run is a draft: `rules_changed` is blocking and cleared by refreshing the run
     one_time_in_month: bool = True
     proofs_from: str = ""
     include_other_income: bool = False
@@ -84,9 +92,22 @@ class RunCtx:
 @dataclass
 class UserData:
     declaration: TaxDeclaration | None = None
-    verified: dict[str, Decimal] = field(default_factory=dict)
+    verified: dict[str, Decimal] = field(
+        default_factory=dict
+    )  # proof item id -> verified amount (proofs of the declaration only)
+    verified_section: dict[str, str] = field(default_factory=dict)  # proof item id -> section the proof was filed for
     history: list[tuple[str, dict[str, Any]]] = field(default_factory=list)  # (YYYY-MM, payslip result) earlier in the FY
     loans: Decimal = ZERO
+
+
+def matched_verified(ud: UserData) -> dict[str, Decimal]:
+    """Verified proof amounts whose proof section equals the section of the SUBMITTED declaration item with the same id (a proof of
+    another section or of an older declaration never counts)."""
+    decl = ud.declaration
+    if decl is None or decl.submitted is None:
+        return {}
+    sections = {str(it.get("id")): it.get("section") for it in decl.submitted.get("items", [])}
+    return {k: v for k, v in ud.verified.items() if sections.get(k) is not None and sections[k] == ud.verified_section.get(k)}
 
 
 @dataclass
@@ -101,9 +122,9 @@ def proofs_from_key(fy: str, month: int) -> str:
     return f"{y if month >= 4 else y + 1}-{month:02d}"
 
 
-def _make_ctx(cfg: dict[str, Any], fy: str, row: TaxYearRule | None, changed: bool) -> RunCtx:
+def _make_ctx(cfg: dict[str, Any], fy: str, row: TaxYearRule | None, changed: bool, refreshable: bool = True) -> RunCtx:
     return RunCtx(
-        fy=fy, mode=str(cfg.get("tds_engine_mode") or "suggest"), row=row, rules_changed=changed,
+        fy=fy, mode=str(cfg.get("tds_engine_mode") or "suggest"), row=row, rules_changed=changed, refreshable=refreshable,
         one_time_in_month=bool(cfg.get("tds_one_time_in_month", True)),
         proofs_from=proofs_from_key(fy, int(cfg.get("tds_proofs_from_month") or 1)),
         include_other_income=bool(cfg.get("tds_include_other_income", False)),
@@ -147,8 +168,8 @@ async def run_ctx(session: AsyncSession, run: PayrollRun, *, lock: bool = False)
         if row is not None and (row.fy != fy or row.status not in ("verified", "superseded")):
             row = None  # a draft / submitted document never feeds a payslip
     current = await verified_row(session, fy)
-    changed = current is not None and (row is None or current.id != row.id)
-    return _make_ctx(cfg, fy, row, changed)
+    changed = (row is not None and row.status == "superseded") or (current is not None and (row is None or current.id != row.id))
+    return _make_ctx(cfg, fy, row, changed, run.status == "draft")
 
 
 async def current_ctx(session: AsyncSession, fy: str) -> RunCtx:
@@ -168,10 +189,17 @@ def _key(d: dt.date) -> str:
 
 
 async def load_data(
-    session: AsyncSession, fy: str, period: dt.date, user_ids: list[uuid.UUID], *, lock: bool = False
+    session: AsyncSession,
+    fy: str,
+    period: dt.date,
+    user_ids: list[uuid.UUID],
+    *,
+    lock: bool = False,
+    published_only: bool = False,
 ) -> dict[uuid.UUID, UserData]:
     """`lock` = FOR SHARE on the declarations and proofs read (plan 17 L order: rules, declarations, proofs): a declaration submit or a
-    proof decision that races with processing waits, so the stored `proofs_digest` is what the payslip really used."""
+    proof decision that races with processing waits, so the stored `proofs_digest` is what the payslip really used.
+    `published_only` = the earlier months come from PUBLISHED payslips only (the employee's own projection)."""
     out = {u: UserData() for u in user_ids}
     if not user_ids:
         return out
@@ -184,14 +212,18 @@ async def load_data(
     if lock:
         q = q.order_by(TaxProof.id).with_for_update(read=True)
     for p in (await session.execute(q)).scalars():
+        decl = out[p.user_id].declaration
+        if decl is None or p.declaration_id != decl.id:
+            continue  # a proof of another declaration never counts
         out[p.user_id].verified[p.item_id] = _d((p.verified or {}).get("amount"))
+        out[p.user_id].verified_section[p.item_id] = p.section
     start = tr.fy_bounds(fy)[0]
     q2 = (
         select(Payslip, PayrollRun.period)
         .join(PayrollRun, PayrollRun.id == Payslip.run_id)
         .where(
             Payslip.user_id.in_(user_ids), PayrollRun.period >= start, PayrollRun.period < period.replace(day=1),
-            Payslip.status.in_(LIVE),
+            Payslip.status.in_(("published",) if published_only else LIVE),
         )
     )  # fmt: skip
     best: dict[tuple[uuid.UUID, dt.date], Payslip] = {}
@@ -232,7 +264,7 @@ def proofs_digest(ud: UserData) -> str:
     return pc.mac_hex(
         PROOFS_LABEL,
         {"v": decl.submitted_version if decl is not None else None,
-         "proofs": sorted((k, f"{v:.2f}") for k, v in ud.verified.items())},
+         "proofs": sorted((k, f"{v:.2f}") for k, v in matched_verified(ud).items())},
     )  # fmt: skip
 
 
@@ -337,7 +369,7 @@ def build_input(
     return tx.EngineInput(
         fy=rc.fy, period=pkey, declared_regime=decl.regime if has else None, has_declaration=has,
         declaration_version=decl.submitted_version if has else None,
-        items=list((decl.submitted or {}).get("items", [])) if has else [], verified=dict(ud.verified), proofs_from=rc.proofs_from,
+        items=list((decl.submitted or {}).get("items", [])) if has else [], verified=matched_verified(ud), proofs_from=rc.proofs_from,
         salary_paid=q(paid), salary_this_month=q(this.regular), one_time_this_month=q(this.one_time), salary_projected=q(projected),
         pt_paid=q(pt + this.pt), wages=wages, tds_paid=q(tds), remaining_months=1 + len(future),
         include_other_income=rc.include_other_income, one_time_in_month=rc.one_time_in_month, has_pan=has_pan,
@@ -356,7 +388,7 @@ def extra_flags(rc: RunCtx, ud: UserData, this: This, final: bool) -> list[str]:
     if final and this.leave_encash > 0:
         flags.append("LEAVE_ENCASH_REVIEW")
     if rc.rules_changed:
-        flags.append("RULES_CHANGED")
+        flags.append("RULES_CHANGED" if rc.refreshable else "RULES_SUPERSEDED")
     return flags
 
 
@@ -376,6 +408,7 @@ def prepare(ps: Payslip, ctx: Ctx | None) -> None:
         new["tds"] = None
     new.pop("tds_source", None)
     new.pop("tds_override_reason", None)
+    new.pop("tds_replaced", None)
     ps.inputs = new
 
 
@@ -387,6 +420,7 @@ def evaluate(
     caller must calculate again. The computation is left on `ps._tds` for `persist` (False = no row; the payslip has no result)."""
     rc, ud = ctx.rc, ctx.ud
     ps._tds = False  # type: ignore[attr-defined]
+    ps._tds_replaced_now = False  # type: ignore[attr-defined]
     if rc.rules is None:
         warns.append("TAX_RULES_NOT_VERIFIED")
         return False
@@ -396,6 +430,7 @@ def evaluate(
     treat = rc.rules["component_treatment"]
     this = this_from_result(result, treat)
     final = is_final(ps.inputs, lwd, period)
+    last_month = _key(period) == tx.fy_months(rc.fy)[-1]
     inp = build_input(
         rc, ud, period=period, this=this, structs=structs, lwd=lwd, final=final, has_pan=bool((ps.identity or {}).get("pan"))
     )  # fmt: skip
@@ -412,6 +447,7 @@ def evaluate(
             applied = _d(inputs["tds"])
             override = {"amount": tx.money(applied), "reason": str(inputs.get("tds_override_reason") or "")}
             flags.append("TDS_OVERRIDDEN")
+            shortfall = max(ZERO, suggested - applied)  # information; the explicit override IS the decision
         else:
             tds_line = _ded(result, "TDS")
             net_before = max(ZERO, _d(result["net"]) + tds_line)
@@ -419,6 +455,14 @@ def evaluate(
             if applied < suggested:
                 shortfall = suggested - applied
                 flags.append("TDS_CAPPED_NET")
+                if final or last_month:  # nothing is left to recover the shortfall from: only an explicit override clears this
+                    flags.append("TDS_SHORTFALL_FINAL")
+            if inputs.get("tds_source") is None and inputs.get("tds") is not None and _d(inputs["tds"]) != applied:
+                # a manual figure typed before the mode was apply is replaced: remembered on the payslip, audited by `persist`
+                inputs["tds_replaced"] = tx.money(_d(inputs["tds"]))
+                ps._tds_replaced_now = True  # type: ignore[attr-defined]
+            if inputs.get("tds_replaced") is not None:
+                flags.append("TDS_MANUAL_REPLACED")
             inputs["tds"] = tx.money(applied)
             inputs["tds_source"] = "engine"
             inputs.pop("tds_override_reason", None)
@@ -441,9 +485,16 @@ def evaluate(
 
 
 # ============================================================================================ persistence
-async def persist(session: AsyncSession, payslips: list[Payslip], actor_id: uuid.UUID | None) -> None:
+async def persist(session: AsyncSession, payslips: list[Payslip], actor: Any) -> None:
     """Write the computation rows of the DRAFT payslips just recomputed (the trigger freezes them with the payslip). Flushes, so the
-    caller can change the status afterwards without the ORM reordering the statements."""
+    caller can change the status afterwards without the ORM reordering the statements. `actor` = the Principal (or anything with `.id`
+    and `.employee_id`) for the audit rows."""
+    actor_id = getattr(actor, "id", None)
+    for p in payslips:  # a manual TDS replaced by the engine (mode apply): ids only, never the amounts
+        if p.status == "draft" and getattr(p, "_tds_replaced_now", False):
+            audit(session, action="payroll.payslip.tds_manual_replaced", actor=actor, entity_type="payslip", entity_id=p.id,
+                  after={"payslip_id": str(p.id), "user_id": str(p.user_id), "mode": "apply"})  # fmt: skip
+            p._tds_replaced_now = False  # type: ignore[attr-defined]
     todo = [p for p in payslips if p.status == "draft" and getattr(p, "_tds", None) is not None]
     if not todo:
         return
@@ -522,6 +573,8 @@ async def attach_macs(session: AsyncSession, payslips: list[Payslip]) -> None:
                 "suggested": r.suggested,
                 "applied": r.applied,
                 "override": bool(r.override_reason),
+                "override_reason": r.override_reason,
+                "body": r.computation,  # the decrypted figures and steps (incl. the override amount): a rewrite makes a request stale
             }  # fmt: skip
         )
 
@@ -534,6 +587,7 @@ def apply_active(rc: RunCtx | None) -> bool:
 def set_manual_tds(inputs: dict[str, Any], value: Decimal | None, reason: str | None, rc: RunCtx | None) -> None:
     """PUT /payslips/{id} `tds`. In mode `apply` a value is an OVERRIDE and needs a reason (3-200); null hands the line back to the
     engine. In every other case it is the plain manual figure, as before."""
+    inputs.pop("tds_replaced", None)  # an explicit decision about the line settles the "manual figure replaced" notice
     if value is None:
         inputs["tds"] = None
         inputs.pop("tds_source", None)

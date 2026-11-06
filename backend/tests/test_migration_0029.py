@@ -58,11 +58,20 @@ def test_chain_and_reversible():
     assert d.lstrip().startswith("DO $$") and "cannot downgrade 0029" in d
     guard = d.split("$$;")[0]
     assert "EXISTS (SELECT 1 FROM payroll_tax_computations)" in guard
-    for col in ("bsr_code_enc", "challan_serial_enc", "deposited_on", "prev_bsr_code_enc", "prev_challan_serial_enc", "prev_deposited_on"):
+    for col in (
+        "bsr_code_enc",
+        "challan_serial_enc",
+        "deposited_on",
+        "prev_bsr_code_enc",
+        "prev_challan_serial_enc",
+        "prev_deposited_on",
+    ):
         assert f"{col} IS NOT NULL" in guard, col
         assert f"DROP COLUMN {col};" in d, col
     # constraints go before the columns they use; table after settings
-    assert d.index("DROP CONSTRAINT ck_statutory_challans_tds_fields") < d.index("ALTER TABLE statutory_challans DROP COLUMN bsr_code_enc")
+    assert d.index("DROP CONSTRAINT ck_statutory_challans_tds_fields") < d.index(
+        "ALTER TABLE statutory_challans DROP COLUMN bsr_code_enc"
+    )
     assert d.index("DROP CONSTRAINT ck_statutory_challan_events_tds_fields") < d.index("DROP COLUMN prev_bsr_code_enc")
     assert "DROP TABLE IF EXISTS payroll_tax_computations;" in d
     for k in SETTINGS:
@@ -114,7 +123,14 @@ def test_tax_computation_table_and_lock():
     assert lock.index("app.key_rotation") < lock.index("slip.status <> 'draft'", lock.index("app.key_rotation"))
     assert "BEFORE INSERT OR UPDATE OR DELETE ON payroll_tax_computations" in up
     assert "CREATE TRIGGER trg_payroll_tax_computations_updated_at BEFORE UPDATE ON payroll_tax_computations" in up
-    assert "REVOKE DELETE, TRUNCATE ON payroll_tax_computations FROM app_user" in up
+    # the service deletes the computation row of a draft payslip as app_user (the trigger refuses every other status): DELETE stays
+    # granted, TRUNCATE is revoked
+    assert "REVOKE TRUNCATE ON payroll_tax_computations FROM app_user" in up
+    assert "GRANT DELETE ON payroll_tax_computations TO app_user" in up
+    assert "REVOKE DELETE" not in up
+    # the payslip row is read FOR SHARE in both lookups of the trigger
+    assert lock.count("FOR SHARE OF p;") == 2
+    assert "WHERE p.id = OLD.payslip_id FOR SHARE OF p;" in lock and "WHERE p.id = NEW.payslip_id FOR SHARE OF p;" in lock
     for ix in ("user_fy", "rules_id", "created_by", "updated_by"):
         assert f"ix_payroll_tax_computations_{ix}" in up, ix
 
@@ -134,8 +150,14 @@ def test_challan_columns_and_settings():
         "ALTER TABLE statutory_challan_events ADD COLUMN deposited_on date;",
     ):
         assert stmt in up, stmt
-    assert "CHECK ((type = 'tds' AND status = 'paid') OR (bsr_code_enc IS NULL AND challan_serial_enc IS NULL AND deposited_on IS NULL))" in up
-    assert "GRANT UPDATE (bsr_code_enc, challan_serial_enc, prev_bsr_code_enc, prev_challan_serial_enc) ON statutory_challan_events TO app_user" in up
+    assert (
+        "CHECK ((type = 'tds' AND status = 'paid') OR (bsr_code_enc IS NULL AND challan_serial_enc IS NULL AND deposited_on IS NULL))"
+        in up
+    )
+    assert (
+        "GRANT UPDATE (bsr_code_enc, challan_serial_enc, prev_bsr_code_enc, prev_challan_serial_enc) ON statutory_challan_events TO app_user"
+        in up
+    )
     for key, sql in SETTINGS.items():
         assert f"('{key}', '{sql}'::jsonb) ON CONFLICT (key) DO NOTHING" in up, key
     assert "INSERT INTO permissions" not in up
@@ -183,7 +205,12 @@ def test_schema_sql_mirror():
     assert "Running upgrade 0028 -> 0029" in sql and "version_num='0029'" in sql
     assert "CREATE TABLE payroll_tax_computations (" in sql
     assert "CREATE FUNCTION payroll_tax_computations_lock()" in sql
-    assert "REVOKE DELETE, TRUNCATE ON payroll_tax_computations FROM app_user" in sql
+    assert "REVOKE TRUNCATE ON payroll_tax_computations FROM app_user" in sql
+    assert (
+        "GRANT DELETE ON payroll_tax_computations TO app_user" in sql
+        and "REVOKE DELETE, TRUNCATE ON payroll_tax_computations" not in sql
+    )
+    assert sql.count("WHERE p.id = NEW.payslip_id FOR SHARE OF p;") >= 1 and "WHERE p.id = OLD.payslip_id FOR SHARE OF p;" in sql
     assert "ck_statutory_challans_tds_fields" in sql and "prev_bsr_code_enc" in sql
     for key in SETTINGS:
         assert f"'{key}'" in sql, key
@@ -209,7 +236,16 @@ async def test_orm_defaults_and_checks(engine):
         run = PayrollRun(period=dt.date(2026, 11, 1), attendance_cutoff=dt.date(2026, 11, 30), config={})
         s.add_all([rule, run])
         await s.flush()
-        slip = Payslip(run_id=run.id, user_id=u.id, employee_snapshot={}, basis_days=30, employed_days=30, paid_days=30, lop_breakdown={}, inputs={})
+        slip = Payslip(
+            run_id=run.id,
+            user_id=u.id,
+            employee_snapshot={},
+            basis_days=30,
+            employed_days=30,
+            paid_days=30,
+            lop_breakdown={},
+            inputs={},
+        )
         s.add(slip)
         await s.flush()
 

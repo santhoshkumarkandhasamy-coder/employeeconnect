@@ -15,6 +15,8 @@ Method (average rate, s.192 as described in plan 17 T7), all amounts are `Decima
   employee was over-deducted), plus the extra tax caused by one-time earnings of this month (when `one_time_in_month`).
   Without PAN the TDS is at least `no_pan_min_rate_pct` (or the average rate when that is higher) of this month's taxable earnings.
 Proofs: declared amounts count until the proof month; from then on a section that needs a proof counts only its VERIFIED amount.
+Previous-employer income, TDS and PT (Form 12B) count ONLY when the proof is verified, whatever the month (flag `PREV_EMPLOYER_UNVERIFIED`
+while a declared item has no verified proof); the TDS of an item never exceeds its income.
 
 This is a computation aid. The figures are only as good as the verified rules and the declaration; they are not legal advice.
 """
@@ -211,11 +213,27 @@ def _count_items(rules: dict[str, Any], inp: EngineInput, basis: str) -> list[_C
         if declared <= 0:
             continue
         counted = declared
-        if basis == "verified" and sec.get("proof_required"):
+        kind = section_kind(sec)
+        if kind == "prev_employer" or (basis == "verified" and sec.get("proof_required")):
             v = inp.verified.get(it.get("id"))
             counted = min(declared, v) if v is not None else ZERO
-        out.append(_Counted(it, sec, section_kind(sec), q2(counted), counted / declared))
+        out.append(_Counted(it, sec, kind, q2(counted), counted / declared))
     return out
+
+
+def prev_employer_unverified(rules: dict[str, Any], inp: EngineInput) -> bool:
+    """A declared previous-employer item that has no verified proof (its figures are NOT counted)."""
+    sections = {s["code"]: s for s in rules.get("sections", [])}
+    for it in inp.items:
+        sec = sections.get(it.get("section"))
+        if sec is None or section_kind(sec) != "prev_employer" or it.get("id") in inp.verified:
+            continue
+        try:
+            if Decimal(str(it.get("amount", "0"))) > 0:
+                return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
 
 
 def _scaled(c: _Counted, key: str) -> Decimal:
@@ -291,7 +309,9 @@ def compute(rules: dict[str, Any], inp: EngineInput, regime: str | None = None) 
     chapter_via, section_steps = _deductions(counted, rules, allowed)
     hra_ex = _hra(counted, rules, allowed, wages) if reg["hra_exemption"] else ZERO
     prev_income = q2(sum((_scaled(c, "income") for c in counted if c.kind == "prev_employer"), ZERO))
-    prev_tds = q2(sum((_scaled(c, "tds") for c in counted if c.kind == "prev_employer"), ZERO))
+    prev_tds = q2(
+        sum((min(_scaled(c, "tds"), _scaled(c, "income")) for c in counted if c.kind == "prev_employer"), ZERO)
+    )  # tds <= income
     prev_pt = q2(sum((_scaled(c, "pt") for c in counted if c.kind == "prev_employer"), ZERO))
     other = q2(sum((c.amount for c in counted if c.kind == "other_income"), ZERO)) if inp.include_other_income else ZERO
     pt_total = q2(inp.pt_paid + prev_pt) if reg["pt_deductible"] else ZERO
@@ -326,6 +346,8 @@ def compute(rules: dict[str, Any], inp: EngineInput, regime: str | None = None) 
         flags.append("NO_DECLARATION")
     if excess:
         flags.append("TDS_EXCESS")
+    if prev_employer_unverified(rules, inp):
+        flags.append("PREV_EMPLOYER_UNVERIFIED")
 
     month_taxable = inp.salary_this_month + inp.one_time_this_month
     average_rate = (full["total"] / full["taxable"] * HUNDRED) if full["taxable"] > 0 else ZERO

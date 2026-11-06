@@ -23,6 +23,7 @@ from . import payroll_statutory as stat
 from . import payroll_tds as ptds
 from . import tax_rules as tr
 from . import xlsx
+from .tax_declarations import MAX_REPORT_ROWS
 
 ZERO = Decimal("0.00")
 DEDUCTEES = ["Month", "Employee ID", "Name", "PAN", "Section", "Amount paid", "TDS deducted", "Date paid", "Date deducted",
@@ -54,8 +55,8 @@ def quarter_months(fy: str, quarter: int) -> list[dt.date]:
     return [dt.date(a, b, 1) for a, b in plan[quarter]]
 
 
-def _s(x: Decimal) -> float:
-    return float(x)
+def _s(x: Decimal) -> Decimal:
+    return stat._d(x).quantize(ZERO)  # a Decimal cell, formatted 0.00 by the workbook builder (no float rounding)
 
 
 async def build(session: AsyncSession, fy: str, quarter: int) -> tuple[xlsx.BuiltWorkbook, str, int, dict[str, Any]]:
@@ -65,6 +66,8 @@ async def build(session: AsyncSession, fy: str, quarter: int) -> tuple[xlsx.Buil
     loaded: dict[dt.date, tuple[PayrollRun | None, list[stat._Row]]] = {}
     for per in months:
         loaded[per] = await stat._load(session, per, missing_ok=True)
+        if len(loaded[per][1]) > MAX_REPORT_ROWS:
+            raise AppError("TOO_MANY_ROWS", "Too many payslips for one workbook")
     if not any(run is not None and run.status == "published" for run, _ in loaded.values()):
         raise AppError("RUN_NOT_PUBLISHED", "No payroll run of this quarter is published yet", status=409)
     challans = {
@@ -132,9 +135,13 @@ async def _salary_details(session: AsyncSession, fy: str) -> list[tuple]:
         select(Payslip, PayrollRun.period)
         .join(PayrollRun, PayrollRun.id == Payslip.run_id)
         .where(PayrollRun.period >= first, PayrollRun.period <= last, Payslip.status == "published")
+        .limit(MAX_REPORT_ROWS + 1)
     )
     slips: dict[tuple[uuid.UUID, dt.date], Payslip] = {}
-    for p, per in (await session.execute(q)).all():
+    got = (await session.execute(q)).all()
+    if len(got) > MAX_REPORT_ROWS:
+        raise AppError("TOO_MANY_ROWS", "Too many payslips for one workbook")
+    for p, per in got:
         if p.result is not None and ((p.user_id, per) not in slips or p.revision > slips[(p.user_id, per)].revision):
             slips[(p.user_id, per)] = p
     for (uid, _per), p in sorted(slips.items(), key=lambda kv: kv[0][1]):
@@ -150,8 +157,12 @@ async def _salary_details(session: AsyncSession, fy: str) -> list[tuple]:
         .join(Payslip, Payslip.id == PayrollTaxComputation.payslip_id)
         .join(PayrollRun, PayrollRun.id == Payslip.run_id)
         .where(PayrollTaxComputation.fy == fy, Payslip.status == "published")
+        .limit(MAX_REPORT_ROWS + 1)
     )
-    for tc, per in (await session.execute(cq)).all():
+    cgot = (await session.execute(cq)).all()
+    if len(cgot) > MAX_REPORT_ROWS:
+        raise AppError("TOO_MANY_ROWS", "Too many tax computations for one workbook")
+    for tc, per in cgot:
         if tc.user_id not in comp or per > comp[tc.user_id][0]:
             comp[tc.user_id] = (per, tc)
     dets = await stat.runs._load_details(session, list(per_user))  # current PAN
@@ -162,8 +173,8 @@ async def _salary_details(session: AsyncSession, fy: str) -> list[tuple]:
         det = dets.get(uid)
         pan = (det.pan if det is not None else None) or ""
 
-        def g(k: str, annual: dict = annual) -> float:
-            return float(Decimal(annual.get(k, "0")))
+        def g(k: str, annual: dict = annual) -> Decimal:
+            return Decimal(annual.get(k, "0")).quantize(ZERO)
 
         out.append(
             (

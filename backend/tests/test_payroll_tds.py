@@ -137,8 +137,8 @@ async def test_settings_defaults_and_validation(client, H):
     r = await client.put(
         SETTINGS,
         json={"settings": {"payroll.tds_engine_mode": "apply", "payroll.tds_proofs_from_month": 12, "payroll.tds_one_time_in_month": False,
-                           "payroll.tds_include_other_income": True}},
-        headers=H["hr"],
+                           "payroll.tds_include_other_income": True}, **PW},
+        headers=H["admin"],
     )  # fmt: skip
     assert r.status_code == 200 and r.json()["settings"]["payroll.tds_proofs_from_month"] == 12
 
@@ -157,11 +157,35 @@ async def test_the_engine_switch_needs_role_assign_the_password_and_alerts_the_a
     assert r.status_code == 200 and r.json()["settings"][key] is True
     alerts = [o["payload"] for o in notifications.OUTBOX if o["payload"]["type"] == "admin_alert"]
     assert len(alerts) == 1 and "TDS engine" in alerts[0]["body"]
-    # an unchanged value needs no step-up; the mode is not a guarded key
+    # an unchanged value needs no step-up
     assert (await client.put(SETTINGS, json={"settings": {key: True}}, headers=H["hr"])).status_code == 200
-    assert (
-        await client.put(SETTINGS, json={"settings": {"payroll.tds_engine_mode": "apply"}}, headers=H["hr"])
-    ).status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("tds_engine_mode", "apply"),
+        ("tds_proofs_from_month", 6),
+        ("tds_include_other_income", True),
+        ("tds_one_time_in_month", False),
+    ],
+)
+async def test_the_tds_parameters_are_guarded_like_the_engine_switch(client, H, key, value):
+    k = f"payroll.{key}"
+    assert k in ptds.pset.GUARDED_KEYS
+    body = {"settings": {k: value}}
+    r = await client.put(SETTINGS, json={**body, **PW}, headers=H["hr"])
+    assert r.status_code == 403 and err(r) == "FORBIDDEN"  # payroll.manage alone is not enough
+    r = await client.put(SETTINGS, json=body, headers=H["admin"])
+    assert r.status_code == 422  # no password
+    r = await client.put(SETTINGS, json={**body, "current_password": "Wrong!Passw0rd#1"}, headers=H["admin"])
+    assert r.status_code == 403 and err(r) == "REAUTH_FAILED"
+    notifications.OUTBOX.clear()
+    r = await client.put(SETTINGS, json={**body, **PW}, headers=H["admin"])
+    assert r.status_code == 200 and r.json()["settings"][k] == value
+    alerts = [o["payload"] for o in notifications.OUTBOX if o["payload"]["type"] == "admin_alert"]
+    assert len(alerts) == 1 and "TDS engine setting" in alerts[0]["body"]
+    assert (await client.put(SETTINGS, json=body, headers=H["hr"])).status_code == 200  # unchanged value: no step-up
 
 
 # ================================================================================================ off by default
@@ -322,16 +346,17 @@ async def test_a_newer_verified_version_raises_rules_changed_until_refresh(clien
     old.status = "superseded"
     await db.commit()
     await add_rules(db, uid, fy=FY, version=2, status="verified")
-    await process(client, tds, run)  # the run still uses version 1
-    p = await slip(client, tds, run)
-    assert "RULES_CHANGED" in p["warnings"] and p["tds_computation"]["rules"] == {"id": str(old_id), "version": 1}
+    p = await put_slip(client, tds, await slip(client, tds, run), note="recompute")  # the run still pins v1: shown, but flagged
+    assert "RULES_CHANGED" in p["errors"] and p["tds_computation"]["rules"] == {"id": str(old_id), "version": 1}
     assert "RULES_CHANGED" in p["tds_computation"]["flags"]
-    r = await client.post(f"{B}/runs/{run['id']}/reopen", headers=tds["hr"])
-    assert r.status_code == 200
-    run = await refresh(client, tds, run)  # refresh adopts version 2
+    r = await client.post(f"{B}/runs/{run['id']}/process", headers=tds["hr"])  # blocking: the pinned rules are superseded
+    assert r.status_code == 409 and err(r) == "PAYROLL_BLOCKED" and "RULES_CHANGED" in r.text
+    assert (await client.get(f"{B}/runs/{run['id']}", headers=tds["hr"])).json()["status"] == "draft"
+    run = await refresh(client, tds, run)  # refresh adopts version 2 and clears the block
     assert run["config"]["tax_rules"]["version"] == 2
     p = await slip(client, tds, run)
-    assert "RULES_CHANGED" not in p["warnings"] and p["tds_computation"]["rules"]["version"] == 2
+    assert "RULES_CHANGED" not in p["errors"] and p["tds_computation"]["rules"]["version"] == 2
+    await process(client, tds, run)
 
 
 # ================================================================================================ declarations and proofs

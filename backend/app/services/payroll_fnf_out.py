@@ -47,6 +47,8 @@ from . import payroll_loans as loans_svc
 from . import payroll_runs as runs
 from . import payroll_settings as pset
 from . import payroll_structures as structs_svc
+from . import payroll_tds as ptds
+from . import tax_rules as tr
 
 ZERO = Decimal("0.00")
 LIVE = ("draft", "submitted", "approved")
@@ -194,6 +196,12 @@ async def estimate(
     base = runs._blank_inputs()
     if payslip is not None:  # the open payslip's manual inputs (TDS, PT override, adjustments) also shape the net (review L4)
         base.update({k: copy.deepcopy((payslip.inputs or {}).get(k, base[k])) for k in ("tds", "pt_override", "adjustments")})
+        for k in (
+            "tds_source",
+            "tds_override_reason",
+        ):  # an explicit TDS override on the open payslip also applies to the settlement
+            if (payslip.inputs or {}).get(k) is not None:
+                base[k] = payslip.inputs[k]
     ps = SimpleNamespace(id=None, user_id=user.id, supersedes_id=None, inputs=base)
     await comps.pull_for(session, [ps], period, lock=False)  # type: ignore[list-item]
     inputs = copy.deepcopy(ps.inputs)
@@ -214,10 +222,30 @@ async def estimate(
         [(e, structs_svc.data_of(s)) for e, s in structs], period, user.join_date, rules.esi_wage_threshold
     )
     paid = max(Decimal(0), Decimal(str(days.employed_days)) - Decimal(str(days.lop_auto)))
-    res = calc.calculate(
-        data, rules, period, Decimal(str(days.basis_days)), paid, runs._pay_inputs(ps.inputs),
-        esi_is_eligible=eligible, prior_gross=prior,
-    )  # fmt: skip
+
+    def _calc() -> calc.CalcResult:
+        return calc.calculate(
+            data, rules, period, Decimal(str(days.basis_days)), paid, runs._pay_inputs(ps.inputs),
+            esi_is_eligible=eligible, prior_gross=prior,
+        )  # fmt: skip
+
+    res = _calc()
+    tds_fig, tds_info = data.tds_monthly, None
+    rc = await _tds_ctx(session, run, period)
+    if rc is not None:  # plan 17 5c: the settlement TDS is the engine's figure, exactly as the final payslip computes it
+        ps.identity = {"pan": det.pan if det is not None else None}
+        ps.structure_id = chosen.id
+        ud = (await ptds.load_data(session, rc.fy, period, [user.id]))[user.id]
+        tw: list[str] = []
+        if ptds.evaluate(ps, res, ptds.Ctx(rc, ud), structs=structs, period=period, lwd=f.last_working_day, warns=tw):
+            res = _calc()  # mode apply: inputs.tds is now the engine figure
+        comp = getattr(ps, "_tds", None)
+        if comp:
+            c = comp["computation"]
+            tds_info = {"mode": rc.mode, "suggested": comp["suggested"], "applied": c["applied"], "shortfall": c["shortfall"]}
+            if rc.mode == "apply":
+                tds_fig = Decimal(c["applied"])
+            warnings.extend(w for w in tw if w not in warnings)
     return {
         "error": None,
         "days": days,
@@ -225,8 +253,20 @@ async def estimate(
         "warnings": warnings,
         "result": res,
         "source": "structure",
-        "tds": data.tds_monthly,
+        "tds": tds_fig,
+        "tds_info": tds_info,
     }
+
+
+async def _tds_ctx(session: AsyncSession, run: PayrollRun | None, period: dt.date) -> ptds.RunCtx | None:
+    """The TDS engine context for the settlement month: the run's snapshot when the run exists, else the current settings."""
+    if run is not None:
+        rc = await ptds.run_ctx(session, run)
+        return rc if rc is not None and rc.rules is not None else None
+    try:
+        return await ptds.current_ctx(session, tr.fy_of(period))
+    except AppError:
+        return None  # engine off / rules not verified: the old manual figure
 
 
 async def planned_lines(
@@ -314,8 +354,18 @@ async def payslip_estimate(session: AsyncSession, f: FnfSettlement) -> dict[str,
         if r else None
     )  # fmt: skip
     days = SimpleNamespace(basis_days=p.basis_days, employed_days=p.employed_days, lop_auto=runs._lop_days(p))
+    tc = await ptds.computation_row(session, p.id)
+    info = None
+    if tc is not None:
+        c = tc.computation or {}
+        info = {
+            "mode": tc.mode,
+            "suggested": tc.suggested,
+            "applied": c.get("applied"),
+            "shortfall": c.get("shortfall") or "0.00",
+        }
     return {"error": None if r else "NOT_CALCULATED", "days": days, "paid_days": p.paid_days, "warnings": list(p.warnings or []),
-            "result": res, "source": "payslip", "payslip": p}  # fmt: skip
+            "result": res, "source": "payslip", "payslip": p, "tds_info": info}  # fmt: skip
 
 
 def _line(x: dict[str, Any]) -> dict[str, Any]:
@@ -335,6 +385,7 @@ def estimate_view(est: dict[str, Any], source: str = "structure") -> dict[str, A
                    "net_pay": calc.money_str(res.net)} if res else None,
         "warnings": sorted(set(est["warnings"])),
         "source": source,
+        "tds": est.get("tds_info"),  # {mode, suggested, applied, shortfall} when the TDS engine computed it, else null
     }  # fmt: skip
 
 

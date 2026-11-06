@@ -557,6 +557,10 @@ async def tax_statement(
     audit(session, action="payroll.tax.statement", actor=actor, entity_type="payroll_tax", entity_id=user_id,
           after={"user_id": str(user_id), "fy": view["fy"]})  # fmt: skip
     await pc.commit(session)
+    await admin_security.notify_admins(
+        session, entity_id=actor.id, title="Tax computation statement downloaded",
+        body=f"{actor.user.full_name} ({actor.employee_id}) downloaded a tax computation statement for FY {view['fy']}.",
+    )  # fmt: skip
     return _pdf(data, name)
 
 

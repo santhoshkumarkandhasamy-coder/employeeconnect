@@ -701,7 +701,12 @@ async def create_run(session: AsyncSession, actor: Principal, body: RunCreate) -
     cfg = await ptds.augment_config(session, await pset.snapshot(session), period)
     _, end = pdays.month_bounds(period)
     run = PayrollRun(
-        period=period, status="draft", pay_date=body.pay_date, attendance_cutoff=min(end, today), config=cfg, created_by=actor.id,
+        period=period,
+        status="draft",
+        pay_date=body.pay_date,
+        attendance_cutoff=min(end, today),
+        config=cfg,
+        created_by=actor.id,
         contributors=[str(actor.id)],
     )
     session.add(run)
@@ -733,7 +738,7 @@ async def create_run(session: AsyncSession, actor: Principal, body: RunCreate) -
         )  # fmt: skip
         ps.version = 1
         session.add(ps)
-    await ptds.persist(session, [ps for _, ps in fresh], actor.id)
+    await ptds.persist(session, [ps for _, ps in fresh], actor)
     n = len(fresh)
     audit(session, action="payroll.run.create", actor=actor, entity_type="payroll_run", entity_id=run.id,
           after={"period": pc.period_str(period), "employees": n})  # fmt: skip
@@ -804,7 +809,7 @@ async def refresh_run(session: AsyncSession, actor: Principal, run_id: uuid.UUID
             added += 1
         else:
             updated += 1
-    await ptds.persist(session, [ps for _, ps, _, _ in todo], actor.id)
+    await ptds.persist(session, [ps for _, ps, _, _ in todo], actor)
     audit(session, action="payroll.run.refresh", actor=actor, entity_type="payroll_run", entity_id=run.id,
           after={"added": added, "updated": updated})  # fmt: skip
     await _stale_requests(session, actor, run, "RUN_REFRESHED")
@@ -813,7 +818,7 @@ async def refresh_run(session: AsyncSession, actor: Principal, run_id: uuid.UUID
 
 
 async def _recompute_open(
-    session: AsyncSession, run: PayrollRun, payslips: list[Payslip], actor_id: uuid.UUID | None = None
+    session: AsyncSession, run: PayrollRun, payslips: list[Payslip], actor: Any = None
 ) -> list[tuple[str, str]]:
     """Recompute the given open payslips against current structures / identity / settings. Returns (employee_id, code) errors.
     The TDS computation rows are written (and flushed) here, while the payslips are still `draft`: the caller moves them to
@@ -835,7 +840,7 @@ async def _recompute_open(
         for code in _split(p.warnings)[0]:
             errors.append((u.employee_id, code))
     if not errors:
-        await ptds.persist(session, payslips, actor_id)
+        await ptds.persist(session, payslips, actor)
     return errors
 
 
@@ -867,7 +872,7 @@ async def process_run(session: AsyncSession, actor: Principal, run_id: uuid.UUID
     _require_status(run, "draft")
     rows = await _run_payslips(session, run.id, lock=True)
     todo = [p for p in rows if p.status == "draft" and not p.hold]
-    errors = await _recompute_open(session, run, todo, actor.id)
+    errors = await _recompute_open(session, run, todo, actor)
     if errors:
         raise await _blocked(session, actor, "payroll_run", run.id, errors)
     await comps.attach_processing(session, todo, actor.id)
@@ -1156,9 +1161,14 @@ async def update_payslip(session: AsyncSession, actor: Principal, payslip_id: uu
               tds=ptds.Ctx(rc, tdata[ps.user_id]) if rc else None)  # fmt: skip
     ps.updated_by = actor.id
     pc.touch(ps, actor.id)
-    await ptds.persist(session, [ps], actor.id)
+    await ptds.persist(session, [ps], actor)
     audit(session, action="payroll.payslip.update", actor=actor, entity_type="payslip", entity_id=ps.id,
           after={"fields": sorted(sent)})  # fmt: skip
+    if "tds" in sent and ptds.apply_active(
+        rc
+    ):  # a distinct action for the TDS override control: ids and mode only, no amount / reason
+        audit(session, action="payroll.payslip.tds_override", actor=actor, entity_type="payslip", entity_id=ps.id,
+              after={"payslip_id": str(ps.id), "user_id": str(ps.user_id), "mode": "apply", "cleared": body.tds is None})  # fmt: skip
     await pc.commit(session)
     return await admin_payslip_out(session, ps)
 
@@ -1169,7 +1179,9 @@ async def delete_payslip(session: AsyncSession, actor: Principal, payslip_id: uu
     if ps.status != "draft":
         raise AppError("PAYROLL_LOCKED", "Only a draft payslip can be deleted")
     info = {"run_id": str(run.id), "user_id": str(ps.user_id), "revision": ps.revision}
-    if (await session.execute(select(PayrollPublishRequest.id).where(PayrollPublishRequest.payslip_id == ps.id).limit(1))).first():
+    if (
+        await session.execute(select(PayrollPublishRequest.id).where(PayrollPublishRequest.payslip_id == ps.id).limit(1))
+    ).first():
         raise AppError("CONFLICT", "This payslip has publish requests (kept as evidence) and cannot be deleted")
     await session.delete(ps)
     audit(session, action="payroll.payslip.delete", actor=actor, entity_type="payslip", entity_id=payslip_id, after=info)
@@ -1183,7 +1195,7 @@ async def process_payslip(session: AsyncSession, actor: Principal, payslip_id: u
         raise AppError("CONFLICT", "Process the whole run instead; single payslips are processed after the run is published")
     if ps.status != "draft":
         raise AppError("PAYROLL_LOCKED", "Only a draft payslip can be processed")
-    errors = await _recompute_open(session, run, [ps], actor.id)
+    errors = await _recompute_open(session, run, [ps], actor)
     if errors:
         raise await _blocked(session, actor, "payslip", ps.id, errors)
     await comps.attach_processing(session, [ps], actor.id)
@@ -1288,7 +1300,7 @@ async def revise(session: AsyncSession, actor: Principal, run_id: uuid.UUID, use
     new.version = 1
     session.add(new)
     await pc.flush(session)
-    await ptds.persist(session, [new], actor.id)
+    await ptds.persist(session, [new], actor)
     audit(session, action="payroll.payslip.revise", actor=actor, entity_type="payslip", entity_id=new.id,
           after={"run_id": str(run.id), "user_id": str(user_id), "revision": new.revision})  # fmt: skip
     await pc.commit(session)
@@ -1316,7 +1328,9 @@ async def list_own(session: AsyncSession, actor: Principal, year: int | None) ->
     final_periods = set(
         (
             await session.execute(
-                select(FnfSettlement.settlement_period).where(FnfSettlement.user_id == actor.id, FnfSettlement.status == "settled")
+                select(FnfSettlement.settlement_period).where(
+                    FnfSettlement.user_id == actor.id, FnfSettlement.status == "settled"
+                )
             )
         ).scalars()
     )

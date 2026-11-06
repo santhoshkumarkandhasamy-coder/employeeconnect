@@ -20,9 +20,15 @@ Added
                                 is moved to `processed`, in the same transaction. A reopened payslip (back to draft) can be recomputed;
                               - payslip_id, user_id, fy and created_at never change;
                               - KEY ROTATION passes: with `app.key_rotation = 'on'` an UPDATE that changes only `*_enc` columns is accepted
-                                at any payslip status (payroll_strip_enc, as for every payroll table).
+                                at any payslip status (payroll_strip_enc, as for every payroll table). This is the SAME escape every payroll
+                                table since 0018 has (a plain session setting; rotation runs as app_user, so a role check is impossible); it is
+                                not widened here. What it could rewrite (the encrypted computation) is covered by the publish MAC
+                                (payroll_tds.attach_macs hashes the decrypted computation body and the override), so tampering makes a
+                                publish request stale;
+                              - the payslip row is read FOR SHARE (a concurrent status change waits until this statement commits).
                             Fk payslip_id is ON DELETE CASCADE (a draft payslip / run can still be deleted); every other fk is RESTRICT.
-                            REVOKE DELETE, TRUNCATE FROM app_user (the cascade runs as the table owner).
+                            REVOKE TRUNCATE FROM app_user; DELETE stays granted (the service deletes the row of a draft payslip when the engine no longer
+                            applies; the trigger refuses it for every other status).
 * statutory_challans        bsr_code_enc, challan_serial_enc (encrypted), deposited_on date: TDS challan details for the 24Q Challans sheet.
                             CHECKs: only a PAID TDS challan carries them (so marking a challan unpaid must clear them, as it already clears
                             paid_on / reference_enc); bsr_code_enc and challan_serial_enc are both set or both NULL; deposited_on in 2000..2200.
@@ -95,7 +101,7 @@ DECLARE
   y integer;
 BEGIN
   IF TG_OP = 'DELETE' THEN
-    SELECT p.status INTO slip FROM payslips p WHERE p.id = OLD.payslip_id;
+    SELECT p.status INTO slip FROM payslips p WHERE p.id = OLD.payslip_id FOR SHARE OF p;
     IF FOUND AND slip.status <> 'draft' THEN
       RAISE EXCEPTION 'tax computation %% belongs to a %% payslip and cannot be deleted', OLD.id, slip.status USING ERRCODE = '23000';
     END IF;
@@ -112,7 +118,7 @@ BEGIN
       RETURN NEW;  -- key rotation: only *_enc columns changed
     END IF;
   END IF;
-  SELECT p.status, p.user_id, r.period INTO slip FROM payslips p JOIN payroll_runs r ON r.id = p.run_id WHERE p.id = NEW.payslip_id;
+  SELECT p.status, p.user_id, r.period INTO slip FROM payslips p JOIN payroll_runs r ON r.id = p.run_id WHERE p.id = NEW.payslip_id FOR SHARE OF p;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'tax computation: the payslip does not exist' USING ERRCODE = '23000';
   END IF;
@@ -160,7 +166,8 @@ ALTER TABLE statutory_challan_events ADD CONSTRAINT ck_statutory_challan_events_
 
 DO $$
 BEGIN
-  REVOKE DELETE, TRUNCATE ON payroll_tax_computations FROM app_user;
+  REVOKE TRUNCATE ON payroll_tax_computations FROM app_user;
+  GRANT DELETE ON payroll_tax_computations TO app_user;  -- the service deletes the row of a draft payslip; the trigger refuses every other status
   GRANT UPDATE (bsr_code_enc, challan_serial_enc, prev_bsr_code_enc, prev_challan_serial_enc) ON statutory_challan_events TO app_user;
 EXCEPTION WHEN undefined_object OR insufficient_privilege THEN
   RAISE NOTICE 'revoke / grant on the 0029 objects skipped';

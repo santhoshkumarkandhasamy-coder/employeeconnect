@@ -3646,7 +3646,7 @@ DECLARE
   y integer;
 BEGIN
   IF TG_OP = 'DELETE' THEN
-    SELECT p.status INTO slip FROM payslips p WHERE p.id = OLD.payslip_id;
+    SELECT p.status INTO slip FROM payslips p WHERE p.id = OLD.payslip_id FOR SHARE OF p;
     IF FOUND AND slip.status <> 'draft' THEN
       RAISE EXCEPTION 'tax computation % belongs to a % payslip and cannot be deleted', OLD.id, slip.status USING ERRCODE = '23000';
     END IF;
@@ -3663,7 +3663,7 @@ BEGIN
       RETURN NEW;  -- key rotation: only *_enc columns changed
     END IF;
   END IF;
-  SELECT p.status, p.user_id, r.period INTO slip FROM payslips p JOIN payroll_runs r ON r.id = p.run_id WHERE p.id = NEW.payslip_id;
+  SELECT p.status, p.user_id, r.period INTO slip FROM payslips p JOIN payroll_runs r ON r.id = p.run_id WHERE p.id = NEW.payslip_id FOR SHARE OF p;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'tax computation: the payslip does not exist' USING ERRCODE = '23000';
   END IF;
@@ -3731,7 +3731,8 @@ INSERT INTO settings (key, value) VALUES ('payroll.tds_include_other_income', 'f
 
 DO $$
 BEGIN
-  REVOKE DELETE, TRUNCATE ON payroll_tax_computations FROM app_user;
+  REVOKE TRUNCATE ON payroll_tax_computations FROM app_user;
+  GRANT DELETE ON payroll_tax_computations TO app_user;  -- the service deletes the row of a draft payslip; the trigger refuses every other status
   GRANT UPDATE (bsr_code_enc, challan_serial_enc, prev_bsr_code_enc, prev_challan_serial_enc) ON statutory_challan_events TO app_user;
 EXCEPTION WHEN undefined_object OR insufficient_privilege THEN
   RAISE NOTICE 'revoke / grant on the 0029 objects skipped';

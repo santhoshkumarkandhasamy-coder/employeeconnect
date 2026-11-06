@@ -285,10 +285,31 @@ def test_previous_employer_income_and_tds_are_taken_into_account():
     prev = [{"id": "i-1", "section": "PREV_EMPLOYER", "amount": "1000000.00",
              "details": {"income": "1000000.00", "tds": "10000.00", "pt": "0.00"}}]  # fmt: skip
     r = run(mk(period="2026-10", declared_regime="new", has_declaration=True, declaration_version=1, items=prev,
-               salary_this_month="100000", salary_projected="500000", remaining_months=6))  # fmt: skip
+               salary_this_month="100000", salary_projected="500000", remaining_months=6, verified={"i-1": D("1000000")}))  # fmt: skip
     # 6,00,000 + 10,00,000 = 16,00,000 - 75,000 = 15,25,000 -> 96,200; less the previous employer's 10,000; / 6 = 14,366.67
     assert r["annual"]["previous_employer_income"] == "1000000.00" and r["previous_employer_tds"] == "10000.00"
     assert r["annual"]["total_tax"] == "96200.00" and r["remaining_tax"] == "86200.00" and r["suggested"] == "14367.00"
+
+
+def test_previous_employer_figures_count_only_when_verified_whatever_the_month():
+    prev = [{"id": "i-1", "section": "PREV_EMPLOYER", "amount": "1000000.00",
+             "details": {"income": "1000000.00", "tds": "10000.00", "pt": "2500.00"}}]  # fmt: skip
+    common = dict(declared_regime="new", has_declaration=True, declaration_version=1, items=prev, salary_this_month="100000",
+                  salary_projected="500000", remaining_months=6, period="2026-10", proofs_from="2027-01")  # fmt: skip
+    # before the proof month the declared amount of a normal section counts, but Form 12B figures never do without a proof
+    r = run(mk(**common))
+    assert r["annual"]["previous_employer_income"] == "0.00" and r["previous_employer_tds"] == "0.00"
+    assert "PREV_EMPLOYER_UNVERIFIED" in r["flags"]
+    ok = run(mk(verified={"i-1": D("1000000")}, **common))
+    assert ok["annual"]["previous_employer_income"] == "1000000.00" and "PREV_EMPLOYER_UNVERIFIED" not in ok["flags"]
+
+
+def test_previous_employer_tds_never_exceeds_its_income():
+    prev = [{"id": "i-1", "section": "PREV_EMPLOYER", "amount": "100000.00",
+             "details": {"income": "100000.00", "tds": "900000.00"}}]  # fmt: skip
+    r = run(mk(declared_regime="new", has_declaration=True, declaration_version=1, items=prev, salary_this_month="100000",
+               salary_projected="500000", remaining_months=6, period="2026-10", verified={"i-1": D("100000")}))  # fmt: skip
+    assert r["previous_employer_tds"] == "100000.00"
 
 
 def test_previous_employer_income_needs_a_verified_proof_from_the_proof_month():

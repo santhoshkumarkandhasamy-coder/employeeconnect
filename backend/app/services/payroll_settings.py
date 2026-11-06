@@ -37,12 +37,19 @@ BANK_DAYS_KEY = (
 MIN_BANK_DAYS = 7  # the floor, also applied by the service and the database trigger whatever is stored
 FORM16_SECOND_KEY = "payroll.form16_requires_second_person"  # plan 17 5b: Form 16 publish by a second person; same control level
 TDS_ENGINE_KEY = "payroll.tds_engine_enabled"  # plan 17 5c: switching the TDS engine on or off is an admin-level control
+TDS_PARAM_KEYS = (  # they change the tax every payslip carries: same control level as the engine switch
+    "payroll.tds_engine_mode",
+    "payroll.tds_proofs_from_month",
+    "payroll.tds_include_other_income",
+    "payroll.tds_one_time_in_month",
+)
 GUARDED_KEYS = (
     SECOND_PERSON_KEY,
     APPROVAL_KEY,
     BANK_DAYS_KEY,
     FORM16_SECOND_KEY,
     TDS_ENGINE_KEY,
+    *TDS_PARAM_KEYS,
 )  # change needs role.assign AND the caller's own password
 MAX_SLABS = 20
 MAX_CATEGORIES = 20
@@ -434,6 +441,11 @@ async def update(
         await admin_security.notify_admins(
             session, entity_id=actor.id, title="Payroll control changed",
             body=f"{actor.user.full_name} ({actor.employee_id}) changed the TDS engine switch.",
+        )  # fmt: skip
+    if any(k in guarded for k in TDS_PARAM_KEYS):
+        await admin_security.notify_admins(
+            session, entity_id=actor.id, title="Payroll control changed",
+            body=f"{actor.user.full_name} ({actor.employee_id}) changed a TDS engine setting.",
         )  # fmt: skip
     if FORM16_SECOND_KEY in guarded:
         await admin_security.notify_admins(
