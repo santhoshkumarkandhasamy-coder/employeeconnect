@@ -62,6 +62,7 @@ class Fake5b extends FakeRepo {
   TaxDeclaration adminDecl = TaxDeclaration.fromJson(declJson(user: 'emp'));
   final onBehalf = <Map<String, Object?>>[];
   final revealCalls = <bool>[];
+  final revealPasswords = <String?>[];
   final unlocks = <Map<String, Object?>>[];
   List<TaxProof> proofList = [];
   ApiException? proofDecideError;
@@ -149,8 +150,8 @@ class Fake5b extends FakeRepo {
   }
 
   @override
-  Future<TaxWindows> saveTaxWindows(String fy, TaxWindows w) async {
-    windowSaves.add({'fy': fy, ...w.toJson()});
+  Future<TaxWindows> saveTaxWindows(String fy, TaxWindows w, {String? currentPassword}) async {
+    windowSaves.add({'fy': fy, ...w.toJson(), 'pw': currentPassword});
     return w;
   }
 
@@ -210,8 +211,9 @@ class Fake5b extends FakeRepo {
 
   // admin declarations
   @override
-  Future<TaxDeclaration> taxDeclarationOf(String userId, {String? fy, bool reveal = false}) async {
+  Future<TaxDeclaration> taxDeclarationOf(String userId, {String? fy, bool reveal = false, String? currentPassword}) async {
     revealCalls.add(reveal);
+    if (reveal) revealPasswords.add(currentPassword);
     return adminDecl;
   }
 
@@ -245,8 +247,21 @@ class Fake5b extends FakeRepo {
   }
 
   @override
-  Future<TaxDeclaration> unlockDeclaration(String userId, {required String fy, required String until, required String reason}) async {
-    unlocks.add({'user': userId, 'until': until, 'reason': reason});
+  Future<TaxDeclaration> unlockDeclaration(
+    String userId, {
+    required String fy,
+    required String until,
+    required String reason,
+    required String currentPassword,
+    bool allowRegimeChange = false,
+  }) async {
+    unlocks.add({
+      'user': userId,
+      'until': until,
+      'reason': reason,
+      'pw': currentPassword,
+      'regime': allowRegimeChange,
+    });
     return adminDecl;
   }
 
@@ -475,6 +490,20 @@ void main() {
       await _tap(tester, 'win-save');
       expect(repo.windowSaves.single['proof_opens_on'], isNull);
       expect(repo.windowSaves.single['declaration_closes_on'], '2026-06-30');
+      expect(repo.windowSaves.single['pw'], isNull);
+    });
+
+    testWidgets('windows: reopening a passed window asks for the password', (tester) async {
+      final repo = Fake5b()..versions = [_rules(status: 'verified', version: 1)];
+      await _pumpPushed(tester, const TaxYearScreen(fy: '2026-27'), repo: repo, perms: _manage);
+      await _tap(tester, 'tax-windows-edit');
+      // The declaration window closed on 2026-06-30; the test clock is after that.
+      await tester.enterText(find.byKey(const ValueKey('win-decl-close')), '2026-12-31');
+      await _tap(tester, 'win-save');
+      expect(repo.windowSaves, isEmpty);
+      await _password(tester, 'pw');
+      expect(repo.windowSaves.single['declaration_closes_on'], '2026-12-31');
+      expect(repo.windowSaves.single['pw'], 'pw');
     });
   });
 
@@ -784,6 +813,29 @@ void main() {
       expect(find.text('Enter the PAN'), findsOneWidget);
     });
 
+    testWidgets('the form offers the sections the server sent, not the built-in list', (tester) async {
+      final repo = Fake5b()
+        ..myDecl = TaxDeclaration.fromJson({
+          ...declJson(items: []),
+          'sections': [
+            {
+              'code': 'NPS2',
+              'name': 'Server only section',
+              'limit': null,
+              'proof_required': true,
+              'fields': ['description'],
+            },
+          ],
+          'proof_max_files': 4,
+        });
+      await pumpPayroll(tester, const MyTaxScreen(), repo: repo, perms: _own);
+      await _tap(tester, 'decl-add-item');
+      await tester.tap(find.byKey(const ValueKey('item-section')));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Server only section'), findsWidgets);
+      expect(find.textContaining('House rent'), findsNothing);
+    });
+
     testWidgets('rules not verified yet: a plain message, no error', (tester) async {
       final repo = Fake5b()..myDeclError = const ApiException(code: 'TAX_RULES_NOT_VERIFIED', message: 'x', status: 409);
       await pumpPayroll(tester, const MyTaxScreen(), repo: repo, perms: _own);
@@ -830,6 +882,21 @@ void main() {
       await _tap(tester, 'proof-send');
       expect(find.text('Add at least one file (a photo or a PDF of the proof).'), findsOneWidget);
       expect(repo.proofCreates, isEmpty);
+    });
+
+    testWidgets('the file limit comes from the server (proof_max_files)', (tester) async {
+      final picker = FakeBillPicker(PickedBill(name: 'receipt.pdf', bytes: Uint8List.fromList(List.filled(20, 1))));
+      final repo = Fake5b()
+        ..myDecl = TaxDeclaration.fromJson({...declJson(reason: 'PROOF_WINDOW'), 'proof_max_files': 2})
+        ..myProofList = const [];
+      await pumpPayroll(tester, const MyTaxScreen(), repo: repo, perms: _own, billPicker: picker);
+      await _tap(tester, 'tab-proofs');
+      await _tap(tester, 'proof-add-i-1');
+      await _tap(tester, 'proof-pick-file');
+      await _tap(tester, 'proof-pick-file');
+      await _tap(tester, 'proof-pick-file');
+      expect(find.text('At most 2 files for one proof.'), findsOneWidget);
+      expect(find.byKey(const ValueKey('proof-file-2')), findsNothing);
     });
 
     testWidgets('the claimed amount cannot be above the declared amount', (tester) async {
@@ -1025,9 +1092,23 @@ void main() {
       );
       expect(repo.revealCalls, [false]);
       await _tap(tester, 'decl-reveal');
+      expect(repo.revealCalls, [false]); // waits for the password
+      await _password(tester, 'pw');
       expect(repo.revealCalls, [false, true]);
+      expect(repo.revealPasswords, ['pw']);
       await _tap(tester, 'decl-reveal');
       expect(repo.revealCalls, [false, true]);
+    });
+
+    testWidgets('a viewer without payroll.manage has no reveal button', (tester) async {
+      await pumpPayroll(
+        tester,
+        const AdminDeclarationScreen(userId: 'emp', fy: '2026-27', name: 'Asha Rao'),
+        repo: Fake5b(),
+        perms: const ['payroll.view_all'],
+        selfId: 'hr',
+      );
+      expect(find.byKey(const ValueKey('decl-reveal')), findsNothing);
     });
 
     testWidgets('unlock needs a date inside the year and a reason', (tester) async {
@@ -1049,7 +1130,35 @@ void main() {
       expect(repo.unlocks, isEmpty);
       await _enter(tester, 'unlock-reason', 'Joined late');
       await _tap(tester, 'unlock-confirm');
-      expect(repo.unlocks.single, {'user': 'emp', 'until': '2026-11-10', 'reason': 'Joined late'});
+      expect(repo.unlocks, isEmpty); // the password comes first
+      await _password(tester, 'pw');
+      expect(repo.unlocks.single, {
+        'user': 'emp',
+        'until': '2026-11-10',
+        'reason': 'Joined late',
+        'pw': 'pw',
+        'regime': false,
+      });
+      expect(find.byKey(const ValueKey('unlock-allow-regime')), findsNothing);
+    });
+
+    testWidgets('the regime option is shown to payroll.approve holders only and is sent when ticked', (tester) async {
+      final repo = Fake5b();
+      await pumpPayroll(
+        tester,
+        const AdminDeclarationScreen(userId: 'emp', fy: '2026-27', name: 'Asha Rao'),
+        repo: repo,
+        perms: const [..._manage, 'payroll.approve'],
+        selfId: 'hr',
+      );
+      await _tap(tester, 'decl-unlock');
+      await _enter(tester, 'unlock-until', '2026-11-10');
+      await _enter(tester, 'unlock-reason', 'Wrong regime chosen');
+      await _tap(tester, 'unlock-allow-regime');
+      await _tap(tester, 'unlock-confirm');
+      await _password(tester, 'pw');
+      expect(repo.unlocks.single['regime'], true);
+      expect(repo.unlocks.single['pw'], 'pw');
     });
   });
 
@@ -1213,6 +1322,25 @@ void main() {
       expect(find.text('No employee ID or PAN in the file name matches an employee.'), findsOneWidget);
       expect(find.byKey(const ValueKey('form16-commit')), findsNothing);
       expect(find.byKey(const ValueKey('form16-blocked')), findsOneWidget);
+    });
+
+    testWidgets('UNKNOWN_PAN and FORBIDDEN are explained in plain words', (tester) async {
+      final repo = Fake5b()
+        ..dry = Form16DryRun.fromJson(dryRunJson(
+          matched: [
+            {'index': 0, 'user': userJson('u1'), 'sha256': 'd' * 64, 'replaces_id': null},
+          ],
+          errors: [
+            {'index': 1, 'message': 'UNKNOWN_PAN'},
+            {'index': 2, 'message': 'FORBIDDEN'},
+          ],
+        ),);
+      await openUpload(tester, repo: repo, files: [_pdf('a.pdf'), _pdf('b.pdf'), _pdf('c.pdf')]);
+      await _tap(tester, 'form16-pick');
+      await _tap(tester, 'form16-check');
+      expect(find.text('The PAN in the file name does not belong to any employee.'), findsOneWidget);
+      expect(find.text('This file is for you. You cannot upload your own Form 16.'), findsOneWidget);
+      expect(find.byKey(const ValueKey('form16-commit')), findsNothing);
     });
 
     testWidgets('a file over 2 MB is refused before any check', (tester) async {

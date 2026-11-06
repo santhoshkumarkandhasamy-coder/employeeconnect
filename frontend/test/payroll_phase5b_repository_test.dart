@@ -140,6 +140,36 @@ void main() {
       'proof_opens_on': null,
       'proof_closes_on': null,
     });
+    await repo.saveTaxWindows(
+      '2026-27',
+      const TaxWindows(declarationOpensOn: '2026-04-01', declarationClosesOn: '2026-12-31'),
+      currentPassword: 'pw',
+    );
+    expect((a.calls.last.body! as Map)['current_password'], 'pw');
+  });
+
+  test('windowsNeedPassword: only a passed window that is reopened or moved later', () {
+    const old = TaxWindows(declarationOpensOn: '2026-04-01', declarationClosesOn: '2026-06-30');
+    final today = DateTime(2026, 8, 1);
+    expect(
+      windowsNeedPassword(old, const TaxWindows(declarationOpensOn: '2026-04-01', declarationClosesOn: '2026-09-30'), today),
+      isTrue,
+    );
+    expect(
+      windowsNeedPassword(old, const TaxWindows(declarationOpensOn: '2026-04-01', declarationClosesOn: '2026-06-15'), today),
+      isFalse,
+    );
+    const open = TaxWindows(declarationOpensOn: '2026-04-01', declarationClosesOn: '2026-12-31');
+    expect(
+      windowsNeedPassword(open, const TaxWindows(declarationOpensOn: '2026-04-01', declarationClosesOn: '2027-01-31'), today),
+      isFalse,
+    );
+  });
+
+  test('Form 16 per-file codes UNKNOWN_PAN and FORBIDDEN have plain messages', () {
+    expect(form16ErrorLabel('UNKNOWN_PAN'), isNot('UNKNOWN_PAN'));
+    expect(form16ErrorLabel('FORBIDDEN'), isNot('FORBIDDEN'));
+    expect(form16ErrorLabel('SOMETHING_NEW'), 'SOMETHING_NEW');
   });
 
   test('declarations: list, detail with reveal, on behalf save and submit, unlock', () async {
@@ -165,9 +195,14 @@ void main() {
     expect(p.items.single.flags, ['NO_PAN']);
     expect(p.items.single.proofs.verified, 2);
     expect(a.calls.last.query, {'fy': '2026-27', 'status': 'submitted', 'q': 'asha', 'page': 1, 'page_size': 20});
-    await repo.taxDeclarationOf('emp', fy: '2026-27', reveal: true);
+    await repo.taxDeclarationOf('emp', fy: '2026-27');
+    expect(a.calls.last.method, 'GET');
     expect(a.calls.last.path, '/admin/payroll/tax/declarations/emp');
-    expect(a.calls.last.query, {'fy': '2026-27', 'reveal': true});
+    expect(a.calls.last.query, {'fy': '2026-27'}); // no reveal flag: GET reveal=true is 422
+    await repo.taxDeclarationOf('emp', fy: '2026-27', reveal: true, currentPassword: 'pw');
+    expect(a.calls.last.method, 'POST');
+    expect(a.calls.last.path, '/admin/payroll/tax/declarations/emp/reveal');
+    expect(a.calls.last.body, {'fy': '2026-27', 'current_password': 'pw'});
     final saved = await repo.saveDeclarationOnBehalf(
       'emp',
       const DeclarationSave(fy: '2026-27', expectedVersion: 5, regime: 'old', items: [
@@ -182,9 +217,61 @@ void main() {
     await repo.submitDeclarationOnBehalf('emp', fy: '2026-27', expectedVersion: 6, currentPassword: 'pw');
     expect(a.calls.last.path, '/admin/payroll/tax/declarations/emp/submit');
     expect(a.calls.last.body, {'fy': '2026-27', 'expected_version': 6, 'current_password': 'pw'});
-    await repo.unlockDeclaration('emp', fy: '2026-27', until: '2026-07-15', reason: ' late joiner ');
+    await repo.unlockDeclaration(
+      'emp',
+      fy: '2026-27',
+      until: '2026-07-15',
+      reason: ' late joiner ',
+      currentPassword: 'pw',
+    );
     expect(a.calls.last.path, '/admin/payroll/tax/declarations/emp/unlock');
-    expect(a.calls.last.body, {'fy': '2026-27', 'until': '2026-07-15', 'reason': 'late joiner'});
+    expect(a.calls.last.body, {
+      'fy': '2026-27',
+      'until': '2026-07-15',
+      'reason': 'late joiner',
+      'current_password': 'pw',
+      'allow_regime_change': false,
+    });
+    await repo.unlockDeclaration(
+      'emp',
+      fy: '2026-27',
+      until: '2026-07-15',
+      reason: 'regime',
+      currentPassword: 'pw',
+      allowRegimeChange: true,
+    );
+    expect((a.calls.last.body! as Map)['allow_regime_change'], true);
+  });
+
+  test('employee declaration parses sections and proof_max_files', () async {
+    final (repo, a) = _repo((c) => {
+          ...declJson(),
+          'sections': [
+            {
+              'code': 'NPS2',
+              'name': 'NPS extra',
+              'limit': '50000.00',
+              'senior_limit': null,
+              'proof_required': false,
+              'fields': ['description'],
+              'landlord_pan_above': null,
+            },
+          ],
+          'proof_max_files': 3,
+        },);
+    final d = await repo.myDeclaration(fy: '2026-27');
+    expect(a.calls.last.path, '/me/tax/declaration');
+    expect(d.sections.single.code, 'NPS2');
+    expect(d.sections.single.proofRequired, isFalse);
+    expect(d.proofMaxFiles, 3);
+    expect(d.maxProofFiles, 3);
+    expect(d.sectionsOr(fallbackSections).single.code, 'NPS2');
+    // An admin answer has neither: the defaults apply.
+    final (repo2, _) = _repo((c) => declJson(user: 'emp'));
+    final admin = await repo2.taxDeclarationOf('emp');
+    expect(admin.sections, isEmpty);
+    expect(admin.maxProofFiles, defaultProofMaxFiles);
+    expect(admin.sectionsOr(fallbackSections), same(fallbackSections));
   });
 
   test('proofs: list, verify (comment optional), reject', () async {

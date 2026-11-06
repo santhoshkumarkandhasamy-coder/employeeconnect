@@ -12,7 +12,7 @@ import '../domain/payroll_models.dart' show canManagePayroll;
 import '../domain/phase4a_models.dart' show canApprovePayroll;
 import '../domain/phase5b_models.dart';
 import 'increment_widgets.dart' show showCommentDialog;
-import 'payroll_providers.dart' show approvalQueueProvider;
+import 'payroll_providers.dart' show approvalQueueProvider, payrollClockProvider;
 import 'payroll_widgets.dart';
 import 'tax_providers.dart';
 import 'tax_rules_editor.dart';
@@ -121,13 +121,39 @@ class _TaxYearScreenState extends ConsumerState<TaxYearScreen> {
       builder: (_) => WindowsDialog(fy: widget.fy, windows: current),
     );
     if (saved == null || !mounted) return;
+    final repo = ref.read(payrollRepositoryProvider);
+    const reason = 'Reopening a window that has already closed, or moving its closing date later, needs your password.';
     try {
-      await ref.read(payrollRepositoryProvider).saveTaxWindows(widget.fy, saved);
-      invalidateTaxRules(ref, fy: widget.fy);
-      if (mounted) payrollSnack(context, 'Windows saved.');
+      if (windowsNeedPassword(current, saved, ref.read(payrollClockProvider)())) {
+        await _saveWithPassword(repo, saved, reason);
+      } else {
+        try {
+          await repo.saveTaxWindows(widget.fy, saved);
+          invalidateTaxRules(ref, fy: widget.fy);
+          if (mounted) payrollSnack(context, 'Windows saved.');
+        } on ApiException catch (e) {
+          // The server decides in the end: it asks for the password when it sees a reopening.
+          if (e.code != 'VALIDATION_ERROR' || e.detail('current_password') == null) rethrow;
+          if (!mounted) return;
+          await _saveWithPassword(repo, saved, reason);
+        }
+      }
     } on ApiException catch (e) {
       if (mounted) payrollSnack(context, phase5bErrorMessage(e));
     }
+  }
+
+  Future<void> _saveWithPassword(PayrollRepository repo, TaxWindows saved, String reason) async {
+    final done = await runWithReauth(
+      context,
+      reason: reason,
+      action: (pw) async {
+        await repo.saveTaxWindows(widget.fy, saved, currentPassword: pw);
+      },
+    );
+    if (!done || !mounted) return;
+    invalidateTaxRules(ref, fy: widget.fy);
+    payrollSnack(context, 'Windows saved.');
   }
 
   @override

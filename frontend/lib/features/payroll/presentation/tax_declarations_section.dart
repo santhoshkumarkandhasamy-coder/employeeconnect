@@ -9,6 +9,7 @@ import '../../admin/presentation/admin_widgets.dart'
     show AdminPagedBody, adminPermissionsProvider, adminSelfIdProvider, runWithReauth;
 import '../data/payroll_repository.dart';
 import '../domain/payroll_models.dart' show canManagePayroll;
+import '../domain/phase4a_models.dart' show canApprovePayroll;
 import '../domain/phase5b_models.dart';
 import 'declaration_editor.dart';
 import 'pay_items_widgets.dart' show PayTone;
@@ -159,8 +160,16 @@ class _AdminDeclarationScreenState extends ConsumerState<AdminDeclarationScreen>
     if (_busy) return;
     setState(() => _busy = true);
     try {
-      final d = await ref.read(payrollRepositoryProvider).taxDeclarationOf(widget.userId, fy: widget.fy, reveal: true);
-      if (mounted) setState(() => _revealed = d);
+      final repo = ref.read(payrollRepositoryProvider);
+      TaxDeclaration? d;
+      final done = await runWithReauth(
+        context,
+        reason: 'Showing full PANs needs your password. The view is recorded.',
+        action: (pw) async {
+          d = await repo.taxDeclarationOf(widget.userId, fy: widget.fy, reveal: true, currentPassword: pw);
+        },
+      );
+      if (done && mounted) setState(() => _revealed = d);
     } on ApiException catch (e) {
       if (mounted) payrollSnack(context, phase5bErrorMessage(e));
     } finally {
@@ -169,15 +178,35 @@ class _AdminDeclarationScreenState extends ConsumerState<AdminDeclarationScreen>
   }
 
   Future<void> _unlock() async {
-    final r = await showDialog<({String until, String reason})>(
+    final canAllowRegime = canApprovePayroll(ref.read(adminPermissionsProvider));
+    final r = await showDialog<UnlockChoice>(
       context: context,
-      builder: (_) => UnlockDialog(fy: widget.fy, today: ref.read(payrollClockProvider)()),
+      builder: (_) => UnlockDialog(
+        fy: widget.fy,
+        today: ref.read(payrollClockProvider)(),
+        canAllowRegimeChange: canAllowRegime,
+      ),
     );
     if (r == null || !mounted) return;
+    final repo = ref.read(payrollRepositoryProvider);
     try {
-      await ref.read(payrollRepositoryProvider).unlockDeclaration(widget.userId, fy: widget.fy, until: r.until, reason: r.reason);
+      final done = await runWithReauth(
+        context,
+        reason: 'Unlocking a declaration needs your password.',
+        action: (pw) async {
+          await repo.unlockDeclaration(
+            widget.userId,
+            fy: widget.fy,
+            until: r.until,
+            reason: r.reason,
+            currentPassword: pw,
+            allowRegimeChange: canAllowRegime && r.allowRegimeChange,
+          );
+        },
+      );
+      if (!done || !mounted) return;
       ref.invalidate(adminDeclarationProvider(_key));
-      if (mounted) payrollSnack(context, 'Unlocked until ${r.until}.');
+      payrollSnack(context, 'Unlocked until ${r.until}.');
     } on ApiException catch (e) {
       if (mounted) payrollSnack(context, phase5bErrorMessage(e));
     }
@@ -214,12 +243,13 @@ class _AdminDeclarationScreenState extends ConsumerState<AdminDeclarationScreen>
                 icon: const Icon(Icons.lock_open_outlined),
                 onPressed: _unlock,
               ),
-            IconButton(
-              key: const ValueKey('decl-reveal'),
-              tooltip: _revealed == null ? 'Show full PANs' : 'Hide PANs',
-              icon: Icon(_revealed == null ? Icons.visibility_outlined : Icons.visibility_off_outlined),
-              onPressed: _busy ? null : (_revealed == null ? _reveal : () => setState(() => _revealed = null)),
-            ),
+            if (manage)
+              IconButton(
+                key: const ValueKey('decl-reveal'),
+                tooltip: _revealed == null ? 'Show full PANs' : 'Hide PANs',
+                icon: Icon(_revealed == null ? Icons.visibility_outlined : Icons.visibility_off_outlined),
+                onPressed: _busy ? null : (_revealed == null ? _reveal : () => setState(() => _revealed = null)),
+              ),
           ],
         ),
         body: async.when(
@@ -272,11 +302,15 @@ class _AdminDeclarationScreenState extends ConsumerState<AdminDeclarationScreen>
 }
 
 
-/// Asks until when the employee may edit again, and why (3 to 200 characters).
+typedef UnlockChoice = ({String until, String reason, bool allowRegimeChange});
+
+/// Asks until when the employee may edit again, and why (3 to 200 characters). The regime option is only
+/// offered to `payroll.approve` holders ([canAllowRegimeChange]); the server enforces it too.
 class UnlockDialog extends StatefulWidget {
-  const UnlockDialog({required this.fy, required this.today, super.key});
+  const UnlockDialog({required this.fy, required this.today, super.key, this.canAllowRegimeChange = false});
   final String fy;
   final DateTime today;
+  final bool canAllowRegimeChange;
 
   @override
   State<UnlockDialog> createState() => _UnlockDialogState();
@@ -286,6 +320,7 @@ class _UnlockDialogState extends State<UnlockDialog> {
   late final TextEditingController _until = TextEditingController(text: ymd(widget.today.add(const Duration(days: 7))));
   final _reason = TextEditingController();
   String? _error;
+  bool _allowRegime = false;
 
   @override
   void dispose() {
@@ -311,7 +346,12 @@ class _UnlockDialogState extends State<UnlockDialog> {
       setState(() => _error = err);
       return;
     }
-    Navigator.pop(context, (until: ymd(d!), reason: _reason.text.trim()));
+    final UnlockChoice choice = (
+      until: ymd(d!),
+      reason: _reason.text.trim(),
+      allowRegimeChange: widget.canAllowRegimeChange && _allowRegime,
+    );
+    Navigator.pop(context, choice);
   }
 
   @override
@@ -337,6 +377,15 @@ class _UnlockDialogState extends State<UnlockDialog> {
                 maxLength: 200,
                 decoration: const InputDecoration(labelText: 'Reason', border: OutlineInputBorder()),
               ),
+              if (widget.canAllowRegimeChange)
+                CheckboxListTile(
+                  key: const ValueKey('unlock-allow-regime'),
+                  contentPadding: EdgeInsets.zero,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  value: _allowRegime,
+                  onChanged: (v) => setState(() => _allowRegime = v ?? false),
+                  title: const Text('Also let the employee change the tax regime'),
+                ),
               if (_error != null)
                 Text(_error!, key: const ValueKey('unlock-error'), style: TextStyle(color: Theme.of(context).colorScheme.error)),
             ],

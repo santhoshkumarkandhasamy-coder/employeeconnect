@@ -101,7 +101,7 @@ class MyDeclarationTab extends ConsumerWidget {
         onRefresh: () async => ref.invalidate(myDeclarationProvider(fy)),
         child: DeclarationPane(
           declaration: d,
-          sections: fallbackSections,
+          sections: d.sectionsOr(fallbackSections),
           save: (body) => repo.saveMyDeclaration(body),
           submit: (f, v) => repo.submitMyDeclaration(fy: f, expectedVersion: v),
           onReload: () => ref.invalidate(myProofsProvider(fy)),
@@ -144,12 +144,17 @@ class _ProofsBody extends ConsumerWidget {
   final String fy;
 
   SectionDef _def(String code) =>
-      fallbackSections.where((s) => s.code == code).firstOrNull ?? SectionDef(code: code, name: code);
+      decl.sectionsOr(fallbackSections).where((s) => s.code == code).firstOrNull ?? SectionDef(code: code, name: code);
 
   Future<void> _add(BuildContext context, WidgetRef ref, DeclItem item) async {
     final made = await showDialog<TaxProof>(
       context: context,
-      builder: (_) => ProofDialog(fy: fy, item: item, sectionName: _def(item.section).name),
+      builder: (_) => ProofDialog(
+        fy: fy,
+        item: item,
+        sectionName: _def(item.section).name,
+        maxFiles: decl.maxProofFiles,
+      ),
     );
     if (made != null && context.mounted) {
       payrollSnack(context, 'Proof sent. HR will check it.');
@@ -275,9 +280,17 @@ class _Pick {
   String? fileId; // kept after a good upload so a retry does not upload twice
 }
 
-/// Claimed amount + 1..5 files. Files are uploaded one by one (`purpose=tax_proof`) and then the proof is created.
+/// Claimed amount + 1..[maxFiles] files (`proof_max_files` from the server). Files are uploaded one by one
+/// (`purpose=tax_proof`) and then the proof is created.
 class ProofDialog extends ConsumerStatefulWidget {
-  const ProofDialog({required this.fy, required this.item, required this.sectionName, super.key});
+  const ProofDialog({
+    required this.fy,
+    required this.item,
+    required this.sectionName,
+    super.key,
+    this.maxFiles = defaultProofMaxFiles,
+  });
+  final int maxFiles;
   final String fy;
   final DeclItem item;
   final String sectionName;
@@ -300,8 +313,8 @@ class _ProofDialogState extends ConsumerState<ProofDialog> {
   }
 
   Future<void> _pick(BillSource source) async {
-    if (_picks.length >= defaultProofMaxFiles) {
-      setState(() => _error = 'At most $defaultProofMaxFiles files for one proof.');
+    if (_picks.length >= widget.maxFiles) {
+      setState(() => _error = 'At most ${widget.maxFiles} files for one proof.');
       return;
     }
     final picked = await ref.read(claimBillPickerProvider).pick(source);

@@ -1314,8 +1314,14 @@ class PayrollRepository {
         'comment': comment.trim(),
       },),);
 
-  Future<TaxWindows> saveTaxWindows(String fy, TaxWindows w) async =>
-      TaxWindows.fromJson((await _json('PUT', '$_t/years/$fy/windows', body: w.toJson()))['windows']);
+  /// [currentPassword] is needed when a passed window is reopened or its closing date moved later.
+  Future<TaxWindows> saveTaxWindows(String fy, TaxWindows w, {String? currentPassword}) async {
+    final body = <String, Object?>{
+      ...w.toJson(),
+      if (currentPassword != null) 'current_password': currentPassword,
+    };
+    return TaxWindows.fromJson((await _json('PUT', '$_t/years/$fy/windows', body: body))['windows']);
+  }
 
   // ---- phase 5b: declarations and proofs, admin (19.7) ---------------------------------------
 
@@ -1331,12 +1337,24 @@ class PayrollRepository {
         DeclarationListItem.fromJson,
       );
 
-  /// [reveal] shows the landlord / lender PAN unmasked (audited, rate limited). Never kept.
-  Future<TaxDeclaration> taxDeclarationOf(String userId, {String? fy, bool reveal = false}) async =>
-      TaxDeclaration.fromJson(await _json('GET', '$_t/declarations/$userId', query: {
+  /// Third-party PANs are masked. With [reveal] the unmasked copy is fetched with
+  /// `POST .../reveal` (needs `payroll.manage` and [currentPassword]; audited, rate limited). Never kept.
+  Future<TaxDeclaration> taxDeclarationOf(
+    String userId, {
+    String? fy,
+    bool reveal = false,
+    String? currentPassword,
+  }) async {
+    if (reveal) {
+      return TaxDeclaration.fromJson(await _json('POST', '$_t/declarations/$userId/reveal', body: {
         if (fy != null) 'fy': fy,
-        'reveal': reveal,
+        'current_password': currentPassword ?? '',
       },),);
+    }
+    return TaxDeclaration.fromJson(await _json('GET', '$_t/declarations/$userId', query: {
+      if (fy != null) 'fy': fy,
+    },),);
+  }
 
   /// On behalf of an employee: needs `payroll.manage` and the caller's password.
   Future<TaxDeclaration> saveDeclarationOnBehalf(
@@ -1363,11 +1381,15 @@ class PayrollRepository {
     required String fy,
     required String until,
     required String reason,
+    required String currentPassword,
+    bool allowRegimeChange = false,
   }) async =>
       TaxDeclaration.fromJson(await _json('POST', '$_t/declarations/$userId/unlock', body: {
         'fy': fy,
         'until': until,
         'reason': reason.trim(),
+        'current_password': currentPassword,
+        'allow_regime_change': allowRegimeChange,
       },),);
 
   Future<Paged<TaxProof>> taxProofs(TaxProofQuery q, {int page = 1}) async => Paged.parse(

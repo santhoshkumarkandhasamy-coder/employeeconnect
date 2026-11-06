@@ -124,6 +124,21 @@ class TaxWindows {
   }
 }
 
+/// True when saving [next] over [current] reopens a window whose closing date has passed, or moves that
+/// date later (19.6): the server then wants the caller's password.
+bool windowsNeedPassword(TaxWindows current, TaxWindows next, DateTime today) {
+  final t = DateTime(today.year, today.month, today.day);
+  bool one(String? oldClose, String? newClose) {
+    final o = parseYmd(oldClose);
+    final n = parseYmd(newClose);
+    if (o == null || n == null) return false;
+    return o.isBefore(t) && n.isAfter(o);
+  }
+
+  return one(current.declarationClosesOn, next.declarationClosesOn) ||
+      one(current.proofClosesOn, next.proofClosesOn);
+}
+
 /// Both dates of a window or neither; opens <= closes; inside the FY (19.6). Null = fine.
 String? validateWindows(TaxWindows w, String fy) {
   final b = fyBounds(fy);
@@ -727,7 +742,21 @@ class TaxDeclaration {
     this.user,
     this.enteredBy,
     this.unlockedUntil,
+    this.sections = const [],
+    this.proofMaxFiles,
   });
+
+  /// Employee answers only: the catalogue of the verified rules (build the form from it).
+  final List<SectionDef> sections;
+
+  /// Employee answers only: `payroll.tax_proof_max_files`.
+  final int? proofMaxFiles;
+
+  /// Files allowed for one proof: the server value, else the default.
+  int get maxProofFiles => (proofMaxFiles != null && proofMaxFiles! > 0) ? proofMaxFiles! : defaultProofMaxFiles;
+
+  /// The server catalogue when it sent one, else [fallback].
+  List<SectionDef> sectionsOr(List<SectionDef> fallback) => sections.isNotEmpty ? sections : fallback;
 
   final String? id;
   final String fy;
@@ -765,6 +794,8 @@ class TaxDeclaration {
         user: _userOpt(j['user']),
         enteredBy: _userOpt(j['entered_by']),
         unlockedUntil: _opt(j['unlocked_until']),
+        sections: SectionDef.parseList(j['sections']),
+        proofMaxFiles: j['proof_max_files'] == null ? null : _i(j['proof_max_files']),
       );
 }
 
@@ -1171,6 +1202,8 @@ const Map<String, String> form16ErrorLabels = {
   'NOT_PDF': 'This is not a valid PDF.',
   'FILE_TOO_LARGE': 'The file is larger than 2 MB.',
   'DELETED_EMPLOYEE': 'The employee was removed.',
+  'UNKNOWN_PAN': 'The PAN in the file name does not belong to any employee.',
+  'FORBIDDEN': 'This file is for you. You cannot upload your own Form 16.',
 };
 
 String form16ErrorLabel(String code) => form16ErrorLabels[code] ?? code;
