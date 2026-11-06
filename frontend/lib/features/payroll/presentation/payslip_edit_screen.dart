@@ -18,7 +18,8 @@ import 'fnf_detail_screen.dart';
 import 'payroll_widgets.dart';
 import 'payslip_view.dart';
 import 'publish_request_widgets.dart';
-import '../domain/phase5a_models.dart' show phase5ErrorMessage;
+import '../domain/phase5c_models.dart' show payslipEditorErrorMessage, tdsReasonRequired, validateTdsOverrideReason;
+import 'tds_widgets.dart';
 
 /// One payslip of a run (admin). A draft can be edited (LOP override with a
 /// reason, TDS, PT override, adjustments, hold, note); saving shows the result
@@ -83,6 +84,8 @@ class _PayslipEditorState extends ConsumerState<PayslipEditor> {
   final _lop = TextEditingController();
   final _lopReason = TextEditingController();
   final _tds = TextEditingController();
+  final _tdsReason = TextEditingController();
+  bool _handBack = false;
   final _pt = TextEditingController();
   final _note = TextEditingController();
   final List<_AdjRow> _adj = [];
@@ -102,6 +105,8 @@ class _PayslipEditorState extends ConsumerState<PayslipEditor> {
     _lop.text = lop?.override == null ? '' : formatDays(lop!.override!);
     _lopReason.text = lop?.overrideReason ?? '';
     _tds.text = inputs?.tds ?? '';
+    _tdsReason.text = '';
+    _handBack = false;
     _pt.text = inputs?.ptOverride ?? '';
     _note.text = inputs?.note ?? '';
     _hold = p.hold;
@@ -118,7 +123,7 @@ class _PayslipEditorState extends ConsumerState<PayslipEditor> {
 
   @override
   void dispose() {
-    for (final c in [_lop, _lopReason, _tds, _pt, _note]) {
+    for (final c in [_lop, _lopReason, _tds, _tdsReason, _pt, _note]) {
       c.dispose();
     }
     for (final r in _adj) {
@@ -135,6 +140,13 @@ class _PayslipEditorState extends ConsumerState<PayslipEditor> {
   bool get _editable =>
       _p.isDraft && canManagePayroll(ref.read(adminPermissionsProvider)) && !_isSelf;
 
+  /// The run applies the engine and the typed figure differs from the one on the payslip.
+  bool get _tdsReasonNeeded {
+    if (!tdsReasonRequired(_p)) return false;
+    final typed = normalizeMoney(_tds.text);
+    return typed != null && moneyToPaise(typed) != moneyToPaise(_p.inputs?.tds);
+  }
+
   PayslipEditInput _input() => PayslipEditInput(
         lopOverride: parseLop(_lop.text),
         lopReason: _lopReason.text,
@@ -146,6 +158,8 @@ class _PayslipEditorState extends ConsumerState<PayslipEditor> {
         ],
         hold: _hold,
         note: _note.text,
+        tdsReason: _tdsReason.text,
+        tdsHandBack: _handBack,
       );
 
   Future<void> _save() async {
@@ -199,7 +213,7 @@ class _PayslipEditorState extends ConsumerState<PayslipEditor> {
         // Maker-checker applies: offer the request flow instead of a plain error.
         unawaited(_offerRequest());
       } else {
-        payrollSnack(context, phase5ErrorMessage(e));
+        payrollSnack(context, payslipEditorErrorMessage(e));
         // PAYROLL_LOCKED / CONFLICT mean the payslip is no longer in the state this
         // screen shows (13.8): load the current one.
         if (e.code == 'PAYROLL_LOCKED' || e.code == 'CONFLICT') {
@@ -405,6 +419,14 @@ class _PayslipEditorState extends ConsumerState<PayslipEditor> {
           const SizedBox(height: 8),
           if (_p.lop != null) _lopCard(editable),
           if ((_p.inputs?.components ?? const []).isNotEmpty) _componentsCard(_p.inputs!.components),
+          TdsCard(
+            payslip: _p,
+            editable: editable,
+            onUseSuggested: () => setState(() => _tds.text = _p.tdsComputation?.suggested ?? _tds.text),
+            onHandBack: _p.tdsComputation?.override != null && !_handBack
+                ? () => setState(() => _handBack = true)
+                : null,
+          ),
           if (editable) ..._inputCards(),
           if (_p.totals != null || _p.earnings.isNotEmpty) PayslipView(payslip: _p),
           const SizedBox(height: 12),
@@ -567,7 +589,42 @@ class _PayslipEditorState extends ConsumerState<PayslipEditor> {
           title: 'Deductions input',
           children: [
             const SizedBox(height: 4),
-            MoneyField(controller: _tds, label: 'TDS (monthly)'),
+            if (_handBack) ...[
+              Text(
+                'The engine will set the TDS again when you save.',
+                key: const ValueKey('tds-hand-back-note'),
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton(
+                  key: const ValueKey('tds-keep-mine'),
+                  onPressed: () => setState(() => _handBack = false),
+                  child: const Text('Keep my figure'),
+                ),
+              ),
+            ] else ...[
+              MoneyField(
+                key: const ValueKey('tds-field'),
+                controller: _tds,
+                label: 'TDS (monthly)',
+                onChanged: () => setState(() {}),
+              ),
+              if (_tdsReasonNeeded) ...[
+                const SizedBox(height: 12),
+                TextFormField(
+                  key: const ValueKey('tds-override-reason'),
+                  controller: _tdsReason,
+                  maxLength: 200,
+                  decoration: const InputDecoration(
+                    labelText: 'Reason for changing the computed TDS',
+                    helperText: 'The run applies the computed TDS, so a change needs a reason.',
+                    border: OutlineInputBorder(),
+                  ),
+                  validator: validateTdsOverrideReason,
+                ),
+              ],
+            ],
             const SizedBox(height: 12),
             MoneyField(
               controller: _pt,

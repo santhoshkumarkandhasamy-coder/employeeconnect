@@ -5,6 +5,8 @@ import '../../announcements/presentation/announcement_providers.dart' show Paged
 import '../../attendance/domain/attendance_models.dart' show Paged;
 import '../data/payroll_repository.dart';
 import '../domain/phase5b_models.dart';
+import '../domain/phase5c_models.dart';
+import '../domain/tds_computation.dart';
 
 /// Tax state (contract 19.6 to 19.8). Everything is autoDispose and in memory only: declarations hold
 /// third-party identifiers and are never written to the JSON cache or to disk.
@@ -96,6 +98,21 @@ final myProofsProvider = FutureProvider.autoDispose.family<List<TaxProof>, Strin
 
 final myForm16Provider = FutureProvider.autoDispose<List<MyForm16>>(
   (ref) => ref.watch(payrollRepositoryProvider).myForm16(),
+);
+
+// ---- TDS engine (19.9) ---------------------------------------------------------------------------
+
+final tdsSummaryProvider = FutureProvider.autoDispose.family<TdsSummaryPage, TdsSummaryKey>(
+  (ref, key) => ref.watch(payrollRepositoryProvider).tdsSummary(key.$1, page: key.$2),
+);
+
+final tdsPreviewProvider = FutureProvider.autoDispose.family<TdsResult, TdsPreviewKey>(
+  (ref, k) => ref.watch(payrollRepositoryProvider).tdsPreview(userId: k.$1, fy: k.$2, period: k.$3, regime: k.$4),
+);
+
+/// The employee's own estimate for a financial year.
+final myProjectionProvider = FutureProvider.autoDispose.family<TdsResult, String>(
+  (ref, fy) => ref.watch(payrollRepositoryProvider).myTaxProjection(fy: fy),
 );
 
 /// Work waiting in the Approvals queue (counts for the badge and the sections).

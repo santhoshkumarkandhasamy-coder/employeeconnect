@@ -14,6 +14,8 @@ import '../domain/phase4a_models.dart';
 import '../domain/phase4b_models.dart';
 import '../domain/phase5a_models.dart';
 import '../domain/phase5b_models.dart';
+import '../domain/phase5c_models.dart';
+import '../domain/tds_computation.dart';
 import '../domain/payroll_models.dart';
 
 /// A downloaded file held in memory (a payslip PDF or the register workbook).
@@ -275,6 +277,9 @@ class PayrollRepository {
     String? paidOn,
     String? reference,
     String? amount,
+    String? bsrCode,
+    String? challanSerial,
+    String? depositedOn,
   }) async {
     await _json('PUT', '$_st/challans', body: {
       'type': type,
@@ -283,6 +288,10 @@ class PayrollRepository {
       if (paid) 'paid_on': paidOn,
       if (paid) 'reference': reference,
       if (paid && amount != null && amount.isNotEmpty) 'amount': amount,
+      // 5c: required together for a paid TDS challan, refused for every other case (19.16).
+      if (paid && type == 'tds' && bsrCode != null) 'bsr_code': bsrCode,
+      if (paid && type == 'tds' && challanSerial != null) 'challan_serial': challanSerial,
+      if (paid && type == 'tds' && depositedOn != null) 'deposited_on': depositedOn,
       'current_password': currentPassword,
     },);
   }
@@ -1568,6 +1577,49 @@ class PayrollRepository {
 
   Future<PayrollFile> myForm16File(String id) =>
       _file('GET', '/me/tax/form16/$id/file', fallbackName: 'form16.pdf', ext: '.pdf');
+
+  // ---- phase 5c: TDS engine (19.9) -----------------------------------------------------------------
+
+  /// Needs `payroll.view_all`. Writes nothing. 409 TDS_ENGINE_OFF / TAX_RULES_NOT_VERIFIED.
+  /// [regime] (`old` | `new`) overrides the declared one, for comparison.
+  Future<TdsResult> tdsPreview({required String userId, String? fy, String? period, String? regime}) async =>
+      TdsResult.fromJson(await _json('POST', '$_t/preview', body: {
+        'user_id': userId,
+        'fy': fy,
+        'period': period,
+        'regime': regime,
+      },),);
+
+  Future<TdsSummaryPage> tdsSummary(TdsSummaryQuery q, {int page = 1}) async =>
+      TdsSummaryPage.fromJson(await _json('GET', '$_t/summary', query: {
+        if (q.fy != null) 'fy': q.fy,
+        if (q.q.trim().isNotEmpty) 'q': q.q.trim(),
+        if (q.flag != null) 'flag': q.flag,
+        'page': page,
+        'page_size': 20,
+      },),);
+
+  /// Needs `payroll.view_all` and the caller's own password (step-up).
+  Future<PayrollFile> taxStatement(String userId, {required String fy, required String currentPassword}) => _file(
+        'POST',
+        '$_t/employees/$userId/statement?fy=$fy',
+        fallbackName: 'tax-computation-$fy.pdf',
+        ext: '.pdf',
+        body: {'current_password': currentPassword},
+      );
+
+  /// Working data for the return utility; needs the caller's own password (step-up). [quarter]: 1 = Apr-Jun.
+  Future<PayrollFile> tax24q({required String fy, required int quarter, required String currentPassword}) => _file(
+        'POST',
+        '$_t/24q?fy=$fy&quarter=$quarter',
+        fallbackName: '24q-$fy-q$quarter.xlsx',
+        ext: '.xlsx',
+        body: {'current_password': currentPassword},
+      );
+
+  /// The signed-in employee's own estimate (`/me/tax/projection`). Needs `payroll.view_own`.
+  Future<TdsResult> myTaxProjection({String? fy}) async =>
+      TdsResult.fromJson(await _json('GET', '/me/tax/projection', query: {if (fy != null) 'fy': fy}));
 }
 
 /// One PDF of a Form 16 upload, in memory.

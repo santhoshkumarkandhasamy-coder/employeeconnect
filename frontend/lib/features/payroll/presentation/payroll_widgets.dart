@@ -25,8 +25,9 @@ void payrollSnack(BuildContext context, String message) {
 Future<void> downloadPayrollFile(
   BuildContext context,
   WidgetRef ref,
-  Future<PayrollFile?> Function(PayrollRepository repo) fetch,
-) async {
+  Future<PayrollFile?> Function(PayrollRepository repo) fetch, {
+  String Function(ApiException e) describe = payrollErrorMessage,
+}) async {
   final messenger = ScaffoldMessenger.of(context);
   final repo = ref.read(payrollRepositoryProvider);
   final delivery = ref.read(payrollDeliveryProvider);
@@ -46,7 +47,7 @@ Future<void> downloadPayrollFile(
         say('Sharing is not available on this device. The file was deleted.');
     }
   } on ApiException catch (e) {
-    say(payrollErrorMessage(e));
+    say(describe(e));
   } on Object {
     say('Could not save the file.');
   }

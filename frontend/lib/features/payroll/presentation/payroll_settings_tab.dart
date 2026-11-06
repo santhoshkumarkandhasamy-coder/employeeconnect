@@ -14,6 +14,7 @@ import '../domain/payroll_models.dart';
 import '../domain/payroll_money.dart';
 import '../domain/phase5a_models.dart' show bankChangeAlertDaysKey;
 import '../domain/phase5b_models.dart' show form16SecondPersonKey;
+import '../domain/phase5c_models.dart';
 import '../domain/claims_models.dart';
 import 'categories_editor.dart';
 import 'payroll_providers.dart';
@@ -32,6 +33,7 @@ const Set<String> stepUpSettingKeys = {
   structureApprovalKey,
   bankChangeAlertDaysKey,
   form16SecondPersonKey,
+  tdsEngineEnabledKey,
 };
 
 class PayrollSettingsTab extends ConsumerWidget {
@@ -212,7 +214,7 @@ class _PayrollSettingsFormState extends State<PayrollSettingsForm> {
       for (final d in err.details) {
         if (d.field.isNotEmpty) _serverErrors[d.field] = d.message;
       }
-      _error = payrollErrorMessage(err);
+      _error = p5cMsg(err);
     });
     _form.currentState?.validate();
   }
@@ -262,6 +264,17 @@ class _PayrollSettingsFormState extends State<PayrollSettingsForm> {
                   'ESI. The payslip shows both as separate deduction lines and net pay is reduced by '
                   'both. The company still remits the employer share, so its net cost for it is zero. '
                   'When off, only the employee share is deducted.',
+                  style: theme.textTheme.bodySmall,
+                ),
+              ),
+            if (g.key == 'TDS engine')
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text(
+                  '$tdsSettingsIntro\n\n$tdsModeHelp\n\n'
+                  'Before the chosen month only the amounts employees declare count. From that month on, '
+                  'sections that need proof count only the amount HR has verified.',
+                  key: const ValueKey('tds-settings-help'),
                   style: theme.textTheme.bodySmall,
                 ),
               ),

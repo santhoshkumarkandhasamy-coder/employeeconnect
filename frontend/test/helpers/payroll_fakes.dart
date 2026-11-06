@@ -208,6 +208,9 @@ class FakeRepo extends PayrollRepository {
     String? paidOn,
     String? reference,
     String? amount,
+    String? bsrCode,
+    String? challanSerial,
+    String? depositedOn,
   }) async {
     challanCalls.add({
       'type': type,
@@ -217,6 +220,9 @@ class FakeRepo extends PayrollRepository {
       'reference': reference,
       'amount': amount,
       'pw': currentPassword,
+      if (bsrCode != null) 'bsr_code': bsrCode,
+      if (challanSerial != null) 'challan_serial': challanSerial,
+      if (depositedOn != null) 'deposited_on': depositedOn,
     });
     if (challanWrongPasswords > 0) {
       challanWrongPasswords--;

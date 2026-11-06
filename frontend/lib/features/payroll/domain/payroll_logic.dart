@@ -1,6 +1,7 @@
 import '../../../core/utils/dates.dart';
 import 'payroll_models.dart';
 import 'payroll_money.dart';
+import 'phase5c_models.dart' show tdsEngineEnabledKey, tdsEngineModeKey, tdsIncludeOtherIncomeKey, tdsOneTimeKey, tdsProofsFromMonthKey;
 
 /// Pure form logic for the payroll screens (validation and request bodies).
 
@@ -99,7 +100,15 @@ class PayslipEditInput {
     this.adjustments = const [],
     this.hold = false,
     this.note = '',
+    this.tdsReason = '',
+    this.tdsHandBack = false,
   });
+
+  /// 5c: the reason for a hand-typed TDS while the run applies the engine (3 to 200 characters).
+  final String tdsReason;
+
+  /// 5c: give the TDS line back to the engine (`tds: null`).
+  final bool tdsHandBack;
   final double? lopOverride;
   final String lopReason;
   final String tds;
@@ -151,7 +160,14 @@ Map<String, Object?> buildPayslipPatch(Payslip original, PayslipEditInput input)
   }
 
   final tds = normalizeMoney(input.tds);
-  if (tds != null && moneyToPaise(tds) != moneyToPaise(o?.tds)) out['tds'] = tds;
+  if (input.tdsHandBack && original.tdsComputation?.override != null) {
+    // The engine takes the line back; no reason is needed (19.16).
+    out['tds'] = null;
+  } else if (tds != null && moneyToPaise(tds) != moneyToPaise(o?.tds)) {
+    out['tds'] = tds;
+    // While the run applies the engine, a hand-typed figure needs a reason (3 to 200 characters).
+    if (original.tdsComputation?.isApply ?? false) out['tds_override_reason'] = input.tdsReason.trim();
+  }
 
   final ptText = input.ptOverride.trim();
   final pt = ptText.isEmpty ? null : normalizeMoney(ptText);
@@ -287,7 +303,12 @@ class PayrollSettingSpec {
     this.max,
     this.maxLength,
     this.suffix,
+    this.integer = false,
   });
+
+  /// Whole numbers only (such as a calendar month).
+  final bool integer;
+
   final String key;
   final String label;
   final PayrollSettingKind kind;
@@ -430,6 +451,28 @@ const List<PayrollSettingSpec> payrollSettingSpecs = [
       'Tax documents',),
   PayrollSettingSpec('payroll.tax_proof_max_files', 'Files allowed per investment proof',
       PayrollSettingKind.number, 'Tax documents', min: 1, max: 10,),
+  // 5c: the TDS engine (contract 19.10).
+  PayrollSettingSpec(tdsEngineEnabledKey, 'Work out TDS with the TDS engine', PayrollSettingKind.boolean,
+      'TDS engine',),
+  PayrollSettingSpec(
+    tdsEngineModeKey,
+    'What the engine does with its figure',
+    PayrollSettingKind.choice,
+    'TDS engine',
+    options: [
+      ('suggest', 'Suggest only: HR keeps typing the TDS'),
+      ('apply', 'Apply it to the payslip'),
+    ],
+  ),
+  PayrollSettingSpec(tdsProofsFromMonthKey, 'Count only verified proofs from month (1 = January)',
+      PayrollSettingKind.number, 'TDS engine',
+      min: 1,
+      max: 12,
+      integer: true,),
+  PayrollSettingSpec(tdsOneTimeKey, 'Charge the tax on bonus and arrears in the month they are paid',
+      PayrollSettingKind.boolean, 'TDS engine',),
+  PayrollSettingSpec(tdsIncludeOtherIncomeKey, 'Include the other income employees declare',
+      PayrollSettingKind.boolean, 'TDS engine',),
 ];
 
 const String reimbursementCategoriesKey = 'payroll.reimbursement_categories';
@@ -441,6 +484,7 @@ String? validatePayrollNumber(String? v, PayrollSettingSpec s) {
   if (n == null) return 'Enter a number';
   if (s.min != null && n < s.min!) return 'At least ${_fmt(s.min!)}';
   if (s.max != null && n > s.max!) return 'At most ${_fmt(s.max!)}';
+  if (s.integer && n != n.roundToDouble()) return 'Enter a whole number';
   final dot = t.indexOf('.');
   if (dot >= 0 && t.length - dot - 1 > 2) return 'At most 2 decimals';
   return null;

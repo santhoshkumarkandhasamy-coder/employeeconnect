@@ -4,6 +4,7 @@ import '../../admin/domain/admin_models.dart' show EmployeeRef;
 import 'claims_models.dart' show claimCapFromError;
 import 'pay_items_models.dart' show PayslipComponent, payItemWarningLabels;
 import 'payroll_money.dart';
+import 'tds_computation.dart';
 
 /// api-contract.md section 13 (payroll and payslips). Nothing here is cached or
 /// persisted: payroll data lives only in autoDispose Riverpod state.
@@ -314,7 +315,11 @@ class Payslip {
     this.isFinal = false,
     this.finalSettlement,
     this.publishRequest,
+    this.tdsComputation,
   });
+
+  /// Admin shape (5c): the TDS engine's computation (frozen once processed), or null while the engine is off.
+  final TdsComputation? tdsComputation;
 
   /// Admin shape (5a): newest publish request of this payslip, or null.
   final PublishRequestRef? publishRequest;
@@ -395,6 +400,7 @@ class Payslip {
             )
           : null,
       publishRequest: PublishRequestRef.parse(j['publish_request']),
+      tdsComputation: TdsComputation.parse(j['tds_computation']),
     );
   }
 
@@ -955,6 +961,9 @@ class StatutoryDueItem {
     this.reference,
     this.paidAmount,
     this.mismatch = false,
+    this.bsrCode,
+    this.challanSerial,
+    this.depositedOn,
   });
 
   factory StatutoryDueItem.fromJson(Map<String, dynamic> j) => StatutoryDueItem(
@@ -966,7 +975,15 @@ class StatutoryDueItem {
         reference: _opt(j['reference']),
         paidAmount: _opt(j['paid_amount']),
         mismatch: j['mismatch'] == true,
+        bsrCode: _opt(j['bsr_code']),
+        challanSerial: j['challan_serial'] == null ? null : _s(j['challan_serial']),
+        depositedOn: _opt(j['deposited_on']),
       );
+
+  /// TDS challans (5c): the BSR code as the server masks it (`XXX4567`), the serial and the deposit date.
+  final String? bsrCode;
+  final String? challanSerial;
+  final String? depositedOn;
 
   final String type;
   final String amount;
@@ -1052,6 +1069,7 @@ const Map<String, String> payrollWarningLabels = {
   'EXIT_IN_MONTH': 'Employee leaves this month',
   'NOT_ELIGIBLE': 'No longer eligible',
   ...payItemWarningLabels,
+  ...tdsWarningLabels,
 };
 
 const Map<String, String> payrollErrorLabels = {

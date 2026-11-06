@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/api/api_exception.dart';
@@ -8,6 +9,7 @@ import '../../admin/presentation/admin_widgets.dart' show adminPermissionsProvid
 import '../data/payroll_repository.dart';
 import '../domain/payroll_models.dart';
 import '../domain/payroll_money.dart';
+import '../domain/phase5c_models.dart';
 import 'payroll_providers.dart';
 import 'payroll_widgets.dart';
 
@@ -70,7 +72,13 @@ class _StatutoryTabState extends ConsumerState<StatutoryTab> {
       if (paid) {
         final form = await showDialog<_PaidForm>(
           context: context,
-          builder: (_) => _PaidDialog(label: label, period: period, due: item.amount, today: now),
+          builder: (_) => _PaidDialog(
+            label: label,
+            period: period,
+            due: item.amount,
+            today: now,
+            isTds: item.type == 'tds',
+          ),
         );
         if (form == null || !mounted) return;
         final done = await runWithReauth(
@@ -83,6 +91,9 @@ class _StatutoryTabState extends ConsumerState<StatutoryTab> {
             paidOn: form.paidOn,
             reference: form.reference,
             amount: form.amount,
+            bsrCode: form.bsrCode,
+            challanSerial: form.challanSerial,
+            depositedOn: form.depositedOn,
             currentPassword: pw,
           ),
         );
@@ -119,7 +130,7 @@ class _StatutoryTabState extends ConsumerState<StatutoryTab> {
       ref.invalidate(statutoryDuesProvider(period));
     } on ApiException catch (e) {
       if (!mounted) return;
-      payrollSnack(context, payrollMsg(e));
+      payrollSnack(context, p5cMsg(e));
       // The state may have changed under us (already paid / not paid).
       ref.invalidate(statutoryDuesProvider(period));
     }
@@ -307,6 +318,23 @@ class _DueCard extends StatelessWidget {
                 '${item.paidAmount == null ? '' : '  -  ${formatRupees(item.paidAmount)}'}',
                 style: theme.textTheme.bodySmall,
               ),
+            if (item.paid && item.type == 'tds' && (item.bsrCode != null || item.challanSerial != null))
+              Text(
+                key: const ValueKey('tds-challan-details'),
+                [
+                  if (item.bsrCode != null) 'BSR code ${item.bsrCode}',
+                  if (item.challanSerial != null) 'Serial ${item.challanSerial}',
+                  if (item.depositedOn != null) 'Deposited ${item.depositedOn}',
+                ].join('  -  '),
+                style: theme.textTheme.bodySmall,
+              ),
+            if (item.paid && item.type == 'tds' && item.bsrCode == null)
+              Text(
+                'The BSR code, serial number and deposit date are missing. Mark it unpaid and paid again '
+                'with them: the 24Q file needs them.',
+                key: const ValueKey('tds-challan-missing'),
+                style: theme.textTheme.bodySmall?.copyWith(color: cs.error),
+              ),
             if (item.mismatch)
               Padding(
                 padding: const EdgeInsets.only(top: 4),
@@ -341,17 +369,29 @@ class _DueCard extends StatelessWidget {
 }
 
 class _PaidForm {
-  const _PaidForm(this.paidOn, this.reference, this.amount);
+  const _PaidForm(this.paidOn, this.reference, this.amount, {this.bsrCode, this.challanSerial, this.depositedOn});
   final String paidOn;
   final String reference;
   final String? amount;
+  final String? bsrCode;
+  final String? challanSerial;
+  final String? depositedOn;
 }
 
 final _referenceRe = RegExp(r'^[A-Za-z0-9 ._/-]{1,60}$');
 
 /// Date (YYYY-MM-DD), reference, optional amount. The password is asked next.
 class _PaidDialog extends StatefulWidget {
-  const _PaidDialog({required this.label, required this.period, required this.due, required this.today});
+  const _PaidDialog({
+    required this.label,
+    required this.period,
+    required this.due,
+    required this.today,
+    this.isTds = false,
+  });
+
+  /// TDS challans also need the BSR code, the challan serial number and the deposit date (19.16).
+  final bool isTds;
   final String label;
   final String period;
   final String due;
@@ -366,6 +406,9 @@ class _PaidDialogState extends State<_PaidDialog> {
   final _date = TextEditingController();
   final _ref = TextEditingController();
   final _amount = TextEditingController();
+  final _bsr = TextEditingController();
+  final _serial = TextEditingController();
+  final _deposit = TextEditingController();
 
   DateTime get _start => parseMonth(widget.period) ?? DateTime(widget.today.year, widget.today.month);
 
@@ -374,7 +417,10 @@ class _PaidDialogState extends State<_PaidDialog> {
   @override
   void initState() {
     super.initState();
-    if (!_today.isBefore(_start)) _date.text = ymd(_today);
+    if (!_today.isBefore(_start)) {
+      _date.text = ymd(_today);
+      _deposit.text = ymd(_today);
+    }
   }
 
   @override
@@ -382,6 +428,9 @@ class _PaidDialogState extends State<_PaidDialog> {
     _date.dispose();
     _ref.dispose();
     _amount.dispose();
+    _bsr.dispose();
+    _serial.dispose();
+    _deposit.dispose();
     super.dispose();
   }
 
@@ -391,6 +440,18 @@ class _PaidDialogState extends State<_PaidDialog> {
     if (d.isBefore(_start)) return 'Not before ${ymd(_start)}';
     if (d.isAfter(_today)) return 'Not in the future';
     return null;
+  }
+
+  Future<void> _pickDeposit() async {
+    final cur = parseYmd(_deposit.text.trim());
+    final ok = cur != null && !cur.isBefore(_start) && !cur.isAfter(_today);
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: ok ? cur : (_today.isBefore(_start) ? _start : _today),
+      firstDate: _start,
+      lastDate: _today.isBefore(_start) ? _start : _today,
+    );
+    if (picked != null) setState(() => _deposit.text = ymd(picked));
   }
 
   Future<void> _pick() async {
@@ -408,7 +469,17 @@ class _PaidDialogState extends State<_PaidDialog> {
   void _submit() {
     if (!(_form.currentState?.validate() ?? false)) return;
     final a = _amount.text.trim();
-    Navigator.pop(context, _PaidForm(_date.text.trim(), _ref.text.trim(), a.isEmpty ? null : a));
+    Navigator.pop(
+      context,
+      _PaidForm(
+        _date.text.trim(),
+        _ref.text.trim(),
+        a.isEmpty ? null : a,
+        bsrCode: widget.isTds ? _bsr.text.trim() : null,
+        challanSerial: widget.isTds ? _serial.text.trim() : null,
+        depositedOn: widget.isTds ? _deposit.text.trim() : null,
+      ),
+    );
   }
 
   @override
@@ -451,6 +522,52 @@ class _PaidDialogState extends State<_PaidDialog> {
                     return null;
                   },
                 ),
+                if (widget.isTds) ...[
+                  const SizedBox(height: 4),
+                  TextFormField(
+                    key: const ValueKey('paid-bsr'),
+                    controller: _bsr,
+                    keyboardType: TextInputType.number,
+                    maxLength: 7,
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                    decoration: const InputDecoration(
+                      labelText: 'BSR code of the bank branch',
+                      helperText: '7 digits, from the challan receipt',
+                      border: OutlineInputBorder(),
+                    ),
+                    validator: validateBsrCode,
+                  ),
+                  const SizedBox(height: 4),
+                  TextFormField(
+                    key: const ValueKey('paid-serial'),
+                    controller: _serial,
+                    keyboardType: TextInputType.number,
+                    maxLength: 5,
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                    decoration: const InputDecoration(
+                      labelText: 'Challan serial number',
+                      helperText: 'Up to 5 digits',
+                      border: OutlineInputBorder(),
+                    ),
+                    validator: validateChallanSerial,
+                  ),
+                  const SizedBox(height: 4),
+                  TextFormField(
+                    key: const ValueKey('paid-deposit'),
+                    controller: _deposit,
+                    keyboardType: TextInputType.datetime,
+                    decoration: InputDecoration(
+                      labelText: 'Deposited on (YYYY-MM-DD)',
+                      border: const OutlineInputBorder(),
+                      suffixIcon: IconButton(
+                        tooltip: 'Pick a date',
+                        icon: const Icon(Icons.calendar_today_outlined),
+                        onPressed: _pickDeposit,
+                      ),
+                    ),
+                    validator: (v) => validateDepositedOn(v, widget.today, _start),
+                  ),
+                ],
                 const SizedBox(height: 4),
                 MoneyField(
                   key: const ValueKey('paid-amount'),

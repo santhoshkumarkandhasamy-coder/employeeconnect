@@ -11,12 +11,16 @@ import '../domain/claims_models.dart' show validateClaimBill;
 import '../data/claim_bill_picker.dart';
 import '../domain/payroll_models.dart' show canViewOwnPayslips;
 import '../domain/payroll_money.dart';
+import '../domain/phase4a_models.dart' show formatBigRupees;
 import '../domain/phase5b_models.dart';
+import '../domain/phase5c_models.dart';
+import '../domain/tds_computation.dart';
 import 'declaration_editor.dart';
 import 'payroll_providers.dart' show payrollClockProvider;
 import 'payroll_widgets.dart';
 import 'tax_providers.dart';
 import 'tax_widgets.dart';
+import 'tds_widgets.dart';
 
 /// "Tax" under Payslips: the signed-in employee's investment declaration, proofs and Form 16
 /// (contract 19.7, 19.8). Screenshot-protected; state in memory only.
@@ -40,7 +44,7 @@ class _MyTaxScreenState extends ConsumerState<MyTaxScreen> {
     final choices = {fyOf(now), for (final y in years) y.fy}.toList()..sort((a, b) => b.compareTo(a));
     return SecureScreen(
       child: DefaultTabController(
-        length: 3,
+        length: 4,
         child: Scaffold(
           appBar: AppBar(
             title: const Text('Tax'),
@@ -58,10 +62,13 @@ class _MyTaxScreenState extends ConsumerState<MyTaxScreen> {
                 ),
             ],
             bottom: const TabBar(
+              isScrollable: true,
+              tabAlignment: TabAlignment.start,
               tabs: [
                 Tab(key: ValueKey('tab-declaration'), text: 'Declaration'),
                 Tab(key: ValueKey('tab-proofs'), text: 'Proofs'),
                 Tab(key: ValueKey('tab-form16'), text: 'Form 16'),
+                Tab(key: ValueKey('tab-estimate'), text: 'Estimate'),
               ],
             ),
           ),
@@ -70,6 +77,7 @@ class _MyTaxScreenState extends ConsumerState<MyTaxScreen> {
               MyDeclarationTab(fy: fy),
               MyProofsTab(fy: fy),
               const MyForm16Tab(),
+              MyEstimateTab(fy: fy),
             ],
           ),
         ),
@@ -489,6 +497,103 @@ class MyForm16Tab extends ConsumerWidget {
                 ],
               ),
       ),
+    );
+  }
+}
+
+// ---- tax estimate (TDS engine, 19.9) ----------------------------------------------------------------
+
+/// The signed-in employee's tax projection for the year: an estimate from the submitted declaration, not
+/// Form 16 and not a tax assessment. Engine off or rules not verified is a calm empty state.
+class MyEstimateTab extends ConsumerWidget {
+  const MyEstimateTab({required this.fy, super.key});
+  final String fy;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final async = ref.watch(myProjectionProvider(fy));
+    return async.when(
+      skipLoadingOnReload: true,
+      loading: () => const LoadingView(label: 'Working out your estimate'),
+      error: (e, _) => tdsUnavailable(e)
+          ? EmptyView(icon: Icons.calculate_outlined, message: myProjectionMessage(e))
+          : ErrorView(message: myProjectionMessage(e), onRetry: () => ref.invalidate(myProjectionProvider(fy))),
+      data: (r) => RefreshIndicator(
+        onRefresh: () async => ref.invalidate(myProjectionProvider(fy)),
+        child: _EstimateBody(result: r),
+      ),
+    );
+  }
+}
+
+class _EstimateBody extends StatelessWidget {
+  const _EstimateBody({required this.result});
+  final TdsResult result;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = result.computation;
+    final theme = Theme.of(context);
+    final cmp = compareRegimes(c, result.otherRegime);
+    final flags = [for (final f in c.flags) if (projectionFlags.contains(f)) f];
+    return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 48),
+      children: [
+        Card(
+          key: const ValueKey('estimate-note'),
+          color: theme.colorScheme.secondaryContainer,
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.info_outline, color: theme.colorScheme.onSecondaryContainer),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'This is an estimate for ${fyTitle(c.fy)}, worked out from your salary and the '
+                    'investment declaration you submitted. It is not Form 16 and not a tax assessment. '
+                    'The tax actually deducted can differ.',
+                    style: TextStyle(color: theme.colorScheme.onSecondaryContainer),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        SectionCard(
+          key: const ValueKey('estimate-card'),
+          title: 'Your estimated tax',
+          children: [
+            AmountRow(
+              label: 'Estimated tax for the year',
+              value: formatBigRupees(c.annual.totalTax),
+              bold: true,
+              caption: regimeLabel(c.regime) + (c.regimeIsDefault ? ' (you have not chosen one)' : ''),
+            ),
+            AmountRow(label: 'Estimated TDS for this month', value: formatBigRupees(c.suggested)),
+            AmountRow(label: 'Tax deducted so far', value: formatBigRupees(c.tdsPaidSoFar)),
+            AmountRow(label: 'Still to be deducted', value: formatBigRupees(c.remainingTax)),
+            for (final f in flags) TdsFlagTile(f, key: ValueKey('estimate-flag-$f')),
+          ],
+        ),
+        if (cmp != null)
+          SectionCard(
+            title: 'Old and new regime',
+            children: [
+              RegimeComparisonView(comparison: cmp),
+              Text(
+                'You choose your regime in the declaration, while its window is open.',
+                style: theme.textTheme.bodySmall,
+              ),
+            ],
+          ),
+        SectionCard(
+          title: 'How it was worked out',
+          children: [TdsFigures(computation: c, showSteps: false)],
+        ),
+      ],
     );
   }
 }
