@@ -124,7 +124,8 @@ async def test_challan_amount_and_nothing_due_rules(client, stat, uid, redis):
         await _reset_reauth(redis)
         r = await client.put(f"{S}/challans", json={**base, "amount": bad}, headers=hdr)
         assert r.status_code == 422, bad
-    tds = {**base, "type": "tds"}  # nothing is due for TDS in this run
+    # nothing is due for TDS in this run; plan 17 5c: a paid TDS challan always carries BSR code, serial and deposit date
+    tds = {**base, "type": "tds", "bsr_code": "0123456", "challan_serial": "42", "deposited_on": "2025-07-10"}
     await _reset_reauth(redis)
     r = await client.put(f"{S}/challans", json=tds, headers=hdr)
     assert r.status_code == 409 and r.json()["error"]["code"] == "NOTHING_DUE"

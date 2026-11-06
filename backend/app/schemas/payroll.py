@@ -211,6 +211,7 @@ class PayslipUpdate(_Strict):
     lop_override: float | None = None
     lop_override_reason: str | None = Field(default=None, max_length=200)
     tds: Money | None = None
+    tds_override_reason: str | None = Field(default=None, max_length=200)  # plan 17 5c: needed with `tds` in mode apply
     pt_override: Money | None = None
     adjustments: list[AdjustmentIn] | None = Field(default=None, max_length=10)
     hold: bool | None = None
@@ -229,7 +230,7 @@ class PayslipUpdate(_Strict):
             raise ValueError("must be 0 or more, in steps of 0.5")
         return v
 
-    @field_validator("lop_override_reason", "note")
+    @field_validator("lop_override_reason", "note", "tds_override_reason")
     @classmethod
     def _text(cls, v: str | None) -> str | None:
         return (clean_text(v) or None) if v is not None else None
@@ -254,6 +255,10 @@ class ChallanIn(_Strict):
     paid_on: dt.date | None = None
     reference: str | None = Field(default=None, min_length=1, max_length=60, pattern=r"^[A-Za-z0-9 ._/\-]+$")
     amount: str | None = Field(default=None, max_length=14)
+    # plan 17 5c: TDS challan details for the 24Q Challans sheet (all three together, TDS only)
+    bsr_code: str | None = Field(default=None, pattern=r"^\d{7}$")
+    challan_serial: str | None = Field(default=None, pattern=r"^\d{1,5}$")
+    deposited_on: dt.date | None = None
     current_password: SecretStr = Field(min_length=1, max_length=128)
 
     @model_validator(mode="after")
@@ -264,6 +269,12 @@ class ChallanIn(_Strict):
             raise ValueError("paid_on, reference and amount only apply to status paid")
         if self.amount is not None and _money(self.amount) <= 0:
             raise ValueError("amount must be greater than 0")
+        details = (self.bsr_code, self.challan_serial, self.deposited_on)
+        if self.type == "tds" and self.status == "paid":
+            if any(v is None for v in details):
+                raise ValueError("bsr_code, challan_serial and deposited_on are required for a paid TDS challan")
+        elif any(v is not None for v in details):
+            raise ValueError("bsr_code, challan_serial and deposited_on only apply to a paid TDS challan")
         return self
 
 

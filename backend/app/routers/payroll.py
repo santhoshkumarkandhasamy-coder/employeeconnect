@@ -686,6 +686,7 @@ async def put_challan(
     return await payroll_statutory.set_challan(
         session, redis, actor, type_=body.type, raw_period=body.period, status=body.status, paid_on=body.paid_on,
         reference=body.reference, amount=body.amount, password=body.current_password,
+        bsr_code=body.bsr_code, challan_serial=body.challan_serial, deposited_on=body.deposited_on,
     )  # fmt: skip
 
 

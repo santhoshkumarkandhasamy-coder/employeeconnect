@@ -252,6 +252,9 @@ async def dues(session: AsyncSession, raw_period: str | None, months: int) -> di
                         "reference": c.reference if c else None,
                         "paid_amount": calc.money_str(_d(c.amount)) if c and c.status == "paid" else None,
                         "mismatch": bool(c and c.status == "paid" and _d(c.amount) != amount),
+                        "bsr_code": pc.mask_tail(c.bsr_code) if c else None,
+                        "challan_serial": c.challan_serial if c else None,
+                        "deposited_on": c.deposited_on.isoformat() if c and c.deposited_on else None,
                     }
                 )  # fmt: skip
         out.append(
@@ -273,6 +276,7 @@ def _pay_period(raw: str, today: dt.date) -> dt.date:
 async def set_challan(
     session: AsyncSession, redis: Redis, actor: Principal, *, type_: str, raw_period: str, status: str,
     paid_on: dt.date | None, reference: str | None, amount: str | None, password: Any,
+    bsr_code: str | None = None, challan_serial: str | None = None, deposited_on: dt.date | None = None,
 ) -> dict[str, Any]:  # fmt: skip
     await admin_security.require_reauth(session, redis, actor, password, action="payroll.statutory.challan")
     today = await runs._today(session)
@@ -287,16 +291,37 @@ async def set_challan(
     before = {"status": existing.status} if existing else {"status": "none"}
     # the state that is about to be overwritten / cleared, kept in the append-only event row
     prev = (
-        {"status": existing.status, "paid_on": existing.paid_on, "reference": existing.reference, "amount": existing.amount}
+        {
+            "status": existing.status, "paid_on": existing.paid_on, "reference": existing.reference, "amount": existing.amount,
+            "bsr_code": existing.bsr_code, "challan_serial": existing.challan_serial, "deposited_on": existing.deposited_on,
+        }
         if existing is not None
-        else {"status": None, "paid_on": None, "reference": None, "amount": None}
-    )
+        else {"status": None, "paid_on": None, "reference": None, "amount": None, "bsr_code": None, "challan_serial": None,
+              "deposited_on": None}
+    )  # fmt: skip
 
     if status == "paid":
         if paid_on is None or paid_on > today or paid_on < period:
             raise AppError(
                 "INVALID_DATE", "paid_on must be on or after the period start and not in the future", status=422,
                 details=[{"field": "paid_on", "message": "must be between the period start and today"}],
+            )  # fmt: skip
+        details = (bsr_code, challan_serial, deposited_on)
+        if type_ == "tds":  # plan 17 5c: BSR code, serial and deposit date are set together (the database checks the pair)
+            if any(v is None for v in details):
+                raise AppError(
+                    "VALIDATION_ERROR", "Request validation failed", status=422,
+                    details=[{"field": "bsr_code", "message": "bsr_code, challan_serial and deposited_on are required for TDS"}],
+                )  # fmt: skip
+            if deposited_on > today or deposited_on < period:  # type: ignore[operator]
+                raise AppError(
+                    "INVALID_DATE", "deposited_on must be on or after the period start and not in the future", status=422,
+                    details=[{"field": "deposited_on", "message": "must be between the period start and today"}],
+                )  # fmt: skip
+        elif any(v is not None for v in details):
+            raise AppError(
+                "VALIDATION_ERROR", "Request validation failed", status=422,
+                details=[{"field": "bsr_code", "message": "only a TDS challan carries BSR code, serial and deposit date"}],
             )  # fmt: skip
         if existing is not None and existing.status == "paid":
             raise AppError("CHALLAN_ALREADY_PAID", "This due is already marked paid; mark it unpaid first", status=409)
@@ -319,6 +344,7 @@ async def set_challan(
             session.add(existing)
             await session.flush()  # assigns the id (audit entity_id, event challan_id)
         existing.status, existing.paid_on, existing.reference = "paid", paid_on, reference
+        existing.bsr_code, existing.challan_serial, existing.deposited_on = bsr_code, challan_serial, deposited_on
         existing.amount = calc.money_str(paid_amount)
         existing.updated_by = actor.id
         action = "payroll.statutory.challan_paid"
@@ -326,6 +352,7 @@ async def set_challan(
         if existing is None or existing.status != "paid":
             raise AppError("CHALLAN_NOT_PAID", "This due is not marked paid", status=409)
         existing.status, existing.paid_on, existing.reference = "unpaid", None, None
+        existing.bsr_code = existing.challan_serial = existing.deposited_on = None  # cleared together with paid_on / reference
         existing.updated_by = actor.id
         action = "payroll.statutory.challan_unpaid"
 
@@ -334,6 +361,8 @@ async def set_challan(
             challan_id=existing.id, type=type_, period=period, action=status, status=existing.status, paid_on=existing.paid_on,
             reference=existing.reference, amount=existing.amount, actor_id=actor.id,
             prev_status=prev["status"], prev_paid_on=prev["paid_on"], prev_reference=prev["reference"], prev_amount=prev["amount"],
+            bsr_code=existing.bsr_code, challan_serial=existing.challan_serial, deposited_on=existing.deposited_on,
+            prev_bsr_code=prev["bsr_code"], prev_challan_serial=prev["challan_serial"], prev_deposited_on=prev["deposited_on"],
         )
     )  # fmt: skip
     after = {"type": type_, "period": f"{period:%Y-%m}", "status": status}
@@ -347,6 +376,8 @@ async def set_challan(
     return {
         "type": type_, "period": f"{period:%Y-%m}", "status": existing.status,
         "paid_on": existing.paid_on.isoformat() if existing.paid_on else None, "reference": existing.reference,
+        "bsr_code": pc.mask_tail(existing.bsr_code), "challan_serial": existing.challan_serial,
+        "deposited_on": existing.deposited_on.isoformat() if existing.deposited_on else None,
     }  # fmt: skip
 
 

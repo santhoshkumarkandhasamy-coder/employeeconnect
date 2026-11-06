@@ -57,6 +57,7 @@ from . import payroll_common as pc
 from . import payroll_components as comps
 from . import payroll_runs as runs
 from . import payroll_settings as pset
+from . import payroll_tds as ptds
 
 log = logging.getLogger("app.payroll")
 
@@ -80,15 +81,16 @@ REASON_ORDER = (
 # ============================================================================================ snapshot
 def result_mac(p: Payslip) -> str:
     """HMAC over everything the checker reviews in one payslip (never a plain hash: amounts are low-entropy)."""
-    return pc.mac_hex(
-        pc.SNAPSHOT_LABEL,
-        {
-            "k": "payslip", "id": str(p.id), "version": p.version, "revision": p.revision, "hold": p.hold,
-            "result": p.result, "inputs": p.inputs, "identity": p.identity, "employee": p.employee_snapshot,
-            "days": [str(p.basis_days), str(p.employed_days), str(p.paid_days)],
-            "structure": str(p.structure_id) if p.structure_id else None,
-        },
-    )  # fmt: skip
+    body = {
+        "k": "payslip", "id": str(p.id), "version": p.version, "revision": p.revision, "hold": p.hold,
+        "result": p.result, "inputs": p.inputs, "identity": p.identity, "employee": p.employee_snapshot,
+        "days": [str(p.basis_days), str(p.employed_days), str(p.paid_days)],
+        "structure": str(p.structure_id) if p.structure_id else None,
+    }  # fmt: skip
+    tc = getattr(p, "_tc_mac", None)  # plan 17 T8: the TDS computation (set by payroll_tds.attach_macs); absent = the old MAC
+    if tc is not None:
+        body["tc"] = tc
+    return pc.mac_hex(pc.SNAPSHOT_LABEL, body)
 
 
 def _totals(rows: list[Payslip]) -> dict[str, str]:
@@ -621,6 +623,7 @@ async def create(
     )
     if (await session.execute(q.limit(1))).first():
         raise AppError("PUBLISH_REQUEST_EXISTS", "A publish request is already open")
+    await ptds.attach_macs(session, todo)
     snap = build_snapshot(todo, held, processed_at)
     rid, now = uuid.uuid4(), utcnow()
     ttl = int(await pset.current_value(session, TTL_KEY))
@@ -747,6 +750,7 @@ async def approve(
         raise await _stale_now(session, actor, r, run, "RUN_REOPENED")
     if r.scope == "payslip" and (ps is None or ps.status != "processed"):
         raise await _stale_now(session, actor, r, run, "PAYSLIP_CHANGED")
+    await ptds.attach_macs(session, todo)
     live = build_snapshot(todo, held, processed_at)
     if not _same(stored, live):
         raise await _stale_now(session, actor, r, run, "PAYSLIP_CHANGED")

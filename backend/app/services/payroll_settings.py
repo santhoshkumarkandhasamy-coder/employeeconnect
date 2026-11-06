@@ -36,11 +36,13 @@ BANK_DAYS_KEY = (
 )
 MIN_BANK_DAYS = 7  # the floor, also applied by the service and the database trigger whatever is stored
 FORM16_SECOND_KEY = "payroll.form16_requires_second_person"  # plan 17 5b: Form 16 publish by a second person; same control level
+TDS_ENGINE_KEY = "payroll.tds_engine_enabled"  # plan 17 5c: switching the TDS engine on or off is an admin-level control
 GUARDED_KEYS = (
     SECOND_PERSON_KEY,
     APPROVAL_KEY,
     BANK_DAYS_KEY,
     FORM16_SECOND_KEY,
+    TDS_ENGINE_KEY,
 )  # change needs role.assign AND the caller's own password
 MAX_SLABS = 20
 MAX_CATEGORIES = 20
@@ -127,6 +129,12 @@ DEFAULTS: dict[str, Any] = {
     # plan 17, work package 5b (Form 16, investment proofs)
     "payroll.form16_requires_second_person": True,
     "payroll.tax_proof_max_files": 5,
+    # plan 17, work package 5c (TDS engine). OFF by default; `suggest` shows the computed figure and changes no payslip.
+    "payroll.tds_engine_enabled": False,
+    "payroll.tds_engine_mode": "suggest",
+    "payroll.tds_one_time_in_month": True,
+    "payroll.tds_proofs_from_month": 1,
+    "payroll.tds_include_other_income": False,
 }
 
 _ENUMS = {
@@ -138,6 +146,7 @@ _ENUMS = {
     "payroll.notice_recovery_basis": ("gross", "basic"),
     "payroll.bank_file_format": ("generic_neft_csv",),
     "payroll.bank_payment_type": ("NEFT", "RTGS", "IMPS"),
+    "payroll.tds_engine_mode": ("suggest", "apply"),
 }
 _BOOLS = {
     "payroll.lop_absent_days",
@@ -152,6 +161,9 @@ _BOOLS = {
     APPROVAL_KEY,
     FORM16_SECOND_KEY,
     "payroll.ctc_include_gratuity",
+    TDS_ENGINE_KEY,
+    "payroll.tds_one_time_in_month",
+    "payroll.tds_include_other_income",
 }
 _NUMBERS = {  # key -> (min, max), at most 2 decimals
     "payroll.pf_employee_rate_pct": (0, 20),
@@ -183,6 +195,7 @@ _INTS = {  # key -> (min, max), whole numbers
     "payroll.publish_request_ttl_hours": (1, 336),
     "payroll.bank_change_alert_days": (MIN_BANK_DAYS, 90),
     "payroll.tax_proof_max_files": (1, 10),
+    "payroll.tds_proofs_from_month": (1, 12),
 }
 _TEXTS = {"payroll.company_address": (0, 300), "payroll.payslip_footer": (0, 200)}
 
@@ -416,6 +429,11 @@ async def update(
         await admin_security.notify_admins(
             session, entity_id=actor.id, title="Payroll control changed",
             body=f"{actor.user.full_name} ({actor.employee_id}) changed the bank detail change window.",
+        )  # fmt: skip
+    if TDS_ENGINE_KEY in guarded:
+        await admin_security.notify_admins(
+            session, entity_id=actor.id, title="Payroll control changed",
+            body=f"{actor.user.full_name} ({actor.employee_id}) changed the TDS engine switch.",
         )  # fmt: skip
     if FORM16_SECOND_KEY in guarded:
         await admin_security.notify_admins(

@@ -49,6 +49,15 @@ WARNING_CODES = frozenset(
         "MANUAL_COMPONENT_OVERLAP",
         "FNF_SETTLEMENT_ONLY",
         "EXIT_IN_MONTH",
+        # plan 17 5c (TDS engine)
+        "TDS_OVERRIDDEN",
+        "TDS_CAPPED_NET",
+        "TDS_EXCESS",
+        "TAX_RULES_NOT_VERIFIED",
+        "NO_PAN_206AA",
+        "PERQUISITE_REVIEW",
+        "LEAVE_ENCASH_REVIEW",
+        "RULES_CHANGED",
     }
 )
 

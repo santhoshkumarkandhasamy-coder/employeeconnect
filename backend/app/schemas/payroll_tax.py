@@ -225,3 +225,22 @@ class Form16Withdraw(_Strict):
     current_password: SecretStr = Field(min_length=1, max_length=128)
 
     _r = field_validator("reason")(_reason)
+
+
+# ============================================================================================ work package 5c (TDS engine, contract 19.9)
+class TaxPreviewIn(_Strict):
+    user_id: uuid.UUID
+    fy: str | None = Field(default=None, max_length=7)
+    period: str | None = Field(default=None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+    regime: str | None = Field(default=None, pattern=r"^(old|new)$")
+
+    @field_validator("fy")
+    @classmethod
+    def _fy(cls, v: str | None) -> str | None:
+        return check_fy(v) if v is not None else None
+
+
+class TaxStepUpIn(_Strict):
+    """Body of the statement and 24Q exports: the caller's own password (step-up)."""
+
+    current_password: SecretStr = Field(min_length=1, max_length=128)

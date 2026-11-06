@@ -34,6 +34,7 @@ from . import payroll_common as pc
 from . import payroll_components as comps
 from . import payroll_days as pdays
 from . import payroll_settings as pset
+from . import payroll_tds as ptds
 from .company import _logo_url
 from .license import get_company
 
@@ -275,10 +276,14 @@ def recompute(
     prior: list[Decimal],
     keep: tuple[str, ...] = ("NOT_ELIGIBLE",),
     lwd: dt.date | None = None,
+    tds: ptds.Ctx | None = None,
 ) -> None:
-    """Sets paid_days, structure_id, result and warnings from the stored days / inputs. Pure apart from mutating `ps`."""
+    """Sets paid_days, structure_id, result and warnings from the stored days / inputs. Pure apart from mutating `ps`.
+    `tds` = the TDS engine context of the run (plan 17 5c); None = engine off for this run (manual TDS, as before)."""
     from .payroll_structures import data_of
 
+    ps._tds = False  # type: ignore[attr-defined] - no computation row unless the engine produces one below
+    ptds.prepare(ps, tds)
     warns: list[str] = [w for w in (ps.warnings or []) if w in keep]
     lop = ps.lop_override if ps.lop_override is not None else ps.lop_auto
     ps.paid_days = max(Decimal("0.0"), _d1(ps.employed_days) - _d1(lop))
@@ -320,10 +325,16 @@ def recompute(
         data = data_of(chosen)
         _finalize_overtime(ps, user, data.basic, cfg, warns)
         eligible = calc.esi_eligible([(e, data_of(s)) for e, s in structs], period, user.join_date, rules.esi_wage_threshold)
-        res = calc.calculate(
-            data, rules, period, Decimal(ps.basis_days), Decimal(ps.paid_days), _pay_inputs(ps.inputs),
-            esi_is_eligible=eligible, prior_gross=prior,
-        )  # fmt: skip
+
+        def _calc() -> calc.CalcResult:
+            return calc.calculate(
+                data, rules, period, Decimal(ps.basis_days), Decimal(ps.paid_days), _pay_inputs(ps.inputs),
+                esi_is_eligible=eligible, prior_gross=prior,
+            )  # fmt: skip
+
+        res = _calc()
+        if tds is not None and ptds.evaluate(ps, res, tds, structs=structs, period=period, lwd=lwd, warns=warns):
+            res = _calc()  # mode apply: the engine set inputs.tds
         if res.error:
             warns.append(res.error)
             ps.result = None
@@ -675,6 +686,7 @@ async def admin_payslip_out(session: AsyncSession, p: Payslip) -> dict[str, Any]
             "published_by": pc.user_out(people.get(p.published_by)),
             "updated_at": pc.iso(p.updated_at),
             "publish_request": await _latest_request(session, payslip_id=p.id),
+            "tds_computation": await ptds.payslip_computation(session, p.id),
         }
     )
     return out
@@ -686,7 +698,7 @@ async def create_run(session: AsyncSession, actor: Principal, body: RunCreate) -
     period = parse_period(body.period, today)
     if (await session.execute(select(PayrollRun.id).where(PayrollRun.period == period))).first():
         raise AppError("PAYROLL_RUN_EXISTS", "A payroll run for this month already exists")
-    cfg = await pset.snapshot(session)
+    cfg = await ptds.augment_config(session, await pset.snapshot(session), period)
     _, end = pdays.month_bounds(period)
     run = PayrollRun(
         period=period, status="draft", pay_date=body.pay_date, attendance_cutoff=min(end, today), config=cfg, created_by=actor.id,
@@ -712,13 +724,16 @@ async def create_run(session: AsyncSession, actor: Principal, body: RunCreate) -
             continue
         fresh.append((u, ps))
     await comps.pull_for(session, [ps for _, ps in fresh], period, lock=False)  # pay components (plan 15 P2)
+    rc = await ptds.run_ctx(session, run)
+    tdata = await ptds.load_data(session, rc.fy, period, [u.id for u, _ in fresh]) if rc else {}
     for u, ps in fresh:
         recompute(
             ps, user=u, period=period, structs=b.structs.get(u.id, []), adopt_latest=True, cfg=cfg, prior=b.prior.get(u.id, []),
-            lwd=_lwd(b.details.get(u.id)),
-        )
+            lwd=_lwd(b.details.get(u.id)), tds=ptds.Ctx(rc, tdata[u.id]) if rc else None,
+        )  # fmt: skip
         ps.version = 1
         session.add(ps)
+    await ptds.persist(session, [ps for _, ps in fresh], actor.id)
     n = len(fresh)
     audit(session, action="payroll.run.create", actor=actor, entity_type="payroll_run", entity_id=run.id,
           after={"period": pc.period_str(period), "employees": n})  # fmt: skip
@@ -747,7 +762,7 @@ async def refresh_run(session: AsyncSession, actor: Principal, run_id: uuid.UUID
     _require_status(run, "draft")
     pc.touch(run, actor.id)
     today = await _today(session)
-    run.config = await pset.snapshot(session)
+    run.config = await ptds.augment_config(session, await pset.snapshot(session), run.period)
     _, end = pdays.month_bounds(run.period)
     run.attendance_cutoff = min(end, today)
     rows = await _run_payslips(session, run.id, lock=True)
@@ -777,15 +792,19 @@ async def refresh_run(session: AsyncSession, actor: Principal, run_id: uuid.UUID
         pc.touch(ps, actor.id)
         todo.append((u, ps, False, keep))
     await comps.pull_for(session, [ps for _, ps, _, _ in todo], run.period, lock=False)  # pay components (plan 15 P2)
+    rc = await ptds.run_ctx(session, run)
+    tdata = await ptds.load_data(session, rc.fy, run.period, [u.id for u, _, _, _ in todo]) if rc else {}
     for u, ps, is_new, keep in todo:
         recompute(ps, user=u, period=run.period, structs=b.structs.get(u.id, []), adopt_latest=True, cfg=run.config,
-                  prior=b.prior.get(u.id, []), keep=keep, lwd=_lwd(b.details.get(u.id)))  # fmt: skip
+                  prior=b.prior.get(u.id, []), keep=keep, lwd=_lwd(b.details.get(u.id)),
+                  tds=ptds.Ctx(rc, tdata[u.id]) if rc else None)  # fmt: skip
         if is_new:
             ps.version = 1
             session.add(ps)
             added += 1
         else:
             updated += 1
+    await ptds.persist(session, [ps for _, ps, _, _ in todo], actor.id)
     audit(session, action="payroll.run.refresh", actor=actor, entity_type="payroll_run", entity_id=run.id,
           after={"added": added, "updated": updated})  # fmt: skip
     await _stale_requests(session, actor, run, "RUN_REFRESHED")
@@ -793,20 +812,30 @@ async def refresh_run(session: AsyncSession, actor: Principal, run_id: uuid.UUID
     return await run_out(session, run)
 
 
-async def _recompute_open(session: AsyncSession, run: PayrollRun, payslips: list[Payslip]) -> list[tuple[str, str]]:
-    """Recompute the given open payslips against current structures / identity / settings. Returns (employee_id, code) errors."""
+async def _recompute_open(
+    session: AsyncSession, run: PayrollRun, payslips: list[Payslip], actor_id: uuid.UUID | None = None
+) -> list[tuple[str, str]]:
+    """Recompute the given open payslips against current structures / identity / settings. Returns (employee_id, code) errors.
+    The TDS computation rows are written (and flushed) here, while the payslips are still `draft`: the caller moves them to
+    `processed` afterwards and the database freezes the rows with them (T8)."""
     uids = list({p.user_id for p in payslips})
     b = await _bulk(session, run.period, uids, share_lock_structs=True)  # processing makes a structure 'in use'
     users = {u.id: u for u in b.users}
     errors: list[tuple[str, str]] = []
+    # plan 17 lock order: structures (above), tax rules, declarations, proofs (share), THEN the pay component rows
+    rc = await ptds.run_ctx(session, run, lock=True)
+    tdata = await ptds.load_data(session, rc.fy, run.period, uids, lock=True) if rc else {}
     await comps.pull_for(session, payslips, run.period, lock=True)  # source rows locked FOR UPDATE (plan 15 P6 / P7)
     for p in payslips:
         u = users[p.user_id]
         pull_identity(p, u, b.details.get(u.id))
         recompute(p, user=u, period=run.period, structs=b.structs.get(u.id, []), adopt_latest=True, cfg=run.config,
-                  prior=b.prior.get(u.id, []), lwd=_lwd(b.details.get(u.id)))  # fmt: skip
+                  prior=b.prior.get(u.id, []), lwd=_lwd(b.details.get(u.id)),
+                  tds=ptds.Ctx(rc, tdata[u.id]) if rc else None)  # fmt: skip
         for code in _split(p.warnings)[0]:
             errors.append((u.employee_id, code))
+    if not errors:
+        await ptds.persist(session, payslips, actor_id)
     return errors
 
 
@@ -838,7 +867,7 @@ async def process_run(session: AsyncSession, actor: Principal, run_id: uuid.UUID
     _require_status(run, "draft")
     rows = await _run_payslips(session, run.id, lock=True)
     todo = [p for p in rows if p.status == "draft" and not p.hold]
-    errors = await _recompute_open(session, run, todo)
+    errors = await _recompute_open(session, run, todo, actor.id)
     if errors:
         raise await _blocked(session, actor, "payroll_run", run.id, errors)
     await comps.attach_processing(session, todo, actor.id)
@@ -1104,8 +1133,9 @@ async def update_payslip(session: AsyncSession, actor: Principal, payslip_id: uu
             ps.lop_override, ps.lop_override_reason = v, body.lop_override_reason
     elif "lop_override_reason" in sent and ps.lop_override is not None and body.lop_override_reason:
         ps.lop_override_reason = body.lop_override_reason
+    rc = await ptds.run_ctx(session, run)
     if "tds" in sent:
-        inputs["tds"] = calc.money_str(body.tds) if body.tds is not None else None
+        ptds.set_manual_tds(inputs, body.tds, body.tds_override_reason, rc)
     if "pt_override" in sent:
         inputs["pt_override"] = calc.money_str(body.pt_override) if body.pt_override is not None else None
     if "adjustments" in sent:
@@ -1120,10 +1150,13 @@ async def update_payslip(session: AsyncSession, actor: Principal, payslip_id: uu
     user = await session.get(User, ps.user_id)
     structs = (await _load_structs(session, [ps.user_id], run.period)).get(ps.user_id, [])
     prior = (await _prior_gross(session, [ps.user_id], run.period)).get(ps.user_id, [])
+    tdata = await ptds.load_data(session, rc.fy, run.period, [ps.user_id]) if rc else {}
     recompute(ps, user=user, period=run.period, structs=structs, adopt_latest=False, cfg=run.config, prior=prior,
-              lwd=_lwd((await _load_details(session, [ps.user_id])).get(ps.user_id)))
+              lwd=_lwd((await _load_details(session, [ps.user_id])).get(ps.user_id)),
+              tds=ptds.Ctx(rc, tdata[ps.user_id]) if rc else None)  # fmt: skip
     ps.updated_by = actor.id
     pc.touch(ps, actor.id)
+    await ptds.persist(session, [ps], actor.id)
     audit(session, action="payroll.payslip.update", actor=actor, entity_type="payslip", entity_id=ps.id,
           after={"fields": sorted(sent)})  # fmt: skip
     await pc.commit(session)
@@ -1150,7 +1183,7 @@ async def process_payslip(session: AsyncSession, actor: Principal, payslip_id: u
         raise AppError("CONFLICT", "Process the whole run instead; single payslips are processed after the run is published")
     if ps.status != "draft":
         raise AppError("PAYROLL_LOCKED", "Only a draft payslip can be processed")
-    errors = await _recompute_open(session, run, [ps])
+    errors = await _recompute_open(session, run, [ps], actor.id)
     if errors:
         raise await _blocked(session, actor, "payslip", ps.id, errors)
     await comps.attach_processing(session, [ps], actor.id)
@@ -1248,11 +1281,14 @@ async def revise(session: AsyncSession, actor: Principal, run_id: uuid.UUID, use
         raise AppError("VALIDATION_ERROR", "The employee was not employed in this period",
                        details=[{"field": "user_id", "message": "not employed"}])  # fmt: skip
     await comps.pull_for(session, [new], run.period, lock=False)  # carried `paid` rows of the live copy + new pending rows
+    rc = await ptds.run_ctx(session, run)
+    tdata = await ptds.load_data(session, rc.fy, run.period, [u.id]) if rc else {}
     recompute(new, user=u, period=run.period, structs=b.structs.get(u.id, []), adopt_latest=True, cfg=run.config,
-              prior=b.prior.get(u.id, []), lwd=_lwd(det))  # fmt: skip
+              prior=b.prior.get(u.id, []), lwd=_lwd(det), tds=ptds.Ctx(rc, tdata[u.id]) if rc else None)  # fmt: skip
     new.version = 1
     session.add(new)
     await pc.flush(session)
+    await ptds.persist(session, [new], actor.id)
     audit(session, action="payroll.payslip.revise", actor=actor, entity_type="payslip", entity_id=new.id,
           after={"run_id": str(run.id), "user_id": str(user_id), "revision": new.revision})  # fmt: skip
     await pc.commit(session)

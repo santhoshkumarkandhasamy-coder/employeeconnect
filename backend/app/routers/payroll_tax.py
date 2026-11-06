@@ -13,6 +13,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTask
 
+from ..core.audit import audit
 from ..core.db import get_session
 from ..core.errors import AppError
 from ..core.pagination import PageParams
@@ -36,9 +37,20 @@ from ..schemas.payroll_tax import (
     RulesUpdate,
     RulesVerify,
     RulesVersionIn,
+    TaxPreviewIn,
+    TaxStepUpIn,
     WindowsIn,
 )
-from ..services import form16, tax_declarations, tax_rules, xlsx
+from ..services import (
+    admin_security,
+    form16,
+    payroll_tds_reports,
+    tax_24q,
+    tax_declarations,
+    tax_rules,
+    tax_statement_pdf,
+    xlsx,
+)
 from ..services import payroll_common as pc
 
 admin_router = APIRouter(prefix="/admin/payroll/tax", tags=["payroll-tax"])
@@ -498,3 +510,98 @@ async def my_form16_file(
     await pc.limit(redis, actor, "own_detail", (30, 60), (200, 86400), closed=True)
     data, name = await form16.own_file(session, actor, doc_id)
     return _pdf(data, name)
+
+
+# ============================================================================================ 19.9 TDS engine (work package 5c)
+@admin_router.post("/preview")
+async def tax_preview(
+    body: TaxPreviewIn,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await _read(redis, actor)
+    return await payroll_tds_reports.preview(
+        session, actor, user_id=body.user_id, fy=body.fy, period=body.period, regime=body.regime
+    )
+
+
+@admin_router.get("/summary")
+async def tax_summary(
+    fy: str | None = Query(None, pattern=FY_Q),
+    q: str | None = Query(None, max_length=60),
+    department_id: uuid.UUID | None = None,
+    flag: str | None = Query(None, pattern=r"^[A-Z_0-9]{3,32}$"),
+    page: PageParams = Depends(),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await _read(redis, actor)
+    return await payroll_tds_reports.summary(session, actor, fy=fy, q=q, department_id=department_id, flag=flag, page=page)
+
+
+@admin_router.post("/employees/{user_id}/statement")
+async def tax_statement(
+    user_id: uuid.UUID,
+    body: TaxStepUpIn,
+    fy: str | None = Query(None, pattern=FY_Q),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    await pc.limit(redis, actor, "statutory_file", (10, 60), (30, 86400), closed=True)
+    await admin_security.require_reauth(session, redis, actor, body.current_password, action="payroll.tax.statement")
+    view, footer, logo = await payroll_tds_reports.statement_view(session, actor, user_id, fy)
+    data, name = await tax_statement_pdf.build(view, footer, logo)
+    audit(session, action="payroll.tax.statement", actor=actor, entity_type="payroll_tax", entity_id=user_id,
+          after={"user_id": str(user_id), "fy": view["fy"]})  # fmt: skip
+    await pc.commit(session)
+    return _pdf(data, name)
+
+
+@admin_router.post("/24q")
+async def tax_24q_export(
+    body: TaxStepUpIn,
+    fy: str = Query(..., pattern=FY_Q),
+    quarter: int = Query(..., ge=1, le=4),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_ALL),
+):
+    tax_rules.check_fy(fy)
+    await pc.limit(redis, actor, "statutory_file", (10, 60), (30, 86400), closed=True)
+    await admin_security.require_reauth(session, redis, actor, body.current_password, action="payroll.statutory.24q")
+    built, name, rows, meta = await tax_24q.build(session, fy, quarter)
+    try:
+        audit(session, action="payroll.statutory.export", actor=actor, entity_type="statutory_challan",
+              after={"kind": "24q", "fy": fy, "quarter": quarter, "rows": rows, "blockers": meta["blockers"]})  # fmt: skip
+        await pc.commit(session)
+    except BaseException:
+        built.close()
+        raise
+    await admin_security.notify_admins(
+        session, entity_id=actor.id, title="24Q working file downloaded",
+        body=f"{actor.user.full_name} ({actor.employee_id}) downloaded the 24Q working file for FY {fy} quarter {quarter}.",
+    )  # fmt: skip
+    return StreamingResponse(
+        xlsx.iter_file(built),
+        media_type=xlsx.XLSX_MIME,
+        headers={
+            "Content-Disposition": f'attachment; filename="{name}"',
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+        background=BackgroundTask(built.close),
+    )
+
+
+@me_router.get("/projection")
+async def my_projection(
+    fy: str | None = Query(None, pattern=FY_Q),
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(VIEW_OWN),
+):
+    await _own_read(redis, actor)
+    return await payroll_tds_reports.own_projection(session, actor, fy)
