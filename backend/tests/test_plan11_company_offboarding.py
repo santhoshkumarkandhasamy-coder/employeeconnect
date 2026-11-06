@@ -429,8 +429,8 @@ async def test_dashboard_blocks_follow_permissions(client, admin, hr, seeded, db
     assert (await client.get("/api/admin/dashboard", headers=hr)).status_code == 403  # HR: no console.access
     d = (await client.get("/api/admin/dashboard", headers=admin)).json()
     assert d["employees"] == {"active": 4, "inactive": 0}
-    assert set(d["attendance"]) == {"checked_in", "checked_out", "late", "on_leave", "not_checked_in", "on_duty", "on_duty_open"}
-    assert set(d["requests"]) == {"leave_pending", "permission_pending", "on_duty_pending"}
+    assert set(d["attendance"]) == {"checked_in", "checked_out", "late", "on_leave", "not_checked_in"}
+    assert set(d["requests"]) == {"leave_pending", "permission_pending"}
     assert set(d["food"]) == {"date", "count_yes", "count_no", "count_unanswered", "tomorrow_yes"}
     assert d["announcements"] == {"active": 0} and d["password_reset_requests_open"] == 0
     assert d["sessions"]["mobile"] >= 1 and d["seats"] == {"used": 4, "total": 50, "status": "unlicensed"}
@@ -460,7 +460,7 @@ async def test_attendance_day_statuses_and_scope(client, admin, hr, emp, seeded,
     by = {i["user"]["employee_id"]: i for i in r.json()["items"]}
     assert set(by) == {"ADM001", "HR001", "MGR001", "EMP001"}
     assert by["EMP001"]["status"] == "late" and by["EMP001"]["minutes_late"] == 12 and by["EMP001"]["check_in_at"]
-    assert set(by["EMP001"]) == {"user", "status", "check_in_at", "check_out_at", "minutes_late", "leave_type", "work_mode", "on_duty_locations"}
+    assert set(by["EMP001"]) == {"user", "status", "check_in_at", "check_out_at", "minutes_late", "leave_type"}
     others = {by[k]["status"] for k in by if k != "EMP001"}
     assert others <= {"not_checked_in", "weekly_off", "holiday"}
     only_late = (await client.get(f"/api/admin/attendance/day?date={day}&status=late", headers=hr)).json()

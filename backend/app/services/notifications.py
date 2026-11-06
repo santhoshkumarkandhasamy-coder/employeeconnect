@@ -35,7 +35,6 @@ async def notify(
     title: str,
     body: str,
     high_priority: bool = False,
-    extra: dict[str, str] | None = None,
 ) -> int:
     """Returns the number of device-token targets (0 when nobody has a registered device)."""
     ids = sorted({u for u in user_ids}, key=str)
@@ -43,7 +42,7 @@ async def notify(
         return 0
     try:
         rows = (await session.execute(select(DeviceToken).where(DeviceToken.user_id.in_(ids)))).scalars().all()
-        payload = {"type": type, "id": str(entity_id), "title": title, "body": body, **(extra or {})}
+        payload = {"type": type, "id": str(entity_id), "title": title, "body": body}
         OUTBOX.append(
             {
                 "payload": payload,

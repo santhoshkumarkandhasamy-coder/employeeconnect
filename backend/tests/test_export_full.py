@@ -16,11 +16,9 @@ from app.core.crypto import encrypt_bytes
 from app.models import (
     Attendance,
     AuditLog,
-    DutyLocation,
     LateRecord,
     LeaveRequest,
     LeaveType,
-    OnDutyVisit,
     Permission,
     PermissionRequest,
     Role,
@@ -33,7 +31,7 @@ from tests.conftest import PASSWORD, USERS, bearer, do_login
 DAY = dt.date(2026, 10, 23)
 P = {"from": "2026-10-23", "to": "2026-10-23"}
 ROLES4 = ("employee", "manager", "admin", "hr")
-SHEET_NAMES = ["Attendance", "Leave", "Late", "Permission", "On Duty"]
+SHEET_NAMES = ["Attendance", "Leave", "Late", "Permission"]
 
 
 @pytest.fixture
@@ -94,23 +92,6 @@ async def seed_for_user(db, user_id, shift_id, *, reason="family event", check_i
             reason=reason,
             status="approved",
             decision_comment="ok",
-        )
-    )
-    loc = (await db.execute(select(DutyLocation))).scalars().first()
-    if loc is None:
-        loc = DutyLocation(name="Client Site", lat=12.97, lng=77.59, radius_m=200)
-        db.add(loc)
-        await db.flush()
-    db.add(
-        OnDutyVisit(
-            user_id=user_id,
-            attendance_id=att.id,
-            work_date=DAY,
-            location_id=loc.id,
-            location_name=loc.name,
-            check_in_at=check_in,
-            check_out_at=check_in + dt.timedelta(hours=2),
-            note="client call",
         )
     )
     db.add(
@@ -217,7 +198,7 @@ async def test_all_has_four_sheets_with_headers_and_rows_for_hr(client, H, db, s
         assert ws["A1"].font.bold
     assert [c.value for c in wb["Attendance"][1]] == [
         "Date", "Employee ID", "Name", "Department", "Shift", "Check-in", "Check-out", "Status",
-        "Minutes Late", "Worked Hours", "Within Geofence", "Mode", "On Duty Locations",
+        "Minutes Late", "Worked Hours", "Within Geofence",
     ]  # fmt: skip
     assert [c.value for c in wb["Late"][1]] == [
         "Date", "Employee ID", "Name", "Department", "Shift Start", "Check-in", "Minutes Late",
@@ -485,10 +466,10 @@ async def test_audit_records_filters_and_counts_never_data(client, H, db, seeded
     a = log.after
     assert a["type"] == "all" and a["from"] == "2026-10-23" and a["to"] == "2026-10-23" and a["scope"] == "all"
     assert a["employee_id"] == "EMP001" and a["department_id"] == str(seeded["dept"])
-    assert a["rows"] == {"Attendance": 1, "Leave": 1, "Late": 1, "Permission": 1, "On Duty": 1} and a["total_rows"] == 5
+    assert a["rows"] == {"Attendance": 1, "Leave": 1, "Late": 1, "Permission": 1} and a["total_rows"] == 4
     blob = repr(a) + repr(log.before)
     assert "Secret Person" not in blob and "family event" not in blob
-    assert a["include_reasons"] is False and a["daily_exports"] == 1 and a["daily_rows"] == 5
+    assert a["include_reasons"] is False and a["daily_exports"] == 1 and a["daily_rows"] == 4
     # manager export is audited as team scope; the employee never reaches the handler (dependency 403, not audited here)
     await get(client, await H("manager"), type="leave")
     await get(client, await H("employee"), type="leave")
@@ -499,6 +480,6 @@ async def test_audit_records_filters_and_counts_never_data(client, H, db, seeded
 
 
 def test_registry_covers_every_type_with_permissions():
-    assert {"attendance", "leave", "late", "permission", "food", "on_duty"} == set(export_svc.SHEETS)
-    assert set(export_svc.ALL_TYPES) == {"attendance", "leave", "late", "permission", "on_duty"}
+    assert {"attendance", "leave", "late", "permission", "food"} == set(export_svc.SHEETS)
+    assert set(export_svc.ALL_TYPES) == {"attendance", "leave", "late", "permission"}
     assert USERS  # fixture import sanity

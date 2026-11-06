@@ -1,6 +1,5 @@
 import '../../../core/api/api_exception.dart';
 import '../../../core/utils/dates.dart';
-import '../../on_duty/domain/on_duty_config.dart';
 
 enum DayStatus {
   present('Present'),
@@ -44,9 +43,6 @@ class AttendanceRecord {
     this.autoClosed = false,
     this.shiftStart,
     this.shiftEnd,
-    this.workMode = 'office',
-    this.checkOutSource,
-    this.onDutyLocations = const [],
   });
 
   final String id;
@@ -63,22 +59,6 @@ class AttendanceRecord {
   final String? shiftStart;
   final String? shiftEnd;
 
-  /// `office` | `on_duty` | `mixed` (On Duty, contract 14.2).
-  final String workMode;
-
-  /// `office` | `on_duty` | null (no check-out yet).
-  final String? checkOutSource;
-
-  /// Distinct visit location names of the day, first visit first.
-  final List<String> onDutyLocations;
-
-  /// The day included at least one on-duty visit.
-  bool get hasOnDuty => workMode == 'on_duty' || workMode == 'mixed';
-
-  /// An OFFICE check-out was done (a check-out time set by a visit does not
-  /// count). A missing source on an old record means office.
-  bool get officeClosed => checkedOut && checkOutSource != 'on_duty';
-
   bool get checkedIn => checkInAt != null;
   bool get checkedOut => checkOutAt != null;
 
@@ -92,25 +72,12 @@ class AttendanceRecord {
       checkOutAt: parseTimestamp(j['check_out_at']),
       minutesLate: (j['minutes_late'] as num?)?.toInt() ?? 0,
       workedMinutes: (j['worked_minutes'] as num?)?.toInt(),
-      // null = the day started with an on-duty visit (no office check-in), or
-      // the offline cache dropped the field: neither is an "outside" signal.
       withinFence: j['within_fence'] as bool? ?? true,
       distanceM: j['distance_m'] as num?,
       selfieUrl: j['selfie_url'] as String?,
       autoClosed: j['auto_closed'] as bool? ?? false,
       shiftStart: shift is Map ? shift['start'] as String? : null,
       shiftEnd: shift is Map ? shift['end'] as String? : null,
-      workMode: switch (j['work_mode']) {
-        'on_duty' => 'on_duty',
-        'mixed' => 'mixed',
-        _ => 'office',
-      },
-      checkOutSource: j['check_out_source'] as String?,
-      onDutyLocations: [
-        if (j['on_duty_locations'] is List)
-          for (final n in j['on_duty_locations'] as List)
-            if (n is String && n.isNotEmpty) n,
-      ],
     );
   }
 
@@ -150,20 +117,11 @@ class Paged<T> {
 }
 
 class CalendarDay {
-  const CalendarDay({
-    required this.date,
-    required this.status,
-    this.holidayName,
-    this.leaveType,
-    this.onDuty = false,
-  });
+  const CalendarDay({required this.date, required this.status, this.holidayName, this.leaveType});
   final DateTime date;
   final DayStatus status;
   final String? holidayName;
   final String? leaveType;
-
-  /// The day's record has `work_mode` on_duty or mixed.
-  final bool onDuty;
 
   /// Extra text for a day detail: holiday name or leave type.
   String? get note => holidayName ?? leaveType;
@@ -185,7 +143,6 @@ class CalendarMonth {
               status: DayStatus.parse(e['status']),
               holidayName: e['holiday_name'] as String?,
               leaveType: e['leave_type'] as String?,
-              onDuty: e['on_duty'] == true,
             ),
     ];
     return CalendarMonth(month: '${j['month'] ?? ''}', days: days);
@@ -201,7 +158,6 @@ class AttendanceSummary {
     this.onLeave = 0,
     this.halfDay = 0,
     this.totalWorkedMinutes = 0,
-    this.onDutyDays = 0,
   });
   final String month;
   final int present;
@@ -210,10 +166,6 @@ class AttendanceSummary {
   final int onLeave;
   final int halfDay;
   final int totalWorkedMinutes;
-
-  /// Days with on-duty visits. NOT disjoint: those days also count as
-  /// present / late / half day.
-  final int onDutyDays;
 
   factory AttendanceSummary.fromJson(Map<String, dynamic> j) {
     int n(String k) => (j[k] as num?)?.toInt() ?? 0;
@@ -225,7 +177,6 @@ class AttendanceSummary {
       onLeave: n('on_leave'),
       halfDay: n('half_day'),
       totalWorkedMinutes: n('total_worked_minutes'),
-      onDutyDays: n('on_duty_days'),
     );
   }
 }
@@ -237,13 +188,11 @@ class AttendanceConfig {
     this.officeLat,
     this.officeLng,
     this.radiusM,
-    this.onDuty = OnDutyConfig.none,
   });
   final bool selfieRequired;
   final double? officeLat;
   final double? officeLng;
   final int? radiusM;
-  final OnDutyConfig onDuty;
 
   static const fallback = AttendanceConfig();
 
@@ -257,7 +206,6 @@ class AttendanceConfig {
       officeLat: office is Map ? (office['lat'] as num?)?.toDouble() : null,
       officeLng: office is Map ? (office['lng'] as num?)?.toDouble() : null,
       radiusM: office is Map ? (office['radius_m'] as num?)?.toInt() : null,
-      onDuty: OnDutyConfig.fromJson(j['on_duty']),
     );
   }
 }
@@ -287,9 +235,7 @@ String attendanceErrorMessage(ApiException e) {
     case 'ALREADY_CHECKED_IN':
       return 'You have already checked in today.';
     case 'ALREADY_CHECKED_OUT':
-      return 'You have already ended your day at the office.';
-    case 'VISIT_OPEN':
-      return 'You are still on an on-duty visit. Check out of the visit first, then end your day.';
+      return 'You have already checked out today.';
     case 'NOT_CHECKED_IN':
       return 'You have not checked in today.';
     case 'ON_LEAVE':

@@ -17,7 +17,6 @@ from . import announcements, celebrations
 from . import attendance as att
 from . import food as food_svc
 from . import leave as leave_svc
-from . import on_duty as od_svc
 
 log = logging.getLogger("app.home")
 HOME_CELEBRATION_DAYS = 7
@@ -37,16 +36,9 @@ async def _safe(session: AsyncSession, name: str, fn: Callable[[], Awaitable[Any
 
 async def _attendance(session: AsyncSession, actor: Principal) -> dict[str, Any]:
     rec = await att.today(session, actor)
-    open_visit = await od_svc.home_open_visit(session, actor.id)
     if not rec or rec.get("record", 1) is None:
-        return {"check_in_at": None, "check_out_at": None, "status": None, "work_mode": None, "open_visit": open_visit}
-    return {
-        "check_in_at": rec["check_in_at"],
-        "check_out_at": rec["check_out_at"],
-        "status": rec["status"],
-        "work_mode": rec["work_mode"],
-        "open_visit": open_visit,
-    }
+        return {"check_in_at": None, "check_out_at": None, "status": None}
+    return {"check_in_at": rec["check_in_at"], "check_out_at": rec["check_out_at"], "status": rec["status"]}
 
 
 async def _pending(session: AsyncSession, actor: Principal) -> int:
@@ -57,7 +49,6 @@ async def _pending(session: AsyncSession, actor: Principal) -> int:
                 select(func.count()).select_from(model).where(model.user_id == actor.id, model.status == "pending")
             )
         ).scalar_one()
-    total += await od_svc.pending_count(session, actor.id)
     return int(total)
 
 

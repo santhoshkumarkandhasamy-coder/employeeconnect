@@ -40,7 +40,6 @@ from ..models import (
     File,
     Form16Document,
     LeaveRequest,
-    OnDutyVisit,
     ReimbursementClaim,
     TaxProof,
     User,
@@ -529,9 +528,6 @@ async def cleanup_orphans(session: AsyncSession, older_than_hours: int = 24, bat
     refs = [
         select(Attendance.id).where(
             or_(Attendance.check_in_selfie_file_id == File.id, Attendance.check_out_selfie_file_id == File.id)
-        ),
-        select(OnDutyVisit.id).where(
-            or_(OnDutyVisit.check_in_selfie_file_id == File.id, OnDutyVisit.check_out_selfie_file_id == File.id)
         ),
         select(LeaveRequest.id).where(LeaveRequest.attachment_file_id == File.id),
         select(Announcement.id).where(or_(Announcement.image_file_id == File.id, Announcement.pdf_file_id == File.id)),

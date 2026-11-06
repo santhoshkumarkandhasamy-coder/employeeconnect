@@ -70,20 +70,9 @@ class LeaveRepository {
         fetch: () async => <String, dynamic>{
           'leave': await _get('/leave/requests', {'page': 1, 'page_size': 100}),
           'permission': await _get('/permission/requests', {'page': 1, 'page_size': 100}),
-          // On Duty is optional: a server without it (or with it switched
-          // off) must not break the list.
-          'on_duty': await _optionalOnDuty(),
         },
         parse: (j) => mergeRequests(j as Map<String, dynamic>),
       );
-
-  Future<Map<String, dynamic>> _optionalOnDuty() async {
-    try {
-      return await _get('/on-duty/requests', {'page': 1, 'page_size': 100});
-    } on ApiException {
-      return const <String, dynamic>{};
-    }
-  }
 
   Future<RequestItem> applyLeave({
     required String leaveTypeId,
@@ -132,7 +121,7 @@ class LeaveRepository {
       );
 
   Future<RequestItem> cancel(RequestKind kind, String id) async => RequestItem.fromJson(
-        await _send('POST', '/${kind.path}/requests/$id/cancel'),
+        await _send('POST', '/${kind.wire}/requests/$id/cancel'),
         kind: kind,
       );
 
@@ -166,8 +155,7 @@ class LeaveRepository {
       );
 }
 
-/// Merges `{leave: {items}, permission: {items}, on_duty: {items}}` into one
-/// list, newest first.
+/// Merges `{leave: {items}, permission: {items}}` into one list, newest first.
 List<RequestItem> mergeRequests(Map<String, dynamic> j) {
   List<RequestItem> of(Object? page, RequestKind k) {
     final raw = page is Map ? page['items'] : null;
@@ -178,11 +166,7 @@ List<RequestItem> mergeRequests(Map<String, dynamic> j) {
     ];
   }
 
-  final all = [
-    ...of(j['leave'], RequestKind.leave),
-    ...of(j['permission'], RequestKind.permission),
-    ...of(j['on_duty'], RequestKind.onDuty),
-  ];
+  final all = [...of(j['leave'], RequestKind.leave), ...of(j['permission'], RequestKind.permission)];
   final epoch = DateTime.fromMillisecondsSinceEpoch(0);
   all.sort((a, b) => (b.createdAt ?? epoch).compareTo(a.createdAt ?? epoch));
   return all;

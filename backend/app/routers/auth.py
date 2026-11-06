@@ -103,8 +103,8 @@ async def me(
 
 
 @public_router.get("/config")
-async def client_config(session: AsyncSession = Depends(get_session), principal: Principal = Depends(require_permission())):
-    return await svc.client_config(session, principal)
+async def client_config(session: AsyncSession = Depends(get_session), _: Principal = Depends(require_permission())):
+    return await svc.client_config(session)
 
 
 @public_router.post("/me/device-tokens", status_code=204)

@@ -7,7 +7,6 @@ from .base import Base
 from .company import Company, License
 from .food import FoodEnrollment
 from .leave import LeaveBalance, LeaveRequest, LeaveType, PermissionRequest
-from .on_duty import DutyLocation, DutyLocationAssignment, OnDutyRequest, OnDutyVisit
 from .org import Department, Shift
 from .payroll import (
     EmployeePayrollDetails,
@@ -47,7 +46,6 @@ __all__ = [
     "Base", "Role", "Permission", "RolePermission", "Department", "Shift", "User", "File", "EmployeeProfile",
     "RefreshToken", "DeviceToken", "PasswordResetRequest", "AuditLog", "Setting",
     "Holiday", "Attendance", "LateRecord", "LeaveType", "LeaveBalance", "LeaveRequest", "PermissionRequest",
-    "DutyLocation", "DutyLocationAssignment", "OnDutyRequest", "OnDutyVisit",
     "Company", "License", "SalaryStructure", "SalaryIncrement", "SalaryIncrementBatch", "EmployeePayrollDetails", "FnfSettlement", "PayrollRun", "Payslip", "StatutoryChallan", "StatutoryChallanEvent",
     "PayrollItemEvent", "PayrollImportBatch", "PayrollOneTimeItem", "PayrollLoan", "PayrollLoanInstallment", "PayrollArrears", "LeaveEncashment", "ReimbursementClaim", "OvertimeDay",
     "PayrollPublishRequest", "PayslipDelivery", "CompanyBankAccount", "PayrollPaymentBatch", "PayrollPaymentLine", "EmployeeBankChange",

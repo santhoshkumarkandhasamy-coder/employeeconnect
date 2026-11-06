@@ -23,7 +23,7 @@ from sqlalchemy.orm import aliased
 
 from ..core.config import get_settings
 from ..core.crypto import DataDecryptionError, decrypt_bytes
-from ..models import Attendance, Department, LateRecord, LeaveRequest, LeaveType, OnDutyVisit, PermissionRequest, Shift, User
+from ..models import Attendance, Department, LateRecord, LeaveRequest, LeaveType, PermissionRequest, Shift, User
 from . import attendance as att
 from .xlsx import SheetSpec
 
@@ -45,21 +45,6 @@ ATTENDANCE_HEADERS = [
     "Minutes Late",
     "Worked Hours",
     "Within Geofence",
-    "Mode",
-    "On Duty Locations",
-]
-ON_DUTY_HEADERS = [  # full list (include_reasons=true adds Note as the last column)
-    "Date",
-    "Employee ID",
-    "Name",
-    "Department",
-    "Location",
-    "Check-in",
-    "Check-out",
-    "Visit Minutes",
-    "Auto Closed",
-    "Check-out Within Site",
-    "Note",
 ]
 LEAVE_HEADERS = [  # full list (include_reasons=true)
     "Request ID",
@@ -78,7 +63,7 @@ LEAVE_HEADERS = [  # full list (include_reasons=true)
     "Applied On",
     "Decided On",
 ]
-SENSITIVE_HEADERS = frozenset({"Reason", "Decision Comment", "Comment", "Note"})  # dropped unless include_reasons=true
+SENSITIVE_HEADERS = frozenset({"Reason", "Decision Comment", "Comment"})  # dropped unless include_reasons=true
 LATE_HEADERS = ["Date", "Employee ID", "Name", "Department", "Shift Start", "Check-in", "Minutes Late"]
 PERMISSION_HEADERS = [  # full list (include_reasons=true)
     "Request ID",
@@ -145,27 +130,13 @@ def attendance_sheet(
         q = q.join(User, User.id == Attendance.user_id).where(Attendance.work_date >= d_from, Attendance.work_date <= d_to)
         return _user_filters(q, scope, filters, Attendance.user_id)
 
-    def filtered_visits(q):
-        return filtered(q)
-
     async def count() -> int:
         return int((await session.execute(filtered(select(func.count()).select_from(Attendance)))).scalar_one())
 
     async def rows() -> AsyncIterator[tuple]:
         tz = await _office_tz(session)
-        names: dict[Any, list[str]] = {}
-        vq = filtered_visits(
-            select(OnDutyVisit.attendance_id, OnDutyVisit.location_name)
-            .select_from(Attendance)
-            .join(OnDutyVisit, OnDutyVisit.attendance_id == Attendance.id)
-        ).order_by(OnDutyVisit.check_in_at)
-        for aid, lname in (await session.execute(vq)).all():
-            lst = names.setdefault(aid, [])
-            if lname not in lst:
-                lst.append(lname)
         q = filtered(
             select(
-                Attendance.id,
                 Attendance.work_date,
                 User.employee_id,
                 User.full_name,
@@ -177,7 +148,6 @@ def attendance_sheet(
                 Attendance.minutes_late,
                 Attendance.worked_minutes,
                 Attendance.check_in_within_fence,
-                Attendance.work_mode,
             ).select_from(Attendance)
         )
         q = (
@@ -186,7 +156,7 @@ def attendance_sheet(
             .order_by(Attendance.work_date, User.employee_id)
         )
         result = await session.stream(q.execution_options(yield_per=BATCH))
-        async for aid, day, eid, name, dept, shift, cin, cout, status, late, worked, fence, mode in result:
+        async for day, eid, name, dept, shift, cin, cout, status, late, worked, fence in result:
             yield (
                 day,
                 eid,
@@ -199,66 +169,9 @@ def attendance_sheet(
                 late,
                 None if worked is None else round(worked / 60, 2),
                 "" if fence is None else ("Yes" if fence else "No"),
-                mode,
-                ", ".join(names.get(aid, [])),
             )
 
     return SheetSpec("Attendance", ATTENDANCE_HEADERS, count, rows, get_settings().export_max_rows)
-
-
-# ---------------------------------------------------------------- On Duty
-def on_duty_sheet(session: AsyncSession, scope: ExportScope, filters: ExportFilters, d_from: dt.date, d_to: dt.date) -> SheetSpec:
-    """One row per visit. Never coordinates, distances, accuracy, selfies or suspicious/mock flags; the note (free text, may be
-    personal) only with include_reasons=true."""
-
-    def filtered(q):
-        q = q.join(User, User.id == OnDutyVisit.user_id).where(OnDutyVisit.work_date >= d_from, OnDutyVisit.work_date <= d_to)
-        return _user_filters(q, scope, filters, OnDutyVisit.user_id)
-
-    async def count() -> int:
-        return int((await session.execute(filtered(select(func.count()).select_from(OnDutyVisit)))).scalar_one())
-
-    inc = filters.include_reasons
-
-    async def rows() -> AsyncIterator[tuple]:
-        tz = await _office_tz(session)
-        cols = [
-            OnDutyVisit.work_date,
-            User.employee_id,
-            User.full_name,
-            Department.name,
-            OnDutyVisit.location_name,
-            OnDutyVisit.check_in_at,
-            OnDutyVisit.check_out_at,
-            OnDutyVisit.auto_closed,
-            OnDutyVisit.check_out_within_fence,
-        ]
-        if inc:
-            cols.append(type_coerce(OnDutyVisit.note, LargeBinary))
-        q = filtered(select(*cols).select_from(OnDutyVisit))
-        q = q.outerjoin(Department, Department.id == User.department_id).order_by(
-            OnDutyVisit.work_date, User.employee_id, OnDutyVisit.check_in_at
-        )
-        result = await session.stream(q.execution_options(yield_per=BATCH))
-        async for r in result:
-            day, eid, name, dept, lname, cin, cout, auto, within, *rest = r
-            minutes = None
-            if cin is not None and cout is not None:
-                a, b = cin, cout
-                if a.tzinfo is None:
-                    a = a.replace(tzinfo=dt.UTC)
-                if b.tzinfo is None:
-                    b = b.replace(tzinfo=dt.UTC)
-                minutes = int((b - a).total_seconds() // 60)
-            out = [
-                day, eid, name, dept or "", lname, _local(cin, tz), _local(cout, tz), minutes,
-                "Yes" if auto else "No", "" if within is None else ("Yes" if within else "No"),
-            ]  # fmt: skip
-            if inc:
-                out.append(_plain(rest[0]))
-            yield tuple(out)
-
-    return SheetSpec("On Duty", headers_for(ON_DUTY_HEADERS, inc), count, rows, get_settings().export_max_rows)
 
 
 # ---------------------------------------------------------------- Late

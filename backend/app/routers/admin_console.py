@@ -43,7 +43,7 @@ async def dashboard(
 async def attendance_day(
     params: PageParams = Depends(),
     date: dt.date | None = None,
-    status: Literal["all", "checked_in", "late", "not_checked_in", "on_leave", "on_duty"] = "all",
+    status: Literal["all", "checked_in", "late", "not_checked_in", "on_leave"] = "all",
     department_id: uuid.UUID | None = None,
     q: str | None = Query(None, max_length=100),
     session: AsyncSession = Depends(get_session),

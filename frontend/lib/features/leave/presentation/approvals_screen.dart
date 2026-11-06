@@ -33,10 +33,8 @@ class _ApprovalsScreenState extends ConsumerState<ApprovalsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // The admin providers read the mobile session by default and the console
-    // session when overridden, so this screen works in both.
-    final selfId = ref.watch(adminSelfIdProvider);
-    final perms = ref.watch(adminPermissionsProvider);
+    final user = ref.watch(authControllerProvider.select((s) => s is AuthAuthenticated ? s.user : null));
+    final perms = user?.permissions ?? const <String>[];
     final canDecide = canDecideRequests(perms);
     final canClaims = canSeeTeamClaims(perms);
     final async = ref.watch(approvalsProvider(_query));
@@ -59,7 +57,7 @@ class _ApprovalsScreenState extends ConsumerState<ApprovalsScreen> {
     }
 
     void open(RequestItem item) {
-      final own = selfId != null && item.user?.id == selfId;
+      final own = user != null && item.user?.id == user.id;
       showRequestSheet(
         context,
         RequestDetailBody(
@@ -104,19 +102,14 @@ class _ApprovalsScreenState extends ConsumerState<ApprovalsScreen> {
                 segments: [
                   const ButtonSegment(value: 'leave', label: Text('Leave')),
                   const ButtonSegment(value: 'permission', label: Text('Permission')),
-                  const ButtonSegment(value: 'on_duty', label: Text('On duty')),
                   if (canClaims) const ButtonSegment(value: 'claims', label: Text('Claims')),
                 ],
-                selected: {_claims ? 'claims' : _kind.name == 'onDuty' ? 'on_duty' : _kind.name},
+                selected: {_claims ? 'claims' : _kind.name},
                 onSelectionChanged: (s) => setState(() {
                   final v = s.first;
                   _claims = v == 'claims';
                   if (!_claims) {
-                    _kind = v == 'leave'
-                        ? RequestKind.leave
-                        : v == 'permission'
-                            ? RequestKind.permission
-                            : RequestKind.onDuty;
+                    _kind = v == 'leave' ? RequestKind.leave : RequestKind.permission;
                   }
                 }),
               ),
@@ -258,14 +251,6 @@ class _DecisionDialogState extends State<DecisionDialog> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text('$who, ${widget.item.title}, ${widget.item.whenText}'),
-            if (approve && widget.item.kind == RequestKind.leave && widget.item.onDutyConflict) ...[
-              const SizedBox(height: 8),
-              Text(
-                'This employee has an approved On Duty request on these dates. If you approve '
-                'the leave, they will not be able to check in on those days.',
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
-              ),
-            ],
             const SizedBox(height: 12),
             TextFormField(
               controller: _comment,

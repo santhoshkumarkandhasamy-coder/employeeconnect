@@ -1271,7 +1271,6 @@ INSERT INTO settings (key, value) VALUES ('payroll.pt_slabs', '[{"min_gross":"0.
 INSERT INTO settings (key, value) VALUES ('payroll.rounding', '"rupee"'::jsonb) ON CONFLICT (key) DO NOTHING;
 
 INSERT INTO settings (key, value) VALUES ('payroll.show_employer_contributions', 'false'::jsonb) ON CONFLICT (key) DO NOTHING;
-
 INSERT INTO settings (key, value) VALUES ('payroll.employer_share_from_employee', 'true'::jsonb) ON CONFLICT (key) DO NOTHING;
 
 INSERT INTO settings (key, value) VALUES ('payroll.mask_pan', 'true'::jsonb) ON CONFLICT (key) DO NOTHING;

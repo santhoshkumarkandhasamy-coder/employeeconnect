@@ -76,7 +76,6 @@ PERMISSIONS: dict[str, tuple[str, set[str]]] = {
     "payroll.publish": ("Publish payroll runs and payslips", {ADMIN, HR}),
     "payroll.approve": ("Approve or reject salary increments (maker-checker)", {ADMIN, HR}),
     "reimbursement.submit": ("Submit own reimbursement claims and upload bills", {ADMIN, HR, MANAGER, EMPLOYEE}),
-    "duty_location.manage": ("Manage on-duty locations and assignments", {ADMIN, HR}),
 }
 
 ROLES = [
@@ -150,15 +149,6 @@ DEFAULT_SETTINGS = {
     "payroll.publish_requires_second_person": False,
     "payroll.company_address": "",
     "payroll.payslip_footer": "This is a computer-generated payslip and does not require a signature.",
-    # on duty (plan 13). Accuracy / fix age / mock / retention reuse the attendance.* keys.
-    "on_duty.enabled": True,
-    "on_duty.approval_required": False,
-    "on_duty.apply_late_rule": False,
-    "on_duty.checkout_geofence": False,
-    "on_duty.selfie_required": False,
-    "on_duty.max_visits_per_day": 10,
-    "on_duty.request_backdate_days": 0,
-    "on_duty.request_max_advance_days": 60,
 }
 
 

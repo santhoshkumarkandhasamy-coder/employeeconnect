@@ -20,7 +20,6 @@ from .core.net import resolve_client_ip
 from .core.redis import close_redis
 from .routers import (
     admin_console,
-    admin_duty_locations,
     admin_employees,
     admin_export,
     admin_masters,
@@ -35,7 +34,6 @@ from .routers import (
     food,
     home,
     leave,
-    on_duty,
     payroll,
     payroll_controls,
     payroll_tax,
@@ -105,8 +103,6 @@ def create_app() -> FastAPI:
     app.include_router(attendance.router, prefix="/api")
     app.include_router(files.router, prefix="/api")
     app.include_router(leave.router, prefix="/api")
-    app.include_router(on_duty.router, prefix="/api")
-    app.include_router(admin_duty_locations.router, prefix="/api")
     app.include_router(food.router, prefix="/api")
     app.include_router(announcements.router, prefix="/api")
     app.include_router(profile.router, prefix="/api")

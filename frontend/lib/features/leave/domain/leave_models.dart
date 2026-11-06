@@ -3,18 +3,12 @@ import '../../../core/utils/dates.dart';
 /// api-contract.md section 4 models.
 
 enum RequestKind {
-  leave('leave', 'Leave', 'leave'),
-  permission('permission', 'Permission', 'permission'),
-  onDuty('on_duty', 'On duty', 'on-duty');
+  leave('leave', 'Leave'),
+  permission('permission', 'Permission');
 
-  const RequestKind(this.wire, this.label, this.path);
-
-  /// `type` value in `/admin/requests` and `/admin/requests/<wire>/{id}/...`.
+  const RequestKind(this.wire, this.label);
   final String wire;
   final String label;
-
-  /// URL segment of the employee endpoints (`/<path>/requests`).
-  final String path;
 }
 
 enum RequestStatus {
@@ -241,8 +235,6 @@ class RequestItem {
     this.fromTime,
     this.toTime,
     this.minutes,
-    this.locationName,
-    this.onDutyConflict = false,
   });
 
   final RequestKind kind;
@@ -274,26 +266,13 @@ class RequestItem {
   final String? toTime;
   final int? minutes;
 
-  // on duty: null `locationName` = any assigned location
-  final String? locationName;
-
-  /// Leave item only: an approved on-duty request of the requester overlaps.
-  final bool onDutyConflict;
-
-  bool get isOnDuty => kind == RequestKind.onDuty;
-
   bool get isPending => status == RequestStatus.pending;
 
   bool get hasAttachment => attachmentUrl != null && attachmentUrl!.isNotEmpty;
 
-  String get title => switch (kind) {
-        RequestKind.leave => leaveTypeName ?? 'Leave',
-        RequestKind.permission => 'Permission',
-        RequestKind.onDuty => 'On duty',
-      };
-
-  /// Where an on-duty request applies.
-  String get locationText => locationName ?? 'Any assigned location';
+  String get title => kind == RequestKind.leave
+      ? (leaveTypeName ?? 'Leave')
+      : 'Permission';
 
   /// Short date text, e.g. `Tue, 3 Nov 2026 to Thu, 5 Nov 2026` or `... 16:00-17:30`.
   String get whenText {
@@ -303,33 +282,24 @@ class RequestItem {
     }
 
     if (kind == RequestKind.permission) return '${d(date)}, $fromTime-$toTime';
-    if (kind == RequestKind.onDuty) {
-      return fromDate == toDate ? d(fromDate) : '${d(fromDate)} to ${d(toDate)}';
-    }
     final base = fromDate == toDate ? d(fromDate) : '${d(fromDate)} to ${d(toDate)}';
     if (halfDay) return '$base (${halfDaySession == 'second' ? 'second' : 'first'} half)';
     return base;
   }
 
   /// `3 days` / `90 min`.
-  String get amountText => kind == RequestKind.permission
-      ? formatDuration(minutes ?? 0)
-      : daysLabel(days ?? 0);
+  String get amountText => kind == RequestKind.leave
+      ? daysLabel(days ?? 0)
+      : formatDuration(minutes ?? 0);
 
   factory RequestItem.fromJson(Map<String, dynamic> j, {RequestKind? kind}) {
-    final k = kind ??
-        switch (j['type']) {
-          'permission' => RequestKind.permission,
-          'on_duty' => RequestKind.onDuty,
-          _ => RequestKind.leave,
-        };
+    final k = kind ?? (j['type'] == 'permission' ? RequestKind.permission : RequestKind.leave);
     final lt = j['leave_type'];
-    final loc = j['location'];
     return RequestItem(
       kind: k,
       id: '${j['id'] ?? ''}',
       status: RequestStatus.parse(j['status']),
-      reason: (j['reason'] ?? j['purpose']) == null ? '' : '${j['reason'] ?? j['purpose']}',
+      reason: j['reason'] == null ? '' : '${j['reason']}',
       approver: PersonSummary.parse(j['approver']),
       user: PersonSummary.parse(j['user']),
       decisionComment: j['decision_comment'] as String?,
@@ -347,8 +317,6 @@ class RequestItem {
       fromTime: j['from_time'] as String?,
       toTime: j['to_time'] as String?,
       minutes: (j['minutes'] as num?)?.toInt(),
-      locationName: loc is Map ? loc['name'] as String? : null,
-      onDutyConflict: j['on_duty_conflict'] == true,
     );
   }
 }

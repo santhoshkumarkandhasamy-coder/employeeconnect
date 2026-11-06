@@ -114,10 +114,6 @@ TABLES = [
     "leave_encashments",
     "reimbursement_claims",
     "overtime_days",
-    "duty_locations",
-    "duty_location_assignments",
-    "on_duty_requests",
-    "on_duty_visits",
 ]
 
 
@@ -166,8 +162,8 @@ def _adapt_metadata_for_sqlite() -> None:
             ):
                 table.constraints.discard(c)
         for ix in list(table.indexes):
-            if ix.dialect_options["postgresql"]["where"] is not None or any("btrim" in str(e) for e in ix.expressions):
-                table.indexes.discard(ix)  # partial indexes / btrim() expression indexes are Postgres-only
+            if ix.dialect_options["postgresql"]["where"] is not None:
+                table.indexes.discard(ix)
     Base.metadata.tables["payslips"].c.warnings.type = JSON()  # text[] in Postgres
     Base.metadata.tables["payslips"].c.warnings.server_default = None
     Base.metadata.tables["payslips"].c.warnings.default = ColumnDefault(list)

@@ -14,9 +14,7 @@ Jobs (office timezone = `office.timezone` setting at start-up):
   payroll.publish_request_expiry       hourly at :20 (open publish requests past their expiry become stale / EXPIRED; plan 17 5a)
   worker.heartbeat                     every 60 s    (Redis ec:worker:heartbeat, read by GET /admin/system/health)
   leave.retention                      daily 03:45   (setting leave.reason_retention_days, 0 = off: nulls reason/comment of
-                                                     old decided requests, deletes their unreferenced attachment files;
-                                                     also blanks the purpose/comment of old on-duty requests)
-  (the 00:30 auto-close also flags past-day open on-duty visits; attendance.retention also purges visit locations/selfies)
+                                                     old decided requests, deletes their unreferenced attachment files)
 
 Single worker only: `max_instances=1` + `coalesce` stop a job overlapping itself, and a best-effort Redis lock
 (SET NX EX) stops a second accidentally started worker from running the same job twice. SIGTERM/SIGINT stop the
@@ -43,7 +41,6 @@ from ..services import attendance as att
 from ..services import files as files_svc
 from ..services import leave as leave_svc
 from ..services import license as license_svc
-from ..services import on_duty as od_svc
 from ..services.system_health import HEARTBEAT_KEY
 
 log = logging.getLogger("app.jobs")
@@ -81,7 +78,7 @@ async def job_leave_rollover() -> int:
 async def job_leave_retention() -> int:
     async with get_sessionmaker()() as s:
         out = await leave_svc.purge_old_text(s)
-        return out["leave"] + out["permission"] + await od_svc.purge_old_text(s)  # on-duty purposes follow the same retention
+        return out["leave"] + out["permission"]
 
 
 async def job_license_alert() -> int:
