@@ -35,7 +35,13 @@ BANK_DAYS_KEY = (
     "payroll.bank_change_alert_days"  # plan 17: the look-back window of the bank change control; a short one weakens it
 )
 MIN_BANK_DAYS = 7  # the floor, also applied by the service and the database trigger whatever is stored
-GUARDED_KEYS = (SECOND_PERSON_KEY, APPROVAL_KEY, BANK_DAYS_KEY)  # change needs role.assign AND the caller's own password
+FORM16_SECOND_KEY = "payroll.form16_requires_second_person"  # plan 17 5b: Form 16 publish by a second person; same control level
+GUARDED_KEYS = (
+    SECOND_PERSON_KEY,
+    APPROVAL_KEY,
+    BANK_DAYS_KEY,
+    FORM16_SECOND_KEY,
+)  # change needs role.assign AND the caller's own password
 MAX_SLABS = 20
 MAX_CATEGORIES = 20
 _CATEGORY_CODE = re.compile(r"^[a-z][a-z0-9_]{1,19}$")
@@ -118,6 +124,9 @@ DEFAULTS: dict[str, Any] = {
     "payroll.bank_file_format": "generic_neft_csv",
     "payroll.bank_payment_type": "NEFT",
     "payroll.bank_change_alert_days": 30,
+    # plan 17, work package 5b (Form 16, investment proofs)
+    "payroll.form16_requires_second_person": True,
+    "payroll.tax_proof_max_files": 5,
 }
 
 _ENUMS = {
@@ -141,6 +150,7 @@ _BOOLS = {
     "payroll.overtime_offday_full",
     "payroll.overtime_include_auto_closed",
     APPROVAL_KEY,
+    FORM16_SECOND_KEY,
     "payroll.ctc_include_gratuity",
 }
 _NUMBERS = {  # key -> (min, max), at most 2 decimals
@@ -172,6 +182,7 @@ _INTS = {  # key -> (min, max), whole numbers
     "payroll.notice_recovery_divisor": (1, 31),
     "payroll.publish_request_ttl_hours": (1, 336),
     "payroll.bank_change_alert_days": (MIN_BANK_DAYS, 90),
+    "payroll.tax_proof_max_files": (1, 10),
 }
 _TEXTS = {"payroll.company_address": (0, 300), "payroll.payslip_footer": (0, 200)}
 
@@ -405,5 +416,10 @@ async def update(
         await admin_security.notify_admins(
             session, entity_id=actor.id, title="Payroll control changed",
             body=f"{actor.user.full_name} ({actor.employee_id}) changed the bank detail change window.",
+        )  # fmt: skip
+    if FORM16_SECOND_KEY in guarded:
+        await admin_security.notify_admins(
+            session, entity_id=actor.id, title="Payroll control changed",
+            body=f"{actor.user.full_name} ({actor.employee_id}) changed the Form 16 second-person rule.",
         )  # fmt: skip
     return await read_all(session)

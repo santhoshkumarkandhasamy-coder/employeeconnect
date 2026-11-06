@@ -38,9 +38,11 @@ from ..models import (
     Company,
     EmployeeProfile,
     File,
+    Form16Document,
     LeaveRequest,
     OnDutyVisit,
     ReimbursementClaim,
+    TaxProof,
     User,
 )
 
@@ -60,8 +62,11 @@ PURPOSES: dict[str, tuple[frozenset[str], int, bool, str | None]] = {
     "announcement_pdf": (frozenset({PDF}), 10, False, "announcement.manage"),
     "company_logo": (frozenset(IMAGE_TYPES), 2, False, "company.manage"),  # only via POST /admin/company/logo
     "reimbursement_bill": (frozenset(IMAGE_TYPES | {PDF}), 10, True, "reimbursement.submit"),  # plan 15 3b
+    "tax_proof": (frozenset(IMAGE_TYPES | {PDF}), 5, True, "payroll.view_own"),  # plan 17 5b: investment proof
+    "form16": (frozenset({PDF}), 2, True, "payroll.manage"),  # plan 17 5b: only through the Form 16 upload (never POST /files)
 }
-GENERIC_PURPOSES = frozenset(PURPOSES) - {"profile_photo", "company_logo"}  # accepted by POST /files
+# accepted by POST /files (profile photo via POST /me/profile/photo; the logo and Form 16 have their own endpoints)
+GENERIC_PURPOSES = frozenset(PURPOSES) - {"profile_photo", "company_logo", "form16"}
 MAX_IMAGE_SIDE = 2048
 MAX_IMAGE_PIXELS = 16_000_000  # decoded pixels; checked from the header BEFORE decoding (12 MP phones are ~12.2 Mpx)
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS  # Pillow's own guard (warns above, raises above 2x)
@@ -251,6 +256,34 @@ async def upload(
     return {"id": str(rec.id), "url": file_url(rec.id), "content_type": ctype, "size_bytes": len(data)}
 
 
+async def store_blob(session: AsyncSession, owner_id: uuid.UUID, purpose: str, data: bytes, ctype: str) -> File:
+    """Store already validated bytes as a file of `purpose` (encrypted when the purpose says so) and flush the row WITHOUT
+    committing: the caller commits, and calls `delete_blob` for every blob if its transaction fails (Form 16 upload)."""
+    import hashlib
+
+    encrypt = PURPOSES[purpose][2]
+    name = secrets.token_hex(16)
+    rel = f"{name[:2]}/{name}.bin"
+    path = _resolve(rel)
+    await asyncio.to_thread(_write_atomic, path, encrypt_bytes(data) if encrypt else data)
+    rec = File(
+        owner_id=owner_id, purpose=purpose, storage_path=rel, content_type=ctype, size_bytes=len(data),
+        sha256=hashlib.sha256(data).hexdigest(), is_encrypted=encrypt,
+    )  # fmt: skip
+    session.add(rec)
+    try:
+        await session.flush()
+    except Exception:
+        await asyncio.to_thread(_unlink, path)
+        raise
+    return rec
+
+
+def pdf_ok(data: bytes) -> bool:
+    """PDF magic bytes and the script / launch / embedded-file screen of `POST /files`."""
+    return sniff(data) == PDF and _pdf_is_safe(data)
+
+
 async def store_company_logo(session: AsyncSession, actor: Principal, upload_file: UploadFile) -> File:
     """png/jpeg (magic bytes) <= 2 MB -> decoded and re-encoded to PNG, longest side <= 512 px, metadata stripped; stored
     unencrypted (it is public). Flushes the File row but does NOT commit: the caller links it to the company row and commits
@@ -361,6 +394,21 @@ async def _bill_visible(session: AsyncSession, actor: Principal, f: File) -> boo
     return False
 
 
+async def proof_referenced(session: AsyncSession, file_id: uuid.UUID) -> bool:
+    """Is the file listed in some proof's `file_ids`? (uuid[] on PostgreSQL, a JSON list in the SQLite test harness.)"""
+    if session.get_bind().dialect.name == "postgresql":
+        hit = await session.execute(select(TaxProof.id).where(TaxProof.file_ids.any(file_id)).limit(1))
+        return hit.first() is not None
+    wanted = str(file_id)
+    return any(wanted in {str(x) for x in ids} for ids in (await session.execute(select(TaxProof.file_ids))).scalars())
+
+
+async def _tax_proof_visible(session: AsyncSession, actor: Principal, f: File) -> bool:
+    """A proof file (plan 17, contract 19.7) is readable by `payroll.view_all` holders once some proof references it; an upload no
+    proof carries yet is owner-only."""
+    return actor.has("payroll.view_all") and await proof_referenced(session, f.id)
+
+
 @dataclass
 class Access:
     file: File
@@ -370,6 +418,12 @@ class Access:
 async def authorize(session: AsyncSession, actor: Principal, file_id: uuid.UUID) -> Access:
     f = await session.get(File, file_id)
     if f is None:
+        raise AppError("NOT_FOUND", "File not found")
+    if f.purpose == "form16":
+        # Form 16 PDFs are served only by the Form 16 endpoints (owner + published, or payroll.view_all): not even the uploader reads one here
+        audit(session, action="file.access_denied", actor=actor, entity_type="file", entity_id=f.id,
+              after={"purpose": f.purpose}, outcome="failure")  # fmt: skip
+        await session.commit()
         raise AppError("NOT_FOUND", "File not found")
     if f.owner_id == actor.id:
         return Access(f, False)
@@ -390,6 +444,8 @@ async def authorize(session: AsyncSession, actor: Principal, file_id: uuid.UUID)
         ok = await _leave_attachment_visible(session, actor, f)
     elif f.purpose == "reimbursement_bill":
         ok = await _bill_visible(session, actor, f)
+    elif f.purpose == "tax_proof":
+        ok = await _tax_proof_visible(session, actor, f)
     elif f.purpose == "selfie":
         if actor.has("attendance.view_all"):
             ok = True
@@ -409,12 +465,11 @@ async def authorize(session: AsyncSession, actor: Principal, file_id: uuid.UUID)
         )
         await session.commit()
         raise AppError("NOT_FOUND", "File not found")  # 404, not 403: do not reveal that the id exists
-    return Access(f, f.purpose in ("selfie", "leave_attachment", "reimbursement_bill"))
+    return Access(f, f.purpose in ("selfie", "leave_attachment", "reimbursement_bill", "tax_proof"))
 
 
-async def read(session: AsyncSession, actor: Principal, file_id: uuid.UUID) -> tuple[File, bytes]:
-    acc = await authorize(session, actor, file_id)
-    f = acc.file
+async def load_bytes(f: File) -> bytes:
+    """The (decrypted) bytes of a file row. The caller has already authorised the read."""
     path = _resolve(f.storage_path)
     try:
         raw = await asyncio.to_thread(path.read_bytes)
@@ -426,6 +481,13 @@ async def read(session: AsyncSession, actor: Principal, file_id: uuid.UUID) -> t
     except DataDecryptionError:
         log.error("file %s (%s) cannot be decrypted with the configured keys", f.id, f.purpose)
         raise AppError("FILE_UNAVAILABLE", "File is temporarily unavailable") from None
+    return data
+
+
+async def read(session: AsyncSession, actor: Principal, file_id: uuid.UUID) -> tuple[File, bytes]:
+    acc = await authorize(session, actor, file_id)
+    f = acc.file
+    data = await load_bytes(f)
     if acc.cross_user:
         audit(
             session,
@@ -476,8 +538,18 @@ async def cleanup_orphans(session: AsyncSession, older_than_hours: int = 24, bat
         select(EmployeeProfile.user_id).where(EmployeeProfile.photo_file_id == File.id),
         select(Company.id).where(Company.logo_file_id == File.id),
         select(ReimbursementClaim.id).where(ReimbursementClaim.bill_file_id == File.id),  # bills are financial records
+        select(Form16Document.id).where(
+            Form16Document.file_id == File.id
+        ),  # plan 17 5b: never purged while a document references it
     ]
-    q = select(File).where(File.created_at < cutoff, *[~r.exists() for r in refs]).limit(batch)
+    conds = [~r.exists() for r in refs]
+    if session.get_bind().dialect.name == "postgresql":  # uuid[] column: proofs keep their evidence
+        conds.append(~select(TaxProof.id).where(TaxProof.file_ids.any(File.id)).exists())
+    else:  # SQLite test harness: file_ids is a JSON list
+        used = {str(x) for ids in (await session.execute(select(TaxProof.file_ids))).scalars() for x in ids}
+        if used:
+            conds.append(File.id.not_in([uuid.UUID(x) for x in used]))
+    q = select(File).where(File.created_at < cutoff, *conds).limit(batch)
     removed = 0
     for f in (await session.execute(q)).scalars().all():
         try:
