@@ -2209,3 +2209,133 @@ Push types: `task_assigned` (to the assignee), `task_done` (to the creator, when
 back), 422 `VALIDATION_ERROR` (times in the future, check-out before check-in on a day shift, reason), 409 `ON_LEAVE`,
 422 `NO_SHIFT_ASSIGNED`, 403 (own attendance), 404 (unknown employee). DELETE -> 204, 404 when no record, 409 for a punched day.
 All attendance records gain `manual: bool`. Export: the `Attendance` sheet ends with `Manual Entry` (Yes/No).
+
+## 21. Biometric attendance devices (eSSL / ZK, read-only pull) (plan 18) - PROPOSED
+
+Migration `0030_essl_devices`. The server (worker) polls the devices; the API never connects to a device. Only device info, the
+user list (device user id, name, card) and punch logs are read. No fingerprint / face templates or other biometric data are ever
+requested or stored, and no write command is ever sent to a device.
+
+### 21.0 Permissions
+`device.view` (admin, hr), `device.map` (admin, hr), `device.manage` (admin). Rate limits: list / get 60/min; test 6/min per
+caller; sync 1 per device per 60 s (429 `RATE_LIMITED`, `Retry-After`).
+
+| Method | Path | Perm |
+|---|---|---|
+| GET | /admin/devices | `device.view` |
+| POST | /admin/devices | `device.manage` |
+| GET | /admin/devices/{id} | `device.view` |
+| PUT | /admin/devices/{id} | `device.manage` |
+| DELETE | /admin/devices/{id} | `device.manage` |
+| POST | /admin/devices/test | `device.manage` (unsaved settings) |
+| POST | /admin/devices/{id}/test | `device.manage` |
+| POST | /admin/devices/{id}/sync | `device.map` or `device.manage` |
+| POST | /admin/devices/sync-all | `device.map` or `device.manage` |
+| POST | /admin/devices/{id}/accept-identity | `device.manage` |
+| GET | /admin/devices/{id}/syncs?page=&page_size= | `device.view` |
+| GET | /admin/device-syncs/{sync_id} | `device.view` (test jobs: `device.manage`) |
+| GET | /admin/device-users?device_id=&status=unmatched\|matched\|ignored\|all&q=&page=&page_size= | `device.view` |
+| PUT | /admin/device-users/{id}/mapping | `device.map` |
+| POST | /admin/device-users/{id}/auto | `device.map` |
+| GET | /admin/device-punches?device_id=&employee_id=&device_user_id=&from=&to=&outcome=&page=&page_size= | `device.view` |
+| POST | /admin/attendance/{user_id}/{work_date}/use-device | `attendance.manual` (not for yourself) |
+| GET | /attendance/punches?date= or ?from=&to= | Self |
+
+### 21.1 Device
+```json
+Device: { "id":"uuid", "name":"Main entrance", "location_label":"Ground floor"|null, "ip":"192.168.0.201", "port":4370,
+  "transport":"tcp|udp", "has_comm_key":true, "enabled":true, "timezone":"Asia/Kolkata"|null, "clock_correction":"auto|off",
+  "ingest_from":"2026-11-10", "serial_number":"ABC123"|null, "model":"K40"|null, "firmware":"Ver 6.60"|null,
+  "status":"ok|failing|offline|disabled|never_synced", "clock_status":"ok|drift|invalid"|null, "last_clock_offset_s":-14|null,
+  "last_sync_at":"ts|null", "last_success_at":"ts|null", "last_error_code":"DEVICE_TIMEOUT"|null, "last_error_at":"ts|null",
+  "circuit_open_until":"ts|null", "records_on_device":1520|null, "users_on_device":48|null, "unmatched_users":3 }
+```
+`status`: `disabled` (enabled=false), `offline` (circuit open), `failing` (last attempt failed), `never_synced`, else `ok`.
+`GET /admin/devices` -> `{ "items": [Device] }` sorted by name. `GET /admin/devices/{id}` -> Device + `"recent_syncs": [DeviceSync]` (last 10).
+
+**POST /admin/devices** (extra keys 422):
+`{ "name":1-60, "ip":"IPv4", "port":1..65535 (default 4370), "transport":"tcp" (default), "comm_key":0..999999|null,
+   "enabled":true, "location_label":<=80|null, "timezone":IANA|null, "clock_correction":"auto", "ingest_from":"YYYY-MM-DD" }`
+-> 201 Device. `ingest_from` defaults to today (office), may be at most 31 days back, not in the future.
+**PUT /admin/devices/{id}** same body, full replace EXCEPT `comm_key`: omitted = unchanged, `null` = clear, number = set. -> 200 Device.
+Changing `ip` / `port` keeps the pinned `serial_number` (a different machine fails with `DEVICE_IDENTITY_CHANGED`).
+**DELETE /admin/devices/{id}** -> 204; 409 `IN_USE` when it has punches (disable instead).
+Errors: 422 `VALIDATION_ERROR`, 422 `DEVICE_ADDRESS_NOT_ALLOWED` (ip outside `DEVICE_ALLOWED_CIDRS`, loopback, link-local,
+multicast, docker subnets, the server itself), 409 `CONFLICT` (duplicate name, case-insensitive, or duplicate ip+port).
+`comm_key` is never returned. Audit `device.create|update|delete` (field names, `comm_key_changed`).
+
+### 21.2 Test, sync, jobs
+**POST /admin/devices/test** `{ "ip","port","transport","comm_key"|null }` and **POST /admin/devices/{id}/test** (no body) ->
+202 `{ "sync_id":"uuid" }`. The worker connects read-only and stores a `test` DeviceSync with `result`.
+**POST /admin/devices/{id}/sync** -> 202 `{ "sync_id":"uuid" }`; when a sync of that device is already queued / running its id is
+returned (still 202). 409 `DEVICE_DISABLED`. **POST /admin/devices/sync-all** -> 202 `{ "items":[{ "device_id","sync_id" }] }`
+(enabled devices only). 503 `TEMPORARILY_UNAVAILABLE` when the job queue (Redis) or the worker (heartbeat older than 180 s) is down.
+**POST /admin/devices/{id}/accept-identity** `{}` -> 200 Device (clears `serial_number`; the next sync pins the new one; audited).
+```json
+DeviceSync: { "id":"uuid", "device_id":"uuid"|null, "kind":"schedule|manual|reconcile|test", "status":"queued|running|ok|failed|skipped",
+  "error_code":null, "error_message":"Device did not answer within 5 seconds"|null, "requested_by":UserSummary|null,
+  "queued_at":"ts", "started_at":"ts|null", "finished_at":"ts|null", "records_on_device":1520|null, "users_on_device":48|null,
+  "fetched":1520|null, "inserted":12|null, "quarantined":0|null, "days_recomputed":9|null, "clock_offset_s":-14|null,
+  "result": { "serial_number","model","firmware","platform","device_time":"YYYY-MM-DDTHH:MM:SS","clock_offset_s",
+              "users_on_device","records_on_device" } | null }
+```
+`result` only for `kind=test`. Clients poll `GET /admin/device-syncs/{sync_id}` (every 2 s, give up after 2 min).
+Job `error_code`s: `DEVICE_UNREACHABLE`, `DEVICE_TIMEOUT`, `DEVICE_AUTH_FAILED` (comm key), `DEVICE_BUSY` (another program is
+connected), `DEVICE_PROTOCOL_ERROR`, `DEVICE_IDENTITY_CHANGED`, `DEVICE_CLOCK_INVALID`, `CIRCUIT_OPEN` (status `skipped`).
+`GET /admin/devices/{id}/syncs` -> paginated DeviceSync, newest first (retained 90 days).
+
+### 21.3 Device users and mapping
+```json
+DeviceUser: { "id":"uuid", "device":{ "id","name" }, "device_user_id":"101", "name":"RAVI K"|null, "card_masked":"****4821"|null,
+  "is_device_admin":false, "present_on_device":true, "status":"matched|unmatched|ignored", "match_method":"auto|manual|unmatched|ignored",
+  "user":UserSummary|null, "last_punch_at":"ts|null", "unapplied_punches":4, "last_seen_at":"ts" }
+```
+`GET /admin/device-users` -> paginated, default `status=unmatched`, sorted by `device_user_id`; `q` matches device user id or name.
+**PUT /admin/device-users/{id}/mapping** `{ "user_id":"uuid"|null, "apply_to_all_devices":true }` -> 200
+`{ "items":[DeviceUser], "recompute_queued":true }` (every row changed). `user_id=null` = ignore (never applied, never auto-matched).
+Errors: 422 `VALIDATION_ERROR` field `user_id` (unknown, inactive or deleted). **POST /admin/device-users/{id}/auto** -> 200 same shape
+(back to automatic matching by employee id; see plan 18 section 4). Audit `device_user.map|ignore|auto`.
+
+### 21.4 Punch log
+```json
+DevicePunch: { "id":"123", "device":{ "id","name" }, "device_user_id":"101", "user":UserSummary|null, "punch_at":"ts",
+  "device_time":"2026-11-10T09:02:11", "offset_applied_s":0, "state":"check_in|check_out|break_out|break_in|ot_in|ot_out|unknown",
+  "verify_mode":1, "method":"fingerprint|card|password|face|palm|other", "work_date":"2026-11-10"|null,
+  "outcome":"check_in|check_out|extra|unmatched|ignored|quarantined|not_applied",
+  "reason":"on_leave|on_duty|no_shift|inactive_user|manual_entry|outside_window|payroll_locked|mapping_ignored|clock_invalid|future|duplicate"|null }
+```
+`GET /admin/device-punches` -> paginated, newest first. `from`/`to` (office dates of `punch_at`) required, max 92 days
+(422 `INVALID_DATE_RANGE`). `id` is a string (bigint). `method` is a best-effort label of the raw `verify_mode` (vendor specific).
+
+### 21.5 Employee view
+**GET /attendance/punches?date=YYYY-MM-DD** (or `from`/`to`, max 31 days; default today) -> `{ "items":[ { "punch_at":"ts",
+"work_date":"YYYY-MM-DD", "device_name":"Main entrance", "method":"fingerprint|card|password|face|palm|other",
+"used_as":"check_in|check_out|none" } ] }` for the caller's mapped device users, sorted by time. No ids, cards or device data.
+
+### 21.6 Changes to existing sections
+- **Section 3 `AttendanceRecord`** gains `check_in_source: "app|device|manual"`, `check_out_source: "app|device|manual"|null`,
+  `check_in_device: {id,name}|null`, `check_out_device: {id,name}|null`. A device check-in has `within_fence: true`, `distance_m: null`,
+  `selfie_url: null`. `POST /attendance/check-in` on a day with a device check-in -> 409 `ALREADY_CHECKED_IN` (unchanged code).
+  Check-out from the phone on a device day follows the normal rules; a later device punch can move `check_out_at` later.
+  Effective times = earliest check-in / latest check-out of phone and device; lateness, half day and the late record are recomputed.
+- **Section 20 manual attendance**: a manual entry always wins over device punches. `GET /admin/attendance/{user_id}/{work_date}` gains
+  `device_punches: [ { "punch_at","device_name","method","outcome" } ]`. **POST .../use-device** `{ "reason": 3-300 }` -> 200 same shape as
+  GET (clears `manual`, recomputes from phone + device punches). 409 `CONFLICT` when the day has neither phone nor device punches;
+  403 for yourself. Audit `attendance.device_use`. `DELETE` treats a device punch as a real punch (409).
+- **Section 12.5 `GET /admin/system/health`** gains `"devices": { "ok":true, "enabled":3, "failing":0, "offline":0,
+  "last_success_at":"ts|null" }` (`ok:false` when any enabled device has no success for 60 min inside the sync window).
+- **Section 10 export**: `Attendance` sheet appends `Check-in Source`, `Check-out Source`, `Check-in Device`, `Check-out Device`.
+  New `type=device_punches` (NOT part of `type=all`; needs `device.view` plus `export.all|export.team`, max 92 days) -> sheet
+  `Device Punches` (Punch Time, Device Time, Device, Device User ID, Employee ID, Name, Method, State, Work Date, Outcome, Reason).
+  Card numbers and device data other than the name are never exported.
+- **Section 11 push**: `admin_alert` to `device.manage` holders: "Attendance device offline" / "Device clock is wrong" /
+  "Device identity changed" / "Device logs were cleared" (device name only; at most once per event and once a day per device).
+- **Settings** (`GET/PUT /admin/settings`): `device.sync_interval_minutes` (5, 2-60), `device.sync_window_start` ("05:00"),
+  `device.sync_window_end` ("23:30"), `device.off_window_interval_minutes` (60, 15-240), `device.apply_window_days` (7, 0-31),
+  `device.checkout_min_gap_minutes` (5, 1-120), `device.drift_tolerance_s` (120, 0-900), `device.drift_invalid_s` (43200, 900-604800),
+  `device.future_tolerance_s` (300, 0-3600), `device.match_prefix` ("", <= 10 chars `[A-Za-z0-9-]`), `device.apply_on_on_duty_days`
+  (false), `device.use_punch_state` (false), `device.push_on_punch` (false), `device.punch_retention_days` (1095; 0 = keep, else >= 90),
+  `device.sync_history_retention_days` (90, 7-366).
+
+### 21.7 Error codes (new)
+422 `DEVICE_ADDRESS_NOT_ALLOWED`, 409 `DEVICE_DISABLED`. Job-level codes (in DeviceSync / Device, never HTTP statuses) are listed in 21.2.
