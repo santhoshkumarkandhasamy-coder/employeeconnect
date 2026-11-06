@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
 import uuid
 
 import pytest
@@ -190,11 +189,11 @@ async def test_remind_needs_a_published_run_and_the_right_role(client, payroll):
 # ================================================================================================ settings (19.10)
 async def test_new_settings_defaults_ranges_and_snapshot(client, payroll):
     s = (await client.get(SETTINGS, headers=payroll["hr"])).json()["settings"]
-    assert s["payroll.publish_request_ttl_hours"] == 72 and s["payroll.bank_file_requires_second_person"] is True
+    assert s["payroll.publish_request_ttl_hours"] == 72
     assert s["payroll.bank_file_format"] == "generic_neft_csv" and s["payroll.bank_payment_type"] == "NEFT"
     assert s["payroll.bank_change_alert_days"] == 30
     for key, bad in (("publish_request_ttl_hours", 0), ("publish_request_ttl_hours", 337), ("bank_change_alert_days", 91),
-                     ("bank_payment_type", "UPI"), ("bank_file_format", "xml"), ("bank_file_requires_second_person", "yes")):  # fmt: skip
+                     ("bank_payment_type", "UPI"), ("bank_file_format", "xml"), ("bank_change_alert_days", 3)):  # fmt: skip
         r = await client.put(SETTINGS, json={"settings": {f"payroll.{key}": bad}}, headers=payroll["hr"])
         assert r.status_code == 422, (key, bad)
     r = await client.put(
@@ -207,24 +206,32 @@ async def test_new_settings_defaults_ranges_and_snapshot(client, payroll):
     assert run["config"]["publish_request_ttl_hours"] == 24 and run["config"]["bank_payment_type"] == "RTGS"
 
 
-async def test_bank_file_second_person_switch_is_guarded_and_alerts_admins(client, payroll):
-    key = "payroll.bank_file_requires_second_person"
+async def test_bank_change_window_is_guarded_has_a_floor_of_7_days_and_alerts_admins(client, payroll):
+    key = "payroll.bank_change_alert_days"
     hr, admin = payroll["hr"], payroll["admin"]
-    r = await client.put(SETTINGS, json={"settings": {key: False}, "current_password": PASSWORD}, headers=hr)
+    for bad in (0, 1, 6, 91, True, "30"):  # H1: nobody can switch the bank-change control off with a short window
+        r = await client.put(SETTINGS, json={"settings": {key: bad}, "current_password": PASSWORD}, headers=admin)
+        assert r.status_code == 422, bad
+    r = await client.put(SETTINGS, json={"settings": {key: 14}, "current_password": PASSWORD}, headers=hr)
     assert r.status_code == 403 and err(r) == "FORBIDDEN"  # role.assign is needed
-    r = await client.put(SETTINGS, json={"settings": {key: False}}, headers=admin)
+    r = await client.put(SETTINGS, json={"settings": {key: 14}}, headers=admin)
     assert r.status_code == 422  # and the caller's own password
-    r = await client.put(SETTINGS, json={"settings": {key: False}, "current_password": "Wrong!Passw0rd#1"}, headers=admin)
+    r = await client.put(SETTINGS, json={"settings": {key: 14}, "current_password": "Wrong!Passw0rd#1"}, headers=admin)
     assert r.status_code == 403 and err(r) == "REAUTH_FAILED"
-    assert (await client.get(SETTINGS, headers=hr)).json()["settings"][key] is True
+    assert (await client.get(SETTINGS, headers=hr)).json()["settings"][key] == 30
     notifications.OUTBOX.clear()
-    r = await client.put(SETTINGS, json={"settings": {key: False}, "current_password": PASSWORD}, headers=admin)
-    assert r.status_code == 200 and r.json()["settings"][key] is False
+    r = await client.put(SETTINGS, json={"settings": {key: 7}, "current_password": PASSWORD}, headers=admin)
+    assert r.status_code == 200 and r.json()["settings"][key] == 7
     alerts = [o["payload"] for o in notifications.OUTBOX if o["payload"]["type"] == "admin_alert"]
-    assert len(alerts) == 1 and "bank file approval rule" in alerts[0]["body"] and "False" not in json.dumps(alerts[0])
-    r = await client.put(SETTINGS, json={"settings": {key: False}}, headers=hr)
+    assert len(alerts) == 1 and "bank detail change window" in alerts[0]["body"] and "7" not in alerts[0]["body"].split("window")[-1]
+    r = await client.put(SETTINGS, json={"settings": {key: 7}}, headers=hr)
     assert r.status_code == 200  # unchanged value: no extra step
-    r = await client.put(
-        SETTINGS, json={"settings": {key: True}, "current_password": PASSWORD}, headers=admin
-    )  # back on (both directions)
-    assert r.status_code == 200 and r.json()["settings"][key] is True
+    r = await client.put(SETTINGS, json={"settings": {key: 90}, "current_password": PASSWORD}, headers=admin)
+    assert r.status_code == 200 and r.json()["settings"][key] == 90
+
+
+async def test_the_removed_bank_file_switch_is_unknown(client, payroll):
+    key = "payroll.bank_file_requires_second_person"  # L1: the second bank-file approver is unconditional
+    assert key not in (await client.get(SETTINGS, headers=payroll["hr"])).json()["settings"]
+    r = await client.put(SETTINGS, json={"settings": {key: False}, "current_password": PASSWORD}, headers=payroll["admin"])
+    assert r.status_code == 422

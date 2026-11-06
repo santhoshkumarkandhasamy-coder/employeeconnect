@@ -90,6 +90,7 @@ TABLES = [
     "salary_increments",
     "salary_structures",
     "employee_payroll_details",
+    "employee_bank_changes",
     "payroll_runs",
     "payslips",
     "fnf_settlements",

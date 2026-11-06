@@ -24,6 +24,7 @@ from sqlalchemy import (
     SmallInteger,
     Text,
     UniqueConstraint,
+    func,
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -246,7 +247,8 @@ class PayrollPaymentLine(TimestampMixin, Base):
         CheckConstraint("seq BETWEEN 1 AND 9999", name="ck_payroll_payment_lines_seq"),
         CheckConstraint("account_source IN ('snapshot','current')", name="ck_payroll_payment_lines_account_source"),
         CheckConstraint(
-            "flags <@ ARRAY['BANK_DETAILS_CHANGED','RECENT_BANK_CHANGE','REVISION_DELTA','NO_PAN']::text[]", name="ck_payroll_payment_lines_flags"
+            "flags <@ ARRAY['BANK_DETAILS_CHANGED','RECENT_BANK_CHANGE','REVISION_DELTA','NO_PAN','PREVIOUSLY_FAILED']::text[]",
+            name="ck_payroll_payment_lines_flags",
         ),
         CheckConstraint(
             "account_source = 'snapshot' OR 'BANK_DETAILS_CHANGED' = ANY (flags)", name="ck_payroll_payment_lines_source_flag"
@@ -257,6 +259,8 @@ class PayrollPaymentLine(TimestampMixin, Base):
         ),
         CheckConstraint("status <> 'paid' OR paid_on IS NOT NULL", name="ck_payroll_payment_lines_paid_on"),
         CheckConstraint("paid_on IS NULL OR paid_on BETWEEN DATE '2000-01-01' AND DATE '2200-12-31'", name="ck_payroll_payment_lines_paid_year"),
+        CheckConstraint("(status = 'failed') = (failed_by IS NOT NULL)", name="ck_payroll_payment_lines_failed_by"),
+        CheckConstraint("failed_by IS NULL OR failed_by <> user_id", name="ck_payroll_payment_lines_failed_self"),
         CheckConstraint("version >= 1", name="ck_payroll_payment_lines_version"),
         Index(
             "uq_payroll_payment_lines_live", "payslip_id", unique=True,
@@ -266,6 +270,7 @@ class PayrollPaymentLine(TimestampMixin, Base):
         Index("ix_payroll_payment_lines_user_status", "user_id", "status"),
         Index("ix_payroll_payment_lines_batch_status", "batch_id", "status"),
         Index("ix_payroll_payment_lines_updated_by", "updated_by"),
+        Index("ix_payroll_payment_lines_failed_by", "failed_by"),
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
@@ -280,5 +285,24 @@ class PayrollPaymentLine(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
     reference: Mapped[str | None] = mapped_column("reference_enc", EncryptedString)
     paid_on: Mapped[dt.date | None] = mapped_column(Date)
+    failed_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)  # who confirmed the line failed (never the line employee)
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     updated_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+
+
+class EmployeeBankChange(Base):
+    """Append-only history of bank detail changes (written by employee_payroll_details_bank_guard on PostgreSQL, by the details
+    service on the SQLite test harness): who changed the payment mode / bank details of an employee, and when."""
+
+    __tablename__ = "employee_bank_changes"
+    __table_args__ = (
+        UniqueConstraint("user_id", "changed_by", "changed_at", name="uq_employee_bank_changes"),
+        Index("ix_employee_bank_changes_user_changed", "user_id", "changed_at"),
+        Index("ix_employee_bank_changes_changed_by", "changed_by"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    user_id: Mapped[uuid.UUID] = fk_uuid("users.id")
+    changed_by: Mapped[uuid.UUID] = fk_uuid("users.id")
+    changed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

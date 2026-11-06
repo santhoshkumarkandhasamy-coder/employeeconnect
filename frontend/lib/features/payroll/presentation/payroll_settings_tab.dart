@@ -12,7 +12,7 @@ import '../data/payroll_repository.dart';
 import '../domain/payroll_logic.dart';
 import '../domain/payroll_models.dart';
 import '../domain/payroll_money.dart';
-import '../domain/phase5a_models.dart' show bankFileSecondPersonKey;
+import '../domain/phase5a_models.dart' show bankChangeAlertDaysKey;
 import '../domain/claims_models.dart';
 import 'categories_editor.dart';
 import 'payroll_providers.dart';
@@ -24,9 +24,9 @@ import 'pt_slab_editor.dart';
 /// runs and to a draft run after "Refresh" (runs snapshot the settings).
 const String secondPersonKey = 'payroll.publish_requires_second_person';
 
-/// Needs role.assign + the caller's password too (contract 18.1; 19.0 for the bank file key).
+/// Needs role.assign + the caller's password too (contract 18.1; 19.0 / 19.10 for the bank change window).
 const String structureApprovalKey = 'payroll.structure_changes_need_approval';
-const Set<String> stepUpSettingKeys = {secondPersonKey, structureApprovalKey, bankFileSecondPersonKey};
+const Set<String> stepUpSettingKeys = {secondPersonKey, structureApprovalKey, bankChangeAlertDaysKey};
 
 class PayrollSettingsTab extends ConsumerWidget {
   const PayrollSettingsTab({super.key});
@@ -360,14 +360,16 @@ class _PayrollSettingsFormState extends State<PayrollSettingsForm> {
           onChanged: enabled ? (v) => setState(() => _choices[s.key] = v ?? _choices[s.key]!) : null,
         );
       case PayrollSettingKind.number:
+        final guarded = stepUpSettingKeys.contains(s.key);
         return TextFormField(
           controller: _text[s.key],
-          enabled: enabled,
+          enabled: enabled && (!guarded || widget.canChangeSecondPerson),
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
           inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))],
           decoration: InputDecoration(
             labelText: s.label,
             suffixText: s.suffix,
+            helperText: guarded && !widget.canChangeSecondPerson ? 'Only an administrator can change this.' : null,
             border: const OutlineInputBorder(),
             errorText: _serverErrors[s.key],
           ),

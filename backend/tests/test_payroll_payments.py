@@ -38,9 +38,10 @@ from tests.payroll_controls_helpers import (
     new_batch,
     published_run,
     quiet,  # noqa: F401  (fixture)
+    recent_bank_changes,
     set_bank,
 )
-from tests.payroll_fixtures import new_run, process_and_publish, row_for, set_setting
+from tests.payroll_fixtures import new_run, process_and_publish, row_for
 
 pytestmark = pytest.mark.usefixtures("quiet")
 
@@ -80,7 +81,9 @@ async def test_bank_account_create_is_masked_stepped_up_and_alerts_admins(client
     }
     alerts = [o for o in notifications.OUTBOX if o["payload"]["type"] == "admin_alert"]
     assert (
-        len(alerts) == 1 and alerts[0]["payload"]["body"] == "HDFC salary account" and "987654321012" not in json.dumps(alerts[0])
+        len(alerts) == 1 and alerts[0]["payload"]["body"] == "A company bank account was added"
+        and "HDFC salary" not in json.dumps(alerts[0])
+        and "987654321012" not in json.dumps(alerts[0])
     )
     listing = (await client.get(ACCOUNTS, headers=payroll["admin"])).json()["items"]
     assert [i["account"] for i in listing] == ["XXXXXXXX1012"]
@@ -101,10 +104,14 @@ async def test_bank_account_update_rules(client, payroll, db):
     for bad in ({"account": "123456789"}, {"ifsc": "ICIC0000123"}, {"bank_name": "x"}, {}, {"label": None}):
         assert (await client.put(f"{ACCOUNTS}/{a['id']}", json=bad, headers=hr)).status_code == 422, bad
     r = await client.put(f"{ACCOUNTS}/{a['id']}", json={"label": "Main account", "is_default": True}, headers=hr)
+    assert r.status_code == 422  # L3: a default change needs the step-up password
+    r = await client.put(
+        f"{ACCOUNTS}/{a['id']}", json={"label": "Main account", "is_default": True, "current_password": PASSWORD}, headers=hr
+    )
     assert r.status_code == 200 and r.json()["label"] == "Main account" and r.json()["is_default"] is True
     r = await client.put(f"{ACCOUNTS}/{b['id']}", json={"active": False}, headers=hr)
-    assert r.status_code == 200 and r.json()["active"] is False and r.json()["is_default"] is False
-    r = await client.put(f"{ACCOUNTS}/{b['id']}", json={"is_default": True}, headers=hr)
+    assert r.status_code == 200 and r.json()["active"] is False and r.json()["is_default"] is False  # deactivating: no step-up
+    r = await client.put(f"{ACCOUNTS}/{b['id']}", json={"is_default": True, "current_password": PASSWORD}, headers=hr)
     assert r.status_code == 422  # an inactive account is never the default
     assert (await client.put(f"{ACCOUNTS}/{uuid.uuid4()}", json={"label": "x"}, headers=hr)).status_code == 404
     acts = [a_.action for a_ in (await db.execute(select(AuditLog))).scalars() if a_.action.startswith("payroll.bank_account")]
@@ -260,7 +267,6 @@ async def test_scope_value_date_default_account_and_errors(client, payroll, uid,
 
 async def test_batches_need_a_published_run(client, payroll, uid):
     acct = await new_account(client, payroll["hr"])
-    await set_setting(client, payroll["hr"], bank_change_alert_days=0)
     run = await new_run(client, payroll["hr"])
     r = await client.post(
         f"{RUNS}/{run['id']}/payment-batches",
@@ -272,7 +278,6 @@ async def test_batches_need_a_published_run(client, payroll, uid):
 
 async def test_blockers_are_listed_not_paid(client, payroll, uid, db):
     hr = payroll["hr"]
-    await set_setting(client, hr, bank_change_alert_days=0)
     await set_bank(client, hr, uid["employee"], payment_mode="cash")
     await set_bank(client, hr, uid["manager"])
     mgr = await db.get(User, uuid.UUID(uid["manager"]))
@@ -290,7 +295,6 @@ async def test_blockers_are_listed_not_paid(client, payroll, uid, db):
 
 async def test_blockers_missing_bank_details_and_invalid_formats(client, payroll, uid, db):
     hr = payroll["hr"]
-    await set_setting(client, hr, bank_change_alert_days=0)
     await set_bank(client, hr, uid["employee"])
     await set_bank(client, hr, uid["manager"])
     emp = await db.get(EmployeePayrollDetails, uuid.UUID(uid["employee"]))
@@ -349,16 +353,15 @@ async def test_end_to_end_file_confirm_and_second_batch(client, payroll, uid, db
     again = await batch_act(client, admin, got, "file")  # any manage holder, byte-identical
     assert again.content == expected
     alerts = [o["payload"] for o in notifications.OUTBOX if o["payload"]["type"] == "admin_alert"]
-    assert [a_["body"] for a_ in alerts] == ["PAY-2025-06-01: 2 lines", "PAY-2025-06-01: 2 lines"] and alerts[0][
-        "title"
-    ] == "Bank file downloaded"
+    assert [a_["body"] for a_ in alerts] == ["PAY-2025-06-01: 2 lines", "PAY-2025-06-01: 2 lines"]
+    assert [a_["title"] for a_ in alerts] == ["Bank file downloaded", "Bank file downloaded again"]  # L7: a re-download is distinct
     # confirm: all paid with a shared reference
     c = await batch_act(client, hr, got, "confirm", paid_on="2026-10-21", all_paid=True, reference="UTR 9988/77")
     assert c["status"] == "closed" and c["counts"]["paid"] == 2 and c["lines"][0]["reference"] == "XXXXXXX8/77"
     assert [ln["paid_on"] for ln in c["lines"]] == ["2026-10-21", "2026-10-21"]
     assert (await client.get(f"{BATCHES}/{b['id']}", headers=hr)).json()["status"] == "closed"
-    third = await batch_act(client, admin, c, "file")  # closed batches can still be re-downloaded
-    assert third.content == expected
+    third = await batch_act(client, admin, c, "file", expect=409)  # L7: only an exported batch can be downloaded again
+    assert third.json()["error"]["code"] == "BATCH_CLOSED"
     await new_batch(client, hr, run["id"], expect=422)  # ALREADY_PAID for both
     audit = list((await db.execute(select(AuditLog).where(AuditLog.action.like("payroll.payment_batch.%")))).scalars())
     assert [a_.action.split(".")[-1] for a_ in audit if a_.action.split(".")[-1] not in ("view", "list")] == [
@@ -366,9 +369,8 @@ async def test_end_to_end_file_confirm_and_second_batch(client, payroll, uid, db
         "submit",
         "approve",
         "export",
-        "download",
+        "redownload",
         "confirm",
-        "download",
     ]
     exp = next(a_ for a_ in audit if a_.action.endswith("export"))
     assert (
@@ -495,8 +497,11 @@ async def test_confirm_rules_partial_and_failed_lines_return_to_the_pool(client,
     assert done["lines"][1]["status"] == "failed" and done["lines"][1]["paid_on"] is None
     r = await client.post(f"{BATCHES}/{b['id']}/confirm", json={**base, "paid_on": "2026-10-21", "all_paid": True}, headers=hr)
     assert r.status_code == 409 and err(r) == "NOT_APPROVED"  # closed
-    again = await new_batch(client, hr, run["id"])  # the failed line frees its payslip
+    nope = await new_batch(client, hr, run["id"], expect=422)  # H2: HR marked the line failed and cannot prepare the re-batch
+    assert {d["field"]: d["message"] for d in nope["error"]["details"]} == {"EMP001": "ALREADY_PAID", "MGR001": "FAILED_BY_YOU"}
+    again = await new_batch(client, payroll["admin"], run["id"])  # the failed line frees its payslip for somebody else
     assert [ln["user"]["employee_id"] for ln in again["lines"]] == ["MGR001"] and again["lines"][0]["amount"] == "36400.00"
+    assert again["lines"][0]["flags"] == ["PREVIOUSLY_FAILED"]
     assert [(x["user"]["employee_id"], x["reason"]) for x in again["blockers"]] == [("EMP001", "ALREADY_PAID")]
     assert again["reference"] == "PAY-2025-06-02"
 
@@ -552,7 +557,8 @@ async def test_a_line_that_pays_the_checker_blocks_the_whole_batch(client, payro
 async def test_checker_who_changed_a_line_employees_bank_recently_is_refused(client, payroll, uid, db, seeded):
     hr, admin = payroll["hr"], payroll["admin"]
     run, acct = await setup(client, payroll, uid, alert_days=30)
-    await set_bank(client, admin, uid["employee"], **OTHER_BANK)  # ADM001 changes EMP001's account after the publish
+    with recent_bank_changes():
+        await set_bank(client, admin, uid["employee"], **OTHER_BANK)  # ADM001 changes EMP001's account after the publish
     b = await new_batch(client, hr, run["id"])
     ln = b["lines"][0]
     assert set(ln["flags"]) >= {"BANK_DETAILS_CHANGED", "RECENT_BANK_CHANGE"} and ln["current"] == {

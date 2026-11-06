@@ -2,8 +2,9 @@
 
 Bank name, account number and IFSC are encrypted and IMMUTABLE (the database refuses a change except key rotation): to change one,
 create a new account. Only the label, the default flag and the active flag can change. Creating an account needs the step-up
-password and alerts the `role.assign` holders. The account number is always masked in responses; the unmasked value exists only in
-the bank file. Audit rows carry ids and field names only.
+password and alerts the `role.assign` holders (fixed text, no label); so does reactivating an account and every change of the default
+flag. Deactivating needs no step-up. The account number is always masked in responses; the unmasked value exists only in the bank
+file. Audit rows carry ids and field names only.
 """
 
 from __future__ import annotations
@@ -25,6 +26,8 @@ from . import admin_security
 from . import payroll_common as pc
 
 ENTITY = "company_bank_account"
+ALERT_ADDED = "A company bank account was added"  # fixed texts: the label is free text and never goes into a push
+ALERT_CHANGED = "The default or active state of a company bank account was changed"
 IN_USE_STATUSES = ("draft", "submitted", "approved")
 
 
@@ -82,10 +85,10 @@ async def create_account(session: AsyncSession, redis: Redis, actor: Principal, 
         raise pc.map_integrity(exc) from None
     audit(session, action="payroll.bank_account.create", actor=actor, entity_type=ENTITY, entity_id=a.id,
           after={"is_default": a.is_default})  # fmt: skip
-    label, aid = a.label, a.id
+    aid = a.id
 
     async def _alert() -> None:
-        await admin_security.notify_admins(session, entity_id=aid, title="Company bank account added", body=label)
+        await admin_security.notify_admins(session, entity_id=aid, title="Company bank account added", body=ALERT_ADDED)
 
     pc.after_commit(session, _alert)
     await pc.commit(session)
@@ -94,14 +97,27 @@ async def create_account(session: AsyncSession, redis: Redis, actor: Principal, 
 
 
 async def update_account(
-    session: AsyncSession, actor: Principal, account_id: uuid.UUID, body: BankAccountUpdate
+    session: AsyncSession, redis: Redis, actor: Principal, account_id: uuid.UUID, body: BankAccountUpdate
 ) -> dict[str, Any]:
+    peek = await session.get(CompanyBankAccount, account_id)
+    if peek is None:
+        raise AppError("NOT_FOUND", "Bank account not found")
+    reactivate = body.active is True and not peek.active
+    default_change = body.is_default is not None and body.is_default != peek.is_default
+    sensitive = reactivate or default_change  # which account pays the salaries is a payment control
+    if sensitive:  # step-up before any state check
+        await admin_security.require_reauth(session, redis, actor, body.current_password, action="payroll.bank_account.update")
     a = (
-        await session.execute(select(CompanyBankAccount).where(CompanyBankAccount.id == account_id).with_for_update())
+        await session.execute(
+            select(CompanyBankAccount)
+            .where(CompanyBankAccount.id == account_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
     ).scalar_one_or_none()
     if a is None:
         raise AppError("NOT_FOUND", "Bank account not found")
-    sent = sorted(body.model_fields_set)
+    sent = sorted(body.model_fields_set - {"current_password"})
     if body.active is False and a.active:
         used = (
             await session.execute(
@@ -127,6 +143,13 @@ async def update_account(
         a.is_default = body.is_default
     a.updated_by = actor.id
     audit(session, action="payroll.bank_account.update", actor=actor, entity_type=ENTITY, entity_id=a.id, after={"fields": sent})
+    aid = a.id
+    if sensitive:
+
+        async def _alert() -> None:
+            await admin_security.notify_admins(session, entity_id=aid, title="Company bank account changed", body=ALERT_CHANGED)
+
+        pc.after_commit(session, _alert)
     await pc.commit(session)
     await session.refresh(a)
     creator = await session.get(User, a.created_by)

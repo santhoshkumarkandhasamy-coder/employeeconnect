@@ -6,6 +6,10 @@ when the employee's current details differ, the line is flagged BANK_DETAILS_CHA
 
 * One live line per payslip (database partial unique); a revision pays only the DIFFERENCE to what the earlier copies were paid
   (paid and exported lines count as paid, a pending line of an earlier copy blocks); a negative difference is a RECOVERY blocker.
+  When an earlier copy's exported line is later confirmed FAILED the revision's delta no longer covers the net: the payslip becomes an
+  UNDERPAID_CHAIN blocker (and a PAYMENT_UNDERPAID dashboard alert) until somebody settles it outside the system. A payslip (or an
+  ancestor) with a failed line gets the PREVIOUSLY_FAILED flag on its next line; whoever marked a line failed (`failed_by`) can never
+  create, edit, submit or approve a batch that pays that payslip again.
 * Submit freezes the lines and stores `lines_mac` (HMAC, HKDF key of its own). Approve re-derives EVERY pending line from the live
   payslip and the current details and compares (409 BATCH_STALE), then compares the MAC; nothing is approved otherwise.
 * The file is rendered from the stored lines only (payroll_payment_file), the first download stores its SHA-256 and marks the batch
@@ -14,7 +18,9 @@ when the employee's current details differ, the line is flagged BANK_DETAILS_CHA
   never locks payment rows, so there is no cycle.
 * Maker-checker (service, database CHECKs and triggers, audit `maker_id` / `checker_id`): the checker is not the creator, last editor,
   submitter or anybody in `contributors`, is not paid by a line (403 FORBIDDEN for the whole batch) and did not change the bank
-  details of a line employee within `payroll.bank_change_alert_days`. Step-up before every state check.
+  details of a line employee within `payroll.bank_change_alert_days` (at least 7 days; every change of the append-only history
+  counts, not only the latest). Step-up before every state check. Approve and the first download re-check the value date and that
+  the debit account is still active. Only an `exported` batch can be downloaded again (an alert says so); a `closed` batch cannot.
 Audit rows, pushes, logs and errors carry ids, periods, references and counts only: never amounts, accounts, IFSC, names or comments.
 """
 
@@ -24,6 +30,7 @@ import datetime as dt
 import logging
 import uuid
 from dataclasses import dataclass
+from dataclasses import field as dc_field
 from decimal import Decimal
 from typing import Any
 
@@ -39,6 +46,7 @@ from ..core.pagination import PageParams, make_page
 from ..core.rbac import Principal
 from ..models import (
     CompanyBankAccount,
+    EmployeeBankChange,
     EmployeePayrollDetails,
     PayrollPaymentBatch,
     PayrollPaymentLine,
@@ -75,13 +83,14 @@ MAX_PUSH_TARGETS = 20
 PUSH_COALESCE_S = 600
 BLOCKERS = (
     "NO_BANK_DETAILS", "INVALID_ACCOUNT", "INVALID_IFSC", "NAME", "NOT_BANK_TRANSFER", "HELD", "ZERO_NET", "ALREADY_PAID",
-    "IN_OTHER_BATCH", "RECOVERY",
+    "IN_OTHER_BATCH", "RECOVERY", "UNDERPAID_CHAIN",
 )  # fmt: skip
 SETTING_FORMAT, SETTING_TYPE, SETTING_DAYS = (
     "payroll.bank_file_format",
     "payroll.bank_payment_type",
     "payroll.bank_change_alert_days",
 )
+MIN_ALERT_DAYS = pset.MIN_BANK_DAYS  # the look-back window is never shorter, whatever the setting holds (the database repeats it)
 
 
 def _bad(field: str, message: str, code: str = "VALIDATION_ERROR") -> AppError:
@@ -92,7 +101,11 @@ def _bad(field: str, message: str, code: str = "VALIDATION_ERROR") -> AppError:
 def _map_db(exc: IntegrityError) -> AppError:
     state = pc.sqlstate(exc)
     text_ = str(getattr(exc, "orig", exc))
-    if "ck_payroll_payment_batches_checker" in text_ or "recently changed the bank details" in text_:
+    if (
+        "ck_payroll_payment_batches_checker" in text_
+        or "recently changed the bank details" in text_
+        or "marked an earlier payment" in text_
+    ):
         return AppError("SECOND_PERSON_REQUIRED", "A different person must make this change")
     if "approver is paid by a line" in text_:
         return AppError("FORBIDDEN", "A batch that pays you cannot be approved by you")
@@ -179,7 +192,7 @@ def _acct(bank_name: str | None, account: str | None, ifsc: str | None) -> dict[
 
 def derive(
     ps: Payslip, det: EmployeePayrollDetails | None, user: User | None, *, chain_paid: Decimal, chain_pending: bool,
-    own_live: PayrollPaymentLine | None, now: dt.datetime, alert_days: int,
+    own_live: PayrollPaymentLine | None, now: dt.datetime, alert_days: int, previously_failed: bool = False,
 ) -> Derived | str:  # fmt: skip
     """The line a published payslip would produce, or the blocker code that prevents it."""
     snap, ident = ps.employee_snapshot or {}, ps.identity or {}
@@ -201,6 +214,8 @@ def derive(
     if not pf.bank_safe_name(name):
         return "NAME"
     if own_live is not None:
+        if own_live.status in ("paid", "exported") and calc.q2(chain_paid + Decimal(own_live.amount)) < net:
+            return "UNDERPAID_CHAIN"  # an earlier copy's exported line failed after this delta was computed
         return "ALREADY_PAID" if own_live.status == "paid" else "IN_OTHER_BATCH"
     if chain_pending:
         return "IN_OTHER_BATCH"
@@ -217,13 +232,15 @@ def derive(
         flags.append("BANK_DETAILS_CHANGED")
         cur = cur_acct
     changed_at = det.bank_changed_at if det is not None else None
-    if changed_at is not None and alert_days > 0 and as_utc(changed_at) > now - dt.timedelta(days=alert_days):
+    if changed_at is not None and as_utc(changed_at) > now - dt.timedelta(days=max(alert_days, MIN_ALERT_DAYS)):
         flags.append("RECENT_BANK_CHANGE")
     delta = ps.revision > 1 and chain_paid > 0
     if delta:
         flags.append("REVISION_DELTA")
     if not _norm(ident.get("pan")):
         flags.append("NO_PAN")
+    if previously_failed:
+        flags.append("PREVIOUSLY_FAILED")
     beneficiary = {
         "name": name, "snapshot": a, "current": cur, "changed_at": pc.iso(changed_at) if changed_at else None,
         "payslip_version": ps.version, "delta": delta,
@@ -243,6 +260,16 @@ class Ctx:
     lines: dict[uuid.UUID, list[PayrollPaymentLine]]  # payslip id -> live lines in ANY batch except `exclude_batch`
     now: dt.datetime
     alert_days: int
+    failed: dict[uuid.UUID, list[PayrollPaymentLine]] = dc_field(
+        default_factory=dict
+    )  # payslip id -> its failed lines (any batch)
+
+    def failed_lines(self, ps_id: uuid.UUID) -> list[PayrollPaymentLine]:
+        """Failed lines of the payslip and of every earlier copy of it."""
+        return [ln for pid in (ps_id, *self.ancestors.get(ps_id, [])) for ln in self.failed.get(pid, [])]
+
+    def failers(self, ps_id: uuid.UUID) -> set[uuid.UUID]:
+        return {ln.failed_by for ln in self.failed_lines(ps_id) if ln.failed_by is not None}
 
     def derive(self, ps: Payslip) -> Derived | str:
         mine = [ln for ln in self.lines.get(ps.id, []) if ln.status in LIVE_LINE]
@@ -255,7 +282,8 @@ class Ctx:
                 elif ln.status == "pending":
                     pending = True
         return derive(ps, self.details.get(ps.user_id), self.users.get(ps.user_id), chain_paid=paid, chain_pending=pending,
-                      own_live=own, now=self.now, alert_days=self.alert_days)  # fmt: skip
+                      own_live=own, now=self.now, alert_days=self.alert_days,
+                      previously_failed=bool(self.failed_lines(ps.id)))  # fmt: skip
 
 
 async def _context(
@@ -288,8 +316,13 @@ async def _context(
             lq = lq.where(PayrollPaymentLine.batch_id != exclude_batch)
         for ln in (await session.execute(lq)).scalars():
             lines.setdefault(ln.payslip_id, []).append(ln)
-    days = int(await pset.current_value(session, SETTING_DAYS))
-    return Ctx(run, live, users, details, ancestors, lines, utcnow(), days)
+    failed: dict[uuid.UUID, list[PayrollPaymentLine]] = {}
+    if ids:
+        fq = select(PayrollPaymentLine).where(PayrollPaymentLine.payslip_id.in_(ids), PayrollPaymentLine.status == "failed")
+        for ln in (await session.execute(fq)).scalars():
+            failed.setdefault(ln.payslip_id, []).append(ln)
+    days = max(int(await pset.current_value(session, SETTING_DAYS)), MIN_ALERT_DAYS)
+    return Ctx(run, live, users, details, ancestors, lines, utcnow(), days, failed)
 
 
 # ============================================================================================ lines
@@ -357,6 +390,13 @@ def _stale_details(items: list[tuple[PayrollPaymentLine, str]]) -> AppError:
         "BATCH_STALE", "Payslips or bank details changed since the lines were prepared; withdraw, refresh and submit again",
         details=[{"field": f"lines[{ln.seq}]", "message": reason} for ln, reason in items],
     )  # fmt: skip
+
+
+def _guard_failer(ctx: Ctx, actor: Principal, lines: list[PayrollPaymentLine]) -> None:
+    """Whoever confirmed an earlier payment of a payslip (or of an earlier copy) failed cannot prepare, submit or approve the re-batch."""
+    for ln in lines:
+        if ln.status != "excluded" and actor.id in ctx.failers(ln.payslip_id):
+            raise AppError("SECOND_PERSON_REQUIRED", "You marked an earlier payment of an employee in this batch as failed")
 
 
 # ============================================================================================ access / output
@@ -496,6 +536,11 @@ def _check_value_date(value: dt.date, today: dt.date) -> None:
         raise _bad("value_date", "from today up to 30 days ahead", "INVALID_DATE")
 
 
+def _check_value_date_not_past(value: dt.date, today: dt.date) -> None:
+    if value < today:
+        raise _bad("value_date", "the value date has passed; cancel this batch and make a new one", "INVALID_DATE")
+
+
 async def _debit_account(session: AsyncSession, account_id: uuid.UUID | None) -> CompanyBankAccount:
     q = select(CompanyBankAccount).where(CompanyBankAccount.active.is_(True))
     q = q.where(CompanyBankAccount.id == account_id) if account_id else q.where(CompanyBankAccount.is_default.is_(True))
@@ -535,6 +580,8 @@ async def create_batch(session: AsyncSession, actor: Principal, run_id: uuid.UUI
         if scope is not None and uid not in scope:
             continue
         d = ctx.derive(ps)
+        if not isinstance(d, str) and actor.id in ctx.failers(ps.id):
+            d = "FAILED_BY_YOU"  # a different person must prepare the re-batch of a payment this caller marked failed
         if isinstance(d, str):
             blockers.append({"user": pc.user_out(ctx.users.get(uid)), "payslip_id": str(ps.id), "reason": d})
         else:
@@ -685,6 +732,7 @@ async def update_batch(session: AsyncSession, actor: Principal, batch_id: uuid.U
     await _flush(session)
     fresh, refreshed = await _refresh(session, actor, b, lines, ctx)
     lines = lines + fresh
+    _guard_failer(ctx, actor, lines)
     b.last_edited_by, b.version, b.updated_by = actor.id, b.version + 1, actor.id
     _touch(b, actor.id)
     await _flush(session)
@@ -755,6 +803,7 @@ async def submit_batch(
     ]
     if stale:
         raise _stale_details(stale)
+    _guard_failer(ctx, actor, pending)
     _check_value_date(b.value_date, await _today(session))
     now = utcnow()
     b.status, b.submitted_by, b.submitted_at = "submitted", actor.id, now
@@ -809,17 +858,14 @@ async def _gate(
         raise await pc.deny(session, actor, entity_type=ENTITY, entity_id=b.id, reason="self")
     if _is_party(actor.id, b):
         raise AppError("SECOND_PERSON_REQUIRED", "A different person must decide a batch you prepared or submitted")
-    if paid_check:
-        days = int(await pset.current_value(session, SETTING_DAYS))
-        if days > 0 and live:
-            since = utcnow() - dt.timedelta(days=days)
-            q = select(EmployeePayrollDetails).where(
-                EmployeePayrollDetails.user_id.in_([ln.user_id for ln in live]),
-                EmployeePayrollDetails.bank_changed_by == actor.id,
-            )
-            for d in (await session.execute(q)).scalars():
-                if d.bank_changed_at is not None and as_utc(d.bank_changed_at) > since:
-                    raise AppError("SECOND_PERSON_REQUIRED", "You changed the bank details of an employee in this batch recently")
+    if paid_check and live:
+        days = max(int(await pset.current_value(session, SETTING_DAYS)), MIN_ALERT_DAYS)
+        since = utcnow() - dt.timedelta(days=days)
+        q = select(EmployeeBankChange.changed_at).where(
+            EmployeeBankChange.user_id.in_([ln.user_id for ln in live]), EmployeeBankChange.changed_by == actor.id
+        )  # the whole append-only history: an earlier change counts even after somebody else changed the details again
+        if any(as_utc(at) > since for at in (await session.execute(q)).scalars()):
+            raise AppError("SECOND_PERSON_REQUIRED", "You changed the bank details of an employee in this batch recently")
 
 
 async def reject_batch(session: AsyncSession, actor: Principal, batch_id: uuid.UUID, body: PaymentBatchReject) -> dict[str, Any]:
@@ -846,6 +892,15 @@ async def reject_batch(session: AsyncSession, actor: Principal, batch_id: uuid.U
     return await _one(session, batch_id)
 
 
+async def _recheck_payable(session: AsyncSession, b: PayrollPaymentBatch) -> CompanyBankAccount | None:
+    """Approve and the first download: the value date must still be today or later and the debit account still active."""
+    _check_value_date_not_past(b.value_date, await _today(session))
+    acct = await session.get(CompanyBankAccount, b.debit_account_id)
+    if acct is None or not acct.active:
+        raise _bad("debit_account_id", "the debit account is no longer active; choose another and submit again")
+    return acct
+
+
 async def approve_batch(
     session: AsyncSession, redis: Redis, actor: Principal, batch_id: uuid.UUID, body: PaymentBatchApprove
 ) -> dict[str, Any]:
@@ -860,8 +915,10 @@ async def approve_batch(
         raise AppError("VERSION_CONFLICT", "The batch was changed meanwhile; reload it")
     if run.status != "published":
         raise AppError("PAYROLL_LOCKED", "The run is not published")
+    await _recheck_payable(session, b)
     pending = [ln for ln in lines if ln.status == "pending"]
     ctx = await _context(session, run, exclude_batch=b.id, lock_share=True)  # payslips and details share-locked
+    _guard_failer(ctx, actor, pending)
     stale = [
         (ln, r)
         for ln in pending
@@ -931,9 +988,13 @@ async def download_file(
     run, b = await _draft_for_edit(session, actor, batch_id, None)
     lines = await _lines_of(session, b.id, lock=True)
     acct = await session.get(CompanyBankAccount, b.debit_account_id)
-    if b.status not in ("approved", "exported", "closed"):
+    if b.status == "closed":
+        raise AppError("BATCH_CLOSED", "The batch is closed; its file can no longer be downloaded")
+    if b.status not in ("approved", "exported"):
         raise AppError("NOT_APPROVED", "The batch must be approved before the file can be downloaded")
     first = b.status == "approved"
+    if first:
+        acct = await _recheck_payable(session, b)
     try:
         if first:
             if b.lines_mac != lines_mac(b, lines):
@@ -963,15 +1024,16 @@ async def download_file(
         _audit(session, actor, "payroll.payment_batch.export", b, run, lines, file_sha256=digest)
     else:
         if digest != b.file_sha256:
-            audit(session, action="payroll.payment_batch.download", actor=actor, entity_type=ENTITY, entity_id=b.id,
+            audit(session, action="payroll.payment_batch.redownload", actor=actor, entity_type=ENTITY, entity_id=b.id,
                   outcome="failure", after={"reference": b.reference, "reason": "file_changed"})  # fmt: skip
             await pc.commit(session)
             raise AppError("CONFLICT", "The stored lines no longer reproduce the exported file; contact an administrator")
-        _audit(session, actor, "payroll.payment_batch.download", b, run, lines, file_sha256=digest)
+        _audit(session, actor, "payroll.payment_batch.redownload", b, run, lines, file_sha256=digest)
     ref, bid = b.reference, b.id
+    title = "Bank file downloaded" if first else "Bank file downloaded again"
 
     async def _alert() -> None:
-        await admin_security.notify_admins(session, entity_id=bid, title="Bank file downloaded", body=f"{ref}: {count} lines")
+        await admin_security.notify_admins(session, entity_id=bid, title=title, body=f"{ref}: {count} lines")
 
     pc.after_commit(session, _alert)
     await _commit(session)
@@ -1014,11 +1076,16 @@ async def confirm_batch(
                 chosen[ln.id] = ("paid", body.reference)
     if not chosen:
         raise AppError("CONFLICT", "No line is waiting for confirmation")
+    for (
+        lid
+    ) in chosen:  # nobody confirms (least of all fails) a payment to themselves: a failed line frees the slot to be paid again
+        await pc.forbid_self(session, actor, by_id[lid].user_id, entity_type=ENTITY, entity_id=b.id)
     paid = failed = 0
     for lid, (status, ref) in chosen.items():
         ln = by_id[lid]
         ln.status, ln.reference, ln.version, ln.updated_by = status, ref, ln.version + 1, actor.id
         ln.paid_on = body.paid_on if status == "paid" else None
+        ln.failed_by = actor.id if status == "failed" else None
         paid += status == "paid"
         failed += status == "failed"
     await _flush(session)  # lines first: they are final under an exported batch
@@ -1034,7 +1101,8 @@ async def confirm_batch(
 
 # ============================================================================================ dashboard
 async def dashboard_alerts(session: AsyncSession, run: PayrollRun | None, today: dt.date) -> list[str]:
-    """PAYMENT_NOT_EXPORTED (published run, pay date passed, a payable payslip has no exported / paid line) and PAYMENT_FAILED_LINES."""
+    """PAYMENT_NOT_EXPORTED (published run, pay date passed, a payable payslip has no exported / paid line), PAYMENT_FAILED_LINES and
+    PAYMENT_UNDERPAID (an earlier copy's exported line failed after a revision delta was paid: the employee got less than the net)."""
     if run is None or run.status != "published":
         return []
     alerts: list[str] = []
@@ -1046,8 +1114,10 @@ async def dashboard_alerts(session: AsyncSession, run: PayrollRun | None, today:
     ).first()  # fmt: skip
     if failed:
         alerts.append("PAYMENT_FAILED_LINES")
+    ctx = await _context(session, run)
+    if any(ctx.derive(ps) == "UNDERPAID_CHAIN" for ps in ctx.live.values()):
+        alerts.append("PAYMENT_UNDERPAID")
     if run.pay_date is not None and today >= run.pay_date:
-        ctx = await _context(session, run)
         for ps in ctx.live.values():
             if any(ln.status in ("exported", "paid") for ln in ctx.lines.get(ps.id, [])):
                 continue

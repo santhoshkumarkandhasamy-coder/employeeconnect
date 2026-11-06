@@ -25,6 +25,7 @@ NEW_TABLES = (
     "company_bank_accounts",
     "payroll_payment_batches",
     "payroll_payment_lines",
+    "employee_bank_changes",
 )
 
 
@@ -58,19 +59,25 @@ def test_chain_and_reversible():
         "payroll_publish_requests_lock",
         "payroll_publish_requests_tagged",
         "payroll_publish_requests_checker_guard",
+        "employee_bank_changes_append_only",
+        "payroll_payslip_failed_by",
         "payslip_deliveries_lock",
         "payroll_payment_batches_lock",
         "payroll_payment_batches_consistency",
         "payroll_payment_lines_lock",
     ):
-        assert sum(s.startswith(f"CREATE FUNCTION {fn}()") for s in up) == 1, fn
-        assert f"DROP FUNCTION IF EXISTS {fn}();" in mod.DOWNGRADE, fn
+        assert sum(s.startswith(f"CREATE FUNCTION {fn}(") for s in up) == 1, fn
+        assert f"DROP FUNCTION IF EXISTS {fn}(" in mod.DOWNGRADE, fn
     assert sum(s.startswith("DO $$") for s in up) == 1 and sum(s.startswith("DO $$") for s in down) == 1
     assert not any(s.startswith(("BEGIN", "DECLARE", "IF ")) for s in up + down)
     d = mod.DOWNGRADE
     # the guard runs first; dependants go before what they reference
     assert d.lstrip().startswith("DO $$") and "cannot downgrade 0026" in d
-    assert "status IN ('submitted','approved')" in d and "status NOT IN ('draft','cancelled')" in d
+    # L6: the guarded downgrade refuses while ANY publish request, delivery, batch or line exists
+    guard = d.split("$$;")[0]
+    for t in ("payroll_publish_requests", "payslip_deliveries", "payroll_payment_batches", "payroll_payment_lines"):
+        assert f"EXISTS (SELECT 1 FROM {t})" in guard, t
+    assert "WHERE status" not in guard
     for t in NEW_TABLES:
         assert f"DROP TABLE IF EXISTS {t};" in d, t
     assert d.index("DROP TABLE IF EXISTS payroll_payment_lines") < d.index("DROP TABLE IF EXISTS payroll_payment_batches")
@@ -188,7 +195,13 @@ def test_payment_batches_and_lines():
         "submitting clears an earlier decision",
         "l.status = 'pending'",  # nothing to submit
         "l.user_id = NEW.decided_by",  # the approver is paid by the batch
-        "d.bank_changed_by = NEW.decided_by",  # recent bank change by the approver
+        "h.changed_by = NEW.decided_by",  # M5: ANY recent bank change of the history by the approver
+        "JOIN employee_bank_changes h ON h.user_id = l.user_id",
+        "GREATEST(COALESCE(",  # H1: the look-back window has a floor of 7 days in the database too
+        "), 7) INTO alert_days",
+        "payroll_payslip_failed_by(l.payslip_id, NEW.decided_by)",  # H2: whoever failed the payment cannot approve the re-batch
+        "payroll_payslip_failed_by(l.payslip_id, NEW.submitted_by)",  # ... nor submit it
+        "the debit account must be active",  # L4
         "payroll.bank_change_alert_days",
         "ARRAY['status','exported_by','exported_at','file_sha256']",
         "j_new IS DISTINCT FROM j_old",
@@ -202,7 +215,10 @@ def test_payment_batches_and_lines():
         "payslip_id uuid NOT NULL REFERENCES payslips(id) ON DELETE RESTRICT",
         "amount_enc bytea NOT NULL",
         "beneficiary_enc bytea NOT NULL",
-        "'BANK_DETAILS_CHANGED','RECENT_BANK_CHANGE','REVISION_DELTA','NO_PAN'",
+        "'BANK_DETAILS_CHANGED','RECENT_BANK_CHANGE','REVISION_DELTA','NO_PAN','PREVIOUSLY_FAILED'",
+        "failed_by uuid REFERENCES users(id) ON DELETE RESTRICT",
+        "CONSTRAINT ck_payroll_payment_lines_failed_by CHECK ((status = 'failed') = (failed_by IS NOT NULL))",
+        "CONSTRAINT ck_payroll_payment_lines_failed_self CHECK (failed_by IS NULL OR failed_by <> user_id)",
         "CHECK (status IN ('pending','excluded','exported','paid','failed'))",
         "CHECK (account_source = 'snapshot' OR 'BANK_DETAILS_CHANGED' = ANY (flags))",
     ):
@@ -218,7 +234,8 @@ def test_payment_batches_and_lines():
         "NEW.batch_id IS DISTINCT FROM OLD.batch_id OR NEW.payslip_id IS DISTINCT FROM OLD.payslip_id OR NEW.user_id IS DISTINCT FROM OLD.user_id",
         "('pending>excluded','excluded>pending','pending>exported','exported>paid','exported>failed')",
         "ARRAY['status','amount_enc','beneficiary_enc','flags','account_source']",
-        "ARRAY['status','reference_enc','paid_on']",
+        "ARRAY['status','reference_enc','paid_on','failed_by']",
+        "payroll_payslip_failed_by(NEW.payslip_id, NEW.updated_by)",
         "j_new IS DISTINCT FROM j_old",
     ):
         assert needle in ll, needle
@@ -247,6 +264,12 @@ def test_delivery_accounts_and_details_marker():
     g = up.split("CREATE FUNCTION employee_payroll_details_bank_guard")[1].split("$$;")[0]
     assert "NEW.bank_changed_at IS NULL OR NEW.bank_changed_by IS NULL OR NEW.bank_changed_at < OLD.bank_changed_at" in g
     assert "NEW.payment_mode IS DISTINCT FROM OLD.payment_mode" in g and "app.key_rotation" in g
+    # L5: BEFORE INSERT too (bank data on insert), and every bank change needs a strictly newer marker
+    assert "BEFORE INSERT OR UPDATE ON employee_payroll_details" in up and "TG_OP = 'INSERT'" in g
+    assert "NEW.bank_changed_at <= OLD.bank_changed_at" in g
+    # M1: the history is written by the same trigger and is append-only
+    assert "INSERT INTO employee_bank_changes" in g and "BEFORE UPDATE OR DELETE ON employee_bank_changes" in up
+    assert "REVOKE DELETE, TRUNCATE ON employee_bank_changes FROM app_user" in up
 
 
 def test_events_and_settings():
@@ -258,7 +281,6 @@ def test_events_and_settings():
 
     expected = {
         "payroll.publish_request_ttl_hours": ("72", 72),
-        "payroll.bank_file_requires_second_person": ("true", True),
         "payroll.bank_file_format": ('"generic_neft_csv"', "generic_neft_csv"),
         "payroll.bank_payment_type": ('"NEFT"', "NEFT"),
         "payroll.bank_change_alert_days": ("30", 30),
@@ -268,19 +290,22 @@ def test_events_and_settings():
         assert key in mod.DOWNGRADE, key
         assert pset.DEFAULTS[key] == py and type(pset.DEFAULTS[key]) is type(py), key
     assert pset.validate("payroll.publish_request_ttl_hours", 1) == 1 and pset.validate("payroll.publish_request_ttl_hours", 336) == 336
-    assert pset.validate("payroll.bank_change_alert_days", 0) == 0 and pset.validate("payroll.bank_change_alert_days", 90) == 90
+    assert pset.validate("payroll.bank_change_alert_days", 7) == 7 and pset.validate("payroll.bank_change_alert_days", 90) == 90
+    assert "bank_file_requires_second_person" not in up and "bank_file_requires_second_person" not in mod.DOWNGRADE  # L1
+    assert "payroll.bank_file_requires_second_person" not in pset.DEFAULTS
     assert pset.validate("payroll.bank_payment_type", "RTGS") == "RTGS"
-    assert pset.validate("payroll.bank_file_requires_second_person", False) is False
     from app.core.errors import AppError
 
     for key, bad in (
         ("payroll.publish_request_ttl_hours", 0),
         ("payroll.publish_request_ttl_hours", 337),
         ("payroll.bank_change_alert_days", -1),
+        ("payroll.bank_change_alert_days", 0),
+        ("payroll.bank_change_alert_days", 6),
         ("payroll.bank_change_alert_days", 91),
         ("payroll.bank_payment_type", "UPI"),
         ("payroll.bank_file_format", "swift"),
-        ("payroll.bank_file_requires_second_person", "yes"),
+        ("payroll.bank_file_requires_second_person", False),
         ("payroll.bank_change_alert_days", True),
     ):
         with pytest.raises(AppError):

@@ -31,8 +31,11 @@ PREFIX = "payroll."
 SECOND_PERSON_KEY = "payroll.publish_requires_second_person"
 SECOND_PERSON_PERMISSION = "role.assign"  # the maker-checker switch is an admin-level control, not a payroll.manage one
 APPROVAL_KEY = "payroll.structure_changes_need_approval"  # plan 16 F2: same control level as the second-person switch
-BANK_SECOND_PERSON_KEY = "payroll.bank_file_requires_second_person"  # plan 17 B1
-GUARDED_KEYS = (SECOND_PERSON_KEY, APPROVAL_KEY, BANK_SECOND_PERSON_KEY)  # change needs role.assign AND the caller's own password
+BANK_DAYS_KEY = (
+    "payroll.bank_change_alert_days"  # plan 17: the look-back window of the bank change control; a short one weakens it
+)
+MIN_BANK_DAYS = 7  # the floor, also applied by the service and the database trigger whatever is stored
+GUARDED_KEYS = (SECOND_PERSON_KEY, APPROVAL_KEY, BANK_DAYS_KEY)  # change needs role.assign AND the caller's own password
 MAX_SLABS = 20
 MAX_CATEGORIES = 20
 _CATEGORY_CODE = re.compile(r"^[a-z][a-z0-9_]{1,19}$")
@@ -112,7 +115,6 @@ DEFAULTS: dict[str, Any] = {
     "payroll.notice_recovery_divisor": 30,
     # plan 17, work package 5a (publish requests, bank payment file)
     "payroll.publish_request_ttl_hours": 72,
-    "payroll.bank_file_requires_second_person": True,
     "payroll.bank_file_format": "generic_neft_csv",
     "payroll.bank_payment_type": "NEFT",
     "payroll.bank_change_alert_days": 30,
@@ -140,7 +142,6 @@ _BOOLS = {
     "payroll.overtime_include_auto_closed",
     APPROVAL_KEY,
     "payroll.ctc_include_gratuity",
-    "payroll.bank_file_requires_second_person",
 }
 _NUMBERS = {  # key -> (min, max), at most 2 decimals
     "payroll.pf_employee_rate_pct": (0, 20),
@@ -170,7 +171,7 @@ _INTS = {  # key -> (min, max), whole numbers
     "payroll.notice_period_days": (0, 365),
     "payroll.notice_recovery_divisor": (1, 31),
     "payroll.publish_request_ttl_hours": (1, 336),
-    "payroll.bank_change_alert_days": (0, 90),
+    "payroll.bank_change_alert_days": (MIN_BANK_DAYS, 90),
 }
 _TEXTS = {"payroll.company_address": (0, 300), "payroll.payslip_footer": (0, 200)}
 
@@ -359,9 +360,9 @@ async def update(
     redis: Redis,
     current_password: SecretStr | None = None,
 ) -> dict[str, Any]:
-    """Merge validated settings. Changing `payroll.publish_requires_second_person` or `payroll.structure_changes_need_approval`
-    (either direction) additionally needs the `role.assign` permission AND the caller's own password (`current_password`);
-    other keys do not. A change of the approval switch alerts the `role.assign` holders after the commit."""
+    """Merge validated settings. Changing `payroll.publish_requires_second_person`, `payroll.structure_changes_need_approval` or
+    `payroll.bank_change_alert_days` (either direction) additionally needs the `role.assign` permission AND the caller's own password (`current_password`);
+    other keys do not. A change of the approval switch or of the bank change window alerts the `role.assign` holders after the commit."""
     changes = {k: validate(k, v) for k, v in changes.items()}
     guarded = [k for k in GUARDED_KEYS if k in changes and changes[k] != await current_value(session, k)]
     if guarded:
@@ -400,9 +401,9 @@ async def update(
             session, entity_id=actor.id, title="Payroll control changed",
             body=f"{actor.user.full_name} ({actor.employee_id}) changed the salary approval rule.",
         )  # fmt: skip
-    if BANK_SECOND_PERSON_KEY in guarded:
+    if BANK_DAYS_KEY in guarded:
         await admin_security.notify_admins(
             session, entity_id=actor.id, title="Payroll control changed",
-            body=f"{actor.user.full_name} ({actor.employee_id}) changed the bank file approval rule.",
+            body=f"{actor.user.full_name} ({actor.employee_id}) changed the bank detail change window.",
         )  # fmt: skip
     return await read_all(session)

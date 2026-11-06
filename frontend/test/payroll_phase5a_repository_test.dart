@@ -162,6 +162,8 @@ void main() {
     expect(a.calls.last.body, {'active': false});
     await repo.updateBankAccount('ba1', label: ' New ', isDefault: true);
     expect(a.calls.last.body, {'label': 'New', 'is_default': true});
+    await repo.updateBankAccount('ba1', isDefault: true, currentPassword: 'pw'); // a default change is stepped up
+    expect(a.calls.last.body, {'is_default': true, 'current_password': 'pw'});
   });
 
   test('payment batches: create, list, edit, submit, approve, reject, cancel, confirm', () async {

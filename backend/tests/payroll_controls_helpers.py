@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime as dt
+from contextlib import contextmanager
+from unittest.mock import patch
 
 import pytest
 
@@ -41,6 +43,23 @@ def quiet(monkeypatch):
     monkeypatch.setattr(admin_security, "REAUTH_PER_DAY", 10_000)
     monkeypatch.setattr("app.services.payroll_runs._today", today)
     monkeypatch.setattr("app.services.payroll_payments.utcnow", lambda: TODAY)
+    # bank detail changes are stamped a year ago (one second apart), i.e. outside the look-back window; `recent_bank_changes()` undoes it
+    clock = {"t": TODAY - dt.timedelta(days=400)}
+
+    def old_now():
+        clock["t"] += dt.timedelta(seconds=1)
+        return clock["t"]
+
+    monkeypatch.setattr("app.services.payroll_structures.utcnow", old_now)
+
+
+@contextmanager
+def recent_bank_changes():
+    """Bank detail changes inside the block are stamped 'now' (real clock, later than the patched TODAY): inside the look-back window."""
+    from app.core.clock import utcnow as real_now
+
+    with patch("app.services.payroll_structures.utcnow", real_now):
+        yield
 
 
 async def extra_user(client, db, seeded, employee_id: str, role: str = "admin", *, on_payroll: bool = False) -> tuple[User, dict]:
@@ -110,14 +129,28 @@ async def set_bank(client, hdr, user_id, expect=200, **over):
 
 async def published_run(client, payroll, uid, *, alert_days: int = 0, banks: tuple[str, ...] = ("employee", "manager")):
     """EMP001 and MGR001 get bank details, the run is processed and published (maker-checker for publish off). Returns the run."""
-    from tests.payroll_fixtures import new_run, process_and_publish, set_setting
+    from tests.payroll_fixtures import new_run, process_and_publish
 
-    await set_setting(client, payroll["hr"], bank_change_alert_days=alert_days)
-    for who in banks:
-        await set_bank(client, payroll["hr"], uid[who])
+    if (
+        alert_days
+    ):  # default: markers are old and the setting stays at its default (30); the minimum is 7 and it is a guarded setting
+        r = await client.put(
+            f"{ADMIN}/settings",
+            json={"settings": {"payroll.bank_change_alert_days": alert_days}, "current_password": PASSWORD},
+            headers=payroll["admin"],
+        )
+        assert r.status_code == 200, r.text
+    with recent_bank_changes() if alert_days else _nothing():
+        for who in banks:
+            await set_bank(client, payroll["hr"], uid[who])
     run = await new_run(client, payroll["hr"])
     await process_and_publish(client, payroll["hr"], run["id"])
     return run
+
+
+@contextmanager
+def _nothing():
+    yield
 
 
 async def new_account(client, hdr, expect=201, **over):

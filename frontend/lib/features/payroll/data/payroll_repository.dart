@@ -1166,11 +1166,19 @@ class PayrollRepository {
       BankAccount.fromJson(await _json('POST', '$_a/bank-accounts', body: input.toJson(currentPassword)));
 
   /// Only the provided fields are sent; the account number and IFSC cannot change.
-  Future<BankAccount> updateBankAccount(String id, {String? label, bool? isDefault, bool? active}) async =>
+  /// Reactivating an account and changing the default flag need [currentPassword] (step-up, never kept).
+  Future<BankAccount> updateBankAccount(
+    String id, {
+    String? label,
+    bool? isDefault,
+    bool? active,
+    String? currentPassword,
+  }) async =>
       BankAccount.fromJson(await _json('PUT', '$_a/bank-accounts/$id', body: {
         if (label != null) 'label': label.trim(),
         if (isDefault != null) 'is_default': isDefault,
         if (active != null) 'active': active,
+        if (currentPassword != null) 'current_password': currentPassword,
       },),);
 
   // ---- phase 5a: payment batches (19.5) ----------------------------------------------------

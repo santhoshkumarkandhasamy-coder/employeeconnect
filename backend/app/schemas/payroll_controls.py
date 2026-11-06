@@ -108,6 +108,7 @@ class BankAccountUpdate(_Strict):
     label: str | None = None
     is_default: bool | None = None
     active: bool | None = None
+    current_password: SecretStr | None = Field(default=None, min_length=1, max_length=128)  # step-up: reactivate / default change
 
     @field_validator("label")
     @classmethod
@@ -116,7 +117,8 @@ class BankAccountUpdate(_Strict):
 
     @model_validator(mode="after")
     def _some(self) -> BankAccountUpdate:
-        if not self.model_fields_set:
+        sent = self.model_fields_set - {"current_password"}
+        if not sent:
             raise ValueError("send at least one field")
         if any(getattr(self, f) is None for f in self.model_fields_set):
             raise ValueError("fields cannot be null")

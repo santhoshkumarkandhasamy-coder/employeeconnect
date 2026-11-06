@@ -225,7 +225,7 @@ async def update_bank_account(
     actor: Principal = Depends(MANAGE),
 ):
     await _write(redis, actor)
-    return await payroll_bank_accounts.update_account(session, actor, account_id, body)
+    return await payroll_bank_accounts.update_account(session, redis, actor, account_id, body)
 
 
 # ============================================================================================ 19.5 payment batches

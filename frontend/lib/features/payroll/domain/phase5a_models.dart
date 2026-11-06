@@ -30,7 +30,8 @@ EmployeeRef _user(Object? v) =>
 
 // ---- settings keys ------------------------------------------------------------------------
 
-const String bankFileSecondPersonKey = 'payroll.bank_file_requires_second_person';
+/// Needs role.assign + the caller's password (19.10): a short window would switch the bank change control off (minimum 7 days).
+const String bankChangeAlertDaysKey = 'payroll.bank_change_alert_days';
 
 // ---- publish requests (19.2) --------------------------------------------------------------
 
@@ -575,6 +576,7 @@ const Map<String, String> lineFlagLabels = {
   'RECENT_BANK_CHANGE': 'Bank details changed recently',
   'REVISION_DELTA': 'Pays only the difference of a revised payslip',
   'NO_PAN': 'No PAN on record',
+  'PREVIOUSLY_FAILED': 'An earlier bank payment for this payslip failed',
 };
 
 String lineFlagLabel(String f) => lineFlagLabels[f] ?? f;
@@ -590,6 +592,9 @@ const Map<String, String> blockerLabels = {
   'ALREADY_PAID': 'Already paid',
   'IN_OTHER_BATCH': 'Already in another payment batch',
   'RECOVERY': 'The revised payslip is lower than what was paid (recover separately)',
+  'UNDERPAID_CHAIN':
+      'An earlier payment for this employee failed after the revised payslip was paid, so they received less than their net pay. Settle it outside the app',
+  'FAILED_BY_YOU': 'You marked an earlier payment for this employee as failed. A different person must make this batch',
 };
 
 String blockerLabel(String r) => blockerLabels[r] ?? r;
@@ -1016,6 +1021,8 @@ String phase5ErrorMessage(ApiException e) {
     case 'IN_USE':
       return 'This account is used by a payment batch that is still a draft, waiting or approved. '
           'Cancel or finish that batch first.';
+    case 'BATCH_CLOSED':
+      return 'This batch is closed, so its payment file can no longer be downloaded.';
     case 'TOO_MANY_ROWS':
       return 'A payment batch can have at most $maxBatchLines lines. Choose fewer employees.';
     case 'INVALID_DATE':
@@ -1023,7 +1030,8 @@ String phase5ErrorMessage(ApiException e) {
           'and not before the day the file was downloaded.';
     case 'SECOND_PERSON_REQUIRED':
       return 'A different person must do this. You asked for it, made, edited or submitted it, '
-          'or recently changed the bank details of someone paid by it, so you cannot approve or reject it.';
+          'recently changed the bank details of someone paid by it, or marked an earlier payment of one of its '
+          'employees as failed, so you cannot do this step.';
     case 'FORBIDDEN':
       return 'You cannot decide on your own pay. A different person must do this.';
     case 'CONFLICT':
@@ -1055,4 +1063,6 @@ const Map<String, String> phase5AlertText = {
   'PUBLISH_PENDING_APPROVAL': 'A publish request is waiting for approval.',
   'PAYMENT_NOT_EXPORTED': 'The pay date has passed and the salary has not been sent to the bank yet (no payment file downloaded).',
   'PAYMENT_FAILED_LINES': 'Some bank payments failed. Check the payment batches and pay them again.',
+  'PAYMENT_UNDERPAID':
+      'An employee received less than their net pay because an earlier bank payment failed after a revised payslip was paid. Settle the difference outside the app.',
 };

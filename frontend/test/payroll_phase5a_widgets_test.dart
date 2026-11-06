@@ -54,6 +54,7 @@ class Fake5a extends FakeRepo {
   ApiException? accountError;
   final accountCreates = <Map<String, Object?>>[];
   final accountUpdates = <Map<String, Object?>>[];
+  final accountPasswords = <String?>[];
   DeliveryPage deliveryPage = DeliveryPage.fromJson({
     'counts': {'published': 3, 'pushed': 3, 'viewed': 1, 'downloaded': 0, 'no_device': 1},
     'items': [
@@ -233,8 +234,15 @@ class Fake5a extends FakeRepo {
   }
 
   @override
-  Future<BankAccount> updateBankAccount(String id, {String? label, bool? isDefault, bool? active}) async {
+  Future<BankAccount> updateBankAccount(
+    String id, {
+    String? label,
+    bool? isDefault,
+    bool? active,
+    String? currentPassword,
+  }) async {
     accountUpdates.add({'id': id, 'label': label, 'is_default': isDefault, 'active': active});
+    accountPasswords.add(currentPassword);
     if (accountError != null) throw accountError!;
     return accounts.first;
   }
@@ -837,6 +845,15 @@ void main() {
       expect(find.textContaining('still a draft, waiting or approved'), findsOneWidget);
     });
 
+    testWidgets('making an account the default asks for the password', (tester) async {
+      final repo = Fake5a()..accounts = [_account(), _account(id: 'ba2', isDefault: false)];
+      await pumpPayroll(tester, const Scaffold(body: BankAccountsSection()), repo: repo, perms: _manage);
+      await _tap(tester, 'bank-default-ba2');
+      await _password(tester, 'secret');
+      expect(repo.accountUpdates.single['is_default'], true);
+      expect(repo.accountPasswords.single, 'secret');
+    });
+
     testWidgets('a viewer sees accounts but no actions', (tester) async {
       final repo = Fake5a()..accounts = [_account()];
       await pumpPayroll(tester, const Scaffold(body: BankAccountsSection()), repo: repo, perms: const ['payroll.view_all']);
@@ -985,21 +1002,27 @@ void main() {
   group('settings and dashboard', () {
     Map<String, Object?> s5() => {
           'payroll.publish_request_ttl_hours': 72,
-          'payroll.bank_file_requires_second_person': true,
           'payroll.bank_file_format': 'generic_neft_csv',
           'payroll.bank_payment_type': 'NEFT',
           'payroll.bank_change_alert_days': 30,
         };
 
-    testWidgets('the bank file switch is locked without role.assign', (tester) async {
+    testWidgets('the removed bank file switch is not on the settings tab', (tester) async {
       final repo = Fake5a()..settingsMap = s5();
       await pumpPayroll(tester, const Scaffold(body: PayrollSettingsTab()), repo: repo, perms: _manage);
-      final tile = find.widgetWithText(SwitchListTile, 'A different person must approve the bank payment file');
-      expect(tester.widget<SwitchListTile>(tile).onChanged, isNull);
+      expect(find.text('A different person must approve the bank payment file'), findsNothing);
+      expect(find.textContaining('bank payment file'), findsNothing);
+    });
+
+    testWidgets('the bank change window is locked without role.assign', (tester) async {
+      final repo = Fake5a()..settingsMap = s5();
+      await pumpPayroll(tester, const Scaffold(body: PayrollSettingsTab()), repo: repo, perms: _manage);
+      final field = find.widgetWithText(TextFormField, 'Flag bank detail changes made in the last');
+      expect(tester.widget<TextField>(find.descendant(of: field, matching: find.byType(TextField))).enabled, isFalse);
       expect(find.text('Only an administrator can change this.'), findsOneWidget);
     });
 
-    testWidgets('an administrator flips it with the password', (tester) async {
+    testWidgets('an administrator changes the bank change window with the password; below 7 is refused', (tester) async {
       final repo = Fake5a()..settingsMap = s5();
       await pumpPayroll(
         tester,
@@ -1007,13 +1030,18 @@ void main() {
         repo: repo,
         perms: [..._manage, 'role.assign'],
       );
-      await tester.tap(find.widgetWithText(SwitchListTile, 'A different person must approve the bank payment file'));
+      final field = find.widgetWithText(TextFormField, 'Flag bank detail changes made in the last');
+      await tester.enterText(field, '3');
+      await tester.tap(find.byKey(const ValueKey('save-settings')));
       await tester.pumpAndSettle();
+      expect(find.text('At least 7'), findsOneWidget);
+      expect(repo.savedSettings, isEmpty);
+      await tester.enterText(field, '14');
       await tester.tap(find.byKey(const ValueKey('save-settings')));
       await tester.pump(const Duration(milliseconds: 600));
       await tester.pump(const Duration(seconds: 1));
       await _password(tester, 'secret');
-      expect(repo.savedSettings.single, {'payroll.bank_file_requires_second_person': false});
+      expect(repo.savedSettings.single, {'payroll.bank_change_alert_days': 14});
       expect(repo.settingsPasswords.single, 'secret');
     });
 
@@ -1040,13 +1068,14 @@ void main() {
         'calendar': {
           'process_by': '2026-10-25',
           'pay_date': '2026-10-31',
-          'alerts': ['PUBLISH_PENDING_APPROVAL', 'PAYMENT_NOT_EXPORTED', 'PAYMENT_FAILED_LINES'],
+          'alerts': ['PUBLISH_PENDING_APPROVAL', 'PAYMENT_NOT_EXPORTED', 'PAYMENT_FAILED_LINES', 'PAYMENT_UNDERPAID'],
         },
       };
       await pumpPayroll(tester, const Scaffold(body: PayrollDashboardTab()), repo: repo, perms: _manage);
       expect(find.textContaining('publish request is waiting'), findsOneWidget);
       expect(find.textContaining('has not been sent to the bank'), findsOneWidget);
       expect(find.textContaining('bank payments failed'), findsOneWidget);
+      expect(find.textContaining('less than their net pay'), findsOneWidget);
     });
   });
 }

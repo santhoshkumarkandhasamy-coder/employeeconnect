@@ -343,6 +343,13 @@ void main() {
       expect(b.lines[1].currentAccount, isNull);
       expect(b.blockers.single.reason, 'NO_BANK_DETAILS');
       expect(blockerLabel('NO_BANK_DETAILS'), 'No bank details');
+      for (final r in ['UNDERPAID_CHAIN', 'FAILED_BY_YOU']) {
+        expect(blockerLabel(r), isNot(r), reason: r); // plain language, not the code
+      }
+      expect(blockerLabel('UNDERPAID_CHAIN'), contains('less than their net pay'));
+      expect(lineFlagLabel('PREVIOUSLY_FAILED'), contains('failed'));
+      expect(lineFlagLabel('PREVIOUSLY_FAILED'), isNot('PREVIOUSLY_FAILED'));
+      expect(phase5AlertText['PAYMENT_UNDERPAID'], contains('less than their net pay'));
       expect(b.total, '70600.00');
       expect(b.debitAccount!.account, 'XXXXXX4321');
       expect(b.canCancel, isTrue);
@@ -458,6 +465,7 @@ void main() {
         'FORBIDDEN',
         'COMPONENTS_CHANGED',
         'CONFLICT',
+        'BATCH_CLOSED',
       ]) {
         final m = msg(c);
         expect(m, isNotEmpty);
@@ -519,11 +527,15 @@ void main() {
       final byKey = {for (final s in payrollSettingSpecs) s.key: s};
       expect(byKey['payroll.publish_request_ttl_hours']!.min, 1);
       expect(byKey['payroll.publish_request_ttl_hours']!.max, 336);
+      expect(byKey['payroll.bank_change_alert_days']!.min, 7); // a short window would switch the control off
       expect(byKey['payroll.bank_change_alert_days']!.max, 90);
+      expect(validatePayrollNumber('6', byKey['payroll.bank_change_alert_days']!), 'At least 7');
+      expect(validatePayrollNumber('7', byKey['payroll.bank_change_alert_days']!), isNull);
       expect(byKey['payroll.bank_payment_type']!.options.map((o) => o.$1), ['NEFT', 'RTGS', 'IMPS']);
       expect(byKey['payroll.bank_file_format']!.options.single.$1, 'generic_neft_csv');
-      expect(byKey['payroll.bank_file_requires_second_person']!.kind, PayrollSettingKind.boolean);
-      expect(bankFileSecondPersonKey, 'payroll.bank_file_requires_second_person');
+      // the second approver is unconditional: the switch is gone
+      expect(byKey.containsKey('payroll.bank_file_requires_second_person'), isFalse);
+      expect(bankChangeAlertDaysKey, 'payroll.bank_change_alert_days');
     });
 
     test('nothing sensitive reaches toString of models', () {

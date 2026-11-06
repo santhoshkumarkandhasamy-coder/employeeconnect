@@ -25,32 +25,41 @@ Added
                              write-once, counters and last_reminded_at never go back, user_id must equal the payslip's user.
 * company_bank_accounts      debit accounts of the company. account / IFSC / bank name are encrypted and IMMUTABLE (create a new account to
                              change; key rotation passes). One active default (partial unique).
-* employee_payroll_details   bank_changed_by / bank_changed_at. employee_payroll_details_bank_guard(): the marker can never be cleared or moved
-                             back, and a change of payment_mode / bank name / account / IFSC (outside key rotation) must come with a fresh marker.
+* employee_payroll_details   bank_changed_by / bank_changed_at (the LATEST change). employee_payroll_details_bank_guard() (BEFORE INSERT OR UPDATE):
+                             the marker can never be cleared or moved back, and every change of payment_mode / bank name / account / IFSC
+                             (outside key rotation), and every insert that carries bank data, must come with a fresh marker that is
+                             strictly newer than the old one. The same trigger appends the change to employee_bank_changes.
+* employee_bank_changes      APPEND-ONLY history (user, changed_by, changed_at) of every bank detail change: nobody who changed the bank
+                             details of a paid employee within payroll.bank_change_alert_days may approve the batch (the latest marker alone
+                             would let an earlier changer through after a second change). UPDATE / DELETE are refused by trigger.
 * payroll_payment_batches    draft -> submitted -> approved -> exported -> closed (+ cancelled; withdraw and reject go back to draft).
                              `format` and `payment_type` are fixed at creation, so a later download is byte-identical even if the settings
                              change. lines_mac is set at submit. Maker-checker enforced by the database too: decided_by differs from the
                              creator, last editor and submitter and is not in `contributors`; contributors must contain creator, last editor
                              and submitter. The lock trigger allows only the lifecycle transitions and, per transition, only its own columns;
                              at approve it also refuses a decider who is the employee of a live line or who changed the bank details of a line
-                             employee within payroll.bank_change_alert_days. A deferred constraint trigger checks that a cancelled / exported /
-                             closed batch has consistent line statuses at commit.
+                             employee within GREATEST(payroll.bank_change_alert_days, 7) days (any change in the history, not just the latest),
+                             and, at submit and approve, a person who marked a line of the payslip chain `failed`; approve and export need an
+                             active debit account. A deferred constraint trigger checks that a cancelled / exported / closed batch has consistent
+                             line statuses at commit.
 * payroll_payment_lines      one beneficiary per line. Partial unique (payslip_id) WHERE status IN (pending, exported, paid): one live line per
                              payslip. (batch_id, seq) unique. Insert only into a draft batch, only for a published, non-held payslip of the batch's
                              run with the same user (tagged-row trigger). batch/payslip/user/seq never change. While the batch is draft the
                              amount, beneficiary, flags, account_source and pending/excluded status may change; afterwards only
-                             pending>exported (batch approved / exported), exported>paid|failed with reference_enc / paid_on (batch exported /
-                             closed) and pending>excluded (batch cancelled).
+                             pending>exported (batch approved / exported), exported>paid|failed with reference_enc / paid_on / failed_by (batch
+                             exported / closed) and pending>excluded (batch cancelled). `failed_by` is set exactly on failed lines and is never the
+                             line employee. payroll_payslip_failed_by(payslip, person) walks the supersedes chain; a line cannot be inserted by
+                             somebody who marked an earlier line of the chain failed. Flag PREVIOUSLY_FAILED = the payslip or an ancestor has a failed line.
 * payroll_item_events        item_type gains `publish_request`, `payment_batch`; action gains `export`, `confirm`, `expire`, `stale`.
-* settings payroll.publish_request_ttl_hours, payroll.bank_file_requires_second_person, payroll.bank_file_format, payroll.bank_payment_type,
-  payroll.bank_change_alert_days (also defaults in code). No new permission: payroll.approve / payroll.publish / payroll.manage exist.
-* REVOKE DELETE, TRUNCATE FROM app_user on all five new tables. No foreign key of the new tables is ON DELETE SET NULL, so no
+* settings payroll.publish_request_ttl_hours, payroll.bank_file_format, payroll.bank_payment_type, payroll.bank_change_alert_days (7..90,
+  guarded: role.assign + step-up + admin_alert; also defaults in code). The second bank-file approver is unconditional (no switch). No new permission: payroll.approve / payroll.publish / payroll.manage exist.
+* REVOKE DELETE, TRUNCATE FROM app_user on all six new tables. No foreign key of the new tables is ON DELETE SET NULL, so no
   pg_trigger_depth() escape is needed.
 
-Downgrade REFUSES while a publish request is submitted / approved or a payment batch is anything but draft / cancelled (their evidence and
-the money they describe must never be dropped silently). Otherwise it drops the five tables, the columns, triggers, functions and settings,
-DELETES the publish_request / payment_batch history events (append-only trigger disabled for that statement) and restores the two
-payroll_item_events CHECKs. Draft batches and all payslip delivery data are lost.
+Downgrade REFUSES while ANY publish request, payslip delivery, payment batch or payment line exists (their evidence and the money they
+describe must never be dropped silently). Otherwise it drops the tables (company accounts and the bank change history included), the columns,
+triggers, functions and settings, DELETES the (then orphaned) publish_request / payment_batch history events (append-only trigger disabled
+for that statement) and restores the two payroll_item_events CHECKs.
 """
 
 from migration_sql import run
@@ -62,7 +71,6 @@ depends_on = None
 
 _SETTINGS = (
     "payroll.publish_request_ttl_hours",
-    "payroll.bank_file_requires_second_person",
     "payroll.bank_file_format",
     "payroll.bank_payment_type",
     "payroll.bank_change_alert_days",
@@ -154,24 +162,56 @@ ALTER TABLE employee_payroll_details ADD COLUMN bank_changed_at timestamptz;
 ALTER TABLE employee_payroll_details ADD CONSTRAINT ck_employee_payroll_details_bank_changed CHECK ((bank_changed_by IS NULL) = (bank_changed_at IS NULL));
 CREATE INDEX ix_employee_payroll_details_bank_changed_by ON employee_payroll_details (bank_changed_by);
 
-CREATE FUNCTION employee_payroll_details_bank_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE TABLE employee_bank_changes (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  changed_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  changed_at timestamptz NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT uq_employee_bank_changes UNIQUE (user_id, changed_by, changed_at)
+);
+CREATE INDEX ix_employee_bank_changes_user_changed ON employee_bank_changes (user_id, changed_at);
+CREATE INDEX ix_employee_bank_changes_changed_by ON employee_bank_changes (changed_by);
+
+CREATE FUNCTION employee_bank_changes_append_only() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  IF OLD.bank_changed_at IS NOT NULL AND (NEW.bank_changed_at IS NULL OR NEW.bank_changed_by IS NULL OR NEW.bank_changed_at < OLD.bank_changed_at) THEN
-    RAISE EXCEPTION 'employee payroll details %%: the bank change marker can never be cleared or moved back', OLD.user_id USING ERRCODE = '23000';
+  RAISE EXCEPTION 'the bank change history is append-only' USING ERRCODE = '23000';
+END
+$$;
+CREATE TRIGGER trg_employee_bank_changes_append_only BEFORE UPDATE OR DELETE ON employee_bank_changes FOR EACH ROW EXECUTE FUNCTION employee_bank_changes_append_only();
+
+CREATE FUNCTION employee_payroll_details_bank_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  changed boolean;
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    changed := NEW.bank_name_enc IS NOT NULL OR NEW.bank_account_enc IS NOT NULL OR NEW.bank_ifsc_enc IS NOT NULL OR NEW.payment_mode <> 'bank_transfer';
+  ELSE
+    IF OLD.bank_changed_at IS NOT NULL AND (NEW.bank_changed_at IS NULL OR NEW.bank_changed_by IS NULL OR NEW.bank_changed_at < OLD.bank_changed_at) THEN
+      RAISE EXCEPTION 'employee payroll details %%: the bank change marker can never be cleared or moved back', OLD.user_id USING ERRCODE = '23000';
+    END IF;
+    IF current_setting('app.key_rotation', true) = 'on'
+       AND payroll_strip_enc(to_jsonb(NEW)) IS NOT DISTINCT FROM payroll_strip_enc(to_jsonb(OLD)) THEN
+      RETURN NEW;  -- key rotation: only *_enc columns changed
+    END IF;
+    changed := NEW.payment_mode IS DISTINCT FROM OLD.payment_mode OR NEW.bank_name_enc IS DISTINCT FROM OLD.bank_name_enc
+               OR NEW.bank_account_enc IS DISTINCT FROM OLD.bank_account_enc OR NEW.bank_ifsc_enc IS DISTINCT FROM OLD.bank_ifsc_enc;
   END IF;
-  IF current_setting('app.key_rotation', true) = 'on'
-     AND payroll_strip_enc(to_jsonb(NEW)) IS NOT DISTINCT FROM payroll_strip_enc(to_jsonb(OLD)) THEN
-    RETURN NEW;  -- key rotation: only *_enc columns changed
-  END IF;
-  IF (NEW.payment_mode IS DISTINCT FROM OLD.payment_mode OR NEW.bank_name_enc IS DISTINCT FROM OLD.bank_name_enc
-      OR NEW.bank_account_enc IS DISTINCT FROM OLD.bank_account_enc OR NEW.bank_ifsc_enc IS DISTINCT FROM OLD.bank_ifsc_enc)
-     AND (NEW.bank_changed_at IS NULL OR NEW.bank_changed_by IS NULL OR NEW.bank_changed_at < now() - INTERVAL '5 minutes') THEN
-    RAISE EXCEPTION 'employee payroll details %%: a bank detail change must set bank_changed_by / bank_changed_at', OLD.user_id USING ERRCODE = '23000';
+  IF changed THEN
+    IF NEW.bank_changed_at IS NULL OR NEW.bank_changed_by IS NULL
+       OR NEW.bank_changed_at < now() - INTERVAL '5 minutes' OR NEW.bank_changed_at > now() + INTERVAL '5 minutes' THEN
+      RAISE EXCEPTION 'employee payroll details %%: a bank detail change must set bank_changed_by / bank_changed_at', NEW.user_id USING ERRCODE = '23000';
+    END IF;
+    IF TG_OP = 'UPDATE' AND OLD.bank_changed_at IS NOT NULL AND NEW.bank_changed_at <= OLD.bank_changed_at THEN
+      RAISE EXCEPTION 'employee payroll details %%: a bank detail change needs a marker newer than the previous one', NEW.user_id USING ERRCODE = '23000';
+    END IF;
+    INSERT INTO employee_bank_changes (user_id, changed_by, changed_at) VALUES (NEW.user_id, NEW.bank_changed_by, NEW.bank_changed_at)
+      ON CONFLICT (user_id, changed_by, changed_at) DO NOTHING;
   END IF;
   RETURN NEW;
 END
 $$;
-CREATE TRIGGER trg_employee_payroll_details_bank_guard BEFORE UPDATE ON employee_payroll_details FOR EACH ROW EXECUTE FUNCTION employee_payroll_details_bank_guard();
+CREATE TRIGGER trg_employee_payroll_details_bank_guard BEFORE INSERT OR UPDATE ON employee_payroll_details FOR EACH ROW EXECUTE FUNCTION employee_payroll_details_bank_guard();
 
 -- ---------------------------------------------------------------- publish requests
 CREATE TABLE payroll_publish_requests (
@@ -423,6 +463,7 @@ CREATE TABLE payroll_payment_lines (
   status text NOT NULL DEFAULT 'pending',
   reference_enc bytea,
   paid_on date,
+  failed_by uuid REFERENCES users(id) ON DELETE RESTRICT,
   version integer NOT NULL DEFAULT 1,
   updated_by uuid REFERENCES users(id) ON DELETE RESTRICT,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -430,12 +471,14 @@ CREATE TABLE payroll_payment_lines (
   CONSTRAINT uq_payroll_payment_lines_batch_seq UNIQUE (batch_id, seq),
   CONSTRAINT ck_payroll_payment_lines_seq CHECK (seq BETWEEN 1 AND 9999),
   CONSTRAINT ck_payroll_payment_lines_account_source CHECK (account_source IN ('snapshot','current')),
-  CONSTRAINT ck_payroll_payment_lines_flags CHECK (flags <@ ARRAY['BANK_DETAILS_CHANGED','RECENT_BANK_CHANGE','REVISION_DELTA','NO_PAN']::text[]),
+  CONSTRAINT ck_payroll_payment_lines_flags CHECK (flags <@ ARRAY['BANK_DETAILS_CHANGED','RECENT_BANK_CHANGE','REVISION_DELTA','NO_PAN','PREVIOUSLY_FAILED']::text[]),
   CONSTRAINT ck_payroll_payment_lines_source_flag CHECK (account_source = 'snapshot' OR 'BANK_DETAILS_CHANGED' = ANY (flags)),
   CONSTRAINT ck_payroll_payment_lines_status CHECK (status IN ('pending','excluded','exported','paid','failed')),
   CONSTRAINT ck_payroll_payment_lines_confirmation CHECK ((reference_enc IS NULL AND paid_on IS NULL) OR status IN ('paid','failed')),
   CONSTRAINT ck_payroll_payment_lines_paid_on CHECK (status <> 'paid' OR paid_on IS NOT NULL),
   CONSTRAINT ck_payroll_payment_lines_paid_year CHECK (paid_on IS NULL OR paid_on BETWEEN DATE '2000-01-01' AND DATE '2200-12-31'),
+  CONSTRAINT ck_payroll_payment_lines_failed_by CHECK ((status = 'failed') = (failed_by IS NOT NULL)),
+  CONSTRAINT ck_payroll_payment_lines_failed_self CHECK (failed_by IS NULL OR failed_by <> user_id),
   CONSTRAINT ck_payroll_payment_lines_version CHECK (version >= 1)
 );
 CREATE UNIQUE INDEX uq_payroll_payment_lines_live ON payroll_payment_lines (payslip_id) WHERE status IN ('pending','exported','paid');
@@ -443,6 +486,24 @@ CREATE INDEX ix_payroll_payment_lines_payslip_id ON payroll_payment_lines (paysl
 CREATE INDEX ix_payroll_payment_lines_user_status ON payroll_payment_lines (user_id, status);
 CREATE INDEX ix_payroll_payment_lines_batch_status ON payroll_payment_lines (batch_id, status);
 CREATE INDEX ix_payroll_payment_lines_updated_by ON payroll_payment_lines (updated_by);
+CREATE INDEX ix_payroll_payment_lines_failed_by ON payroll_payment_lines (failed_by);
+
+CREATE FUNCTION payroll_payslip_failed_by(p_id uuid, person uuid) RETURNS boolean LANGUAGE plpgsql STABLE AS $$
+BEGIN
+  -- true when `person` marked a line of the payslip or of any earlier copy (supersedes chain) failed
+  IF person IS NULL THEN
+    RETURN false;
+  END IF;
+  RETURN EXISTS (
+    WITH RECURSIVE chain(id) AS (
+      SELECT p_id
+      UNION
+      SELECT p.supersedes_id FROM chain c JOIN payslips p ON p.id = c.id WHERE p.supersedes_id IS NOT NULL
+    )
+    SELECT 1 FROM payroll_payment_lines f JOIN chain c ON f.payslip_id = c.id WHERE f.status = 'failed' AND f.failed_by = person
+  );
+END
+$$;
 
 CREATE FUNCTION payroll_payment_batches_lock() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
@@ -496,23 +557,35 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM payroll_payment_lines l WHERE l.batch_id = OLD.id AND l.status = 'pending') THEN
       RAISE EXCEPTION 'payment batch %%: there is no pending line to submit', OLD.id USING ERRCODE = '23000';
     END IF;
+    IF EXISTS (SELECT 1 FROM payroll_payment_lines l WHERE l.batch_id = OLD.id AND l.status <> 'excluded' AND payroll_payslip_failed_by(l.payslip_id, NEW.submitted_by)) THEN
+      RAISE EXCEPTION 'payment batch %%: the submitter marked an earlier payment of a line failed', OLD.id USING ERRCODE = '23000';
+    END IF;
     allowed := allowed || ARRAY['status','submitted_by','submitted_at','lines_mac','contributors','decided_by','decided_at','decision_comment_enc'];
   ELSIF OLD.status = 'submitted' AND NEW.status = 'draft' THEN
     allowed := allowed || ARRAY['status','lines_mac','contributors','decided_by','decided_at','decision_comment_enc'];
   ELSIF OLD.status = 'submitted' AND NEW.status = 'approved' THEN
-    SELECT COALESCE((SELECT (s.value #>> '{}')::integer FROM settings s WHERE s.key = 'payroll.bank_change_alert_days'), 30) INTO alert_days;
+    SELECT GREATEST(COALESCE((SELECT (s.value #>> '{}')::integer FROM settings s WHERE s.key = 'payroll.bank_change_alert_days'), 30), 7) INTO alert_days;
     IF EXISTS (SELECT 1 FROM payroll_payment_lines l WHERE l.batch_id = OLD.id AND l.status <> 'excluded' AND l.user_id = NEW.decided_by) THEN
       RAISE EXCEPTION 'payment batch %%: the approver is paid by a line of the batch', OLD.id USING ERRCODE = '23000';
     END IF;
-    IF EXISTS (SELECT 1 FROM payroll_payment_lines l JOIN employee_payroll_details d ON d.user_id = l.user_id
-               WHERE l.batch_id = OLD.id AND l.status <> 'excluded' AND d.bank_changed_by = NEW.decided_by
-                 AND d.bank_changed_at > now() - make_interval(days => alert_days)) THEN
+    IF EXISTS (SELECT 1 FROM payroll_payment_lines l JOIN employee_bank_changes h ON h.user_id = l.user_id
+               WHERE l.batch_id = OLD.id AND l.status <> 'excluded' AND h.changed_by = NEW.decided_by
+                 AND h.changed_at > now() - make_interval(days => alert_days)) THEN
       RAISE EXCEPTION 'payment batch %%: the approver recently changed the bank details of a paid employee', OLD.id USING ERRCODE = '23000';
+    END IF;
+    IF EXISTS (SELECT 1 FROM payroll_payment_lines l WHERE l.batch_id = OLD.id AND l.status <> 'excluded' AND payroll_payslip_failed_by(l.payslip_id, NEW.decided_by)) THEN
+      RAISE EXCEPTION 'payment batch %%: the approver marked an earlier payment of a line failed', OLD.id USING ERRCODE = '23000';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM company_bank_accounts a WHERE a.id = NEW.debit_account_id AND a.active) THEN
+      RAISE EXCEPTION 'payment batch %%: the debit account must be active', OLD.id USING ERRCODE = '23000';
     END IF;
     allowed := allowed || ARRAY['status','decided_by','decided_at','decision_comment_enc'];
   ELSIF NEW.status = 'cancelled' THEN
     allowed := allowed || ARRAY['status','cancel_reason_enc','contributors'];
   ELSIF OLD.status = 'approved' AND NEW.status = 'exported' THEN
+    IF NOT EXISTS (SELECT 1 FROM company_bank_accounts a WHERE a.id = NEW.debit_account_id AND a.active) THEN
+      RAISE EXCEPTION 'payment batch %%: the debit account must be active', OLD.id USING ERRCODE = '23000';
+    END IF;
     allowed := allowed || ARRAY['status','exported_by','exported_at','file_sha256'];
   ELSIF OLD.status = 'exported' AND NEW.status = 'closed' THEN
     allowed := allowed || ARRAY['status'];
@@ -575,6 +648,9 @@ BEGIN
     IF ps.status <> 'published' OR ps.hold THEN
       RAISE EXCEPTION 'payment line: only a published, non-held payslip can be paid' USING ERRCODE = '23000';
     END IF;
+    IF payroll_payslip_failed_by(NEW.payslip_id, NEW.updated_by) THEN
+      RAISE EXCEPTION 'payment line: the creator marked an earlier payment of this payslip failed' USING ERRCODE = '23000';
+    END IF;
     RETURN NEW;
   END IF;
   SELECT b.status INTO b_status FROM payroll_payment_batches b WHERE b.id = OLD.batch_id;
@@ -605,7 +681,7 @@ BEGIN
   ELSIF b_status IN ('approved','exported') AND OLD.status = 'pending' AND NEW.status = 'exported' THEN
     allowed := allowed || ARRAY['status'];
   ELSIF b_status IN ('exported','closed') AND OLD.status = 'exported' AND NEW.status IN ('paid','failed') THEN
-    allowed := allowed || ARRAY['status','reference_enc','paid_on'];
+    allowed := allowed || ARRAY['status','reference_enc','paid_on','failed_by'];
   END IF;
   j_new := to_jsonb(NEW) - allowed;
   j_old := to_jsonb(OLD) - allowed;
@@ -630,7 +706,6 @@ ALTER TABLE payroll_item_events ADD CONSTRAINT ck_payroll_item_events_action CHE
 
 -- ---------------------------------------------------------------- settings
 INSERT INTO settings (key, value) VALUES ('payroll.publish_request_ttl_hours', '72'::jsonb) ON CONFLICT (key) DO NOTHING;
-INSERT INTO settings (key, value) VALUES ('payroll.bank_file_requires_second_person', 'true'::jsonb) ON CONFLICT (key) DO NOTHING;
 INSERT INTO settings (key, value) VALUES ('payroll.bank_file_format', '"generic_neft_csv"'::jsonb) ON CONFLICT (key) DO NOTHING;
 INSERT INTO settings (key, value) VALUES ('payroll.bank_payment_type', '"NEFT"'::jsonb) ON CONFLICT (key) DO NOTHING;
 INSERT INTO settings (key, value) VALUES ('payroll.bank_change_alert_days', '30'::jsonb) ON CONFLICT (key) DO NOTHING;
@@ -642,6 +717,7 @@ BEGIN
   REVOKE DELETE, TRUNCATE ON company_bank_accounts FROM app_user;
   REVOKE DELETE, TRUNCATE ON payroll_payment_batches FROM app_user;
   REVOKE DELETE, TRUNCATE ON payroll_payment_lines FROM app_user;
+  REVOKE DELETE, TRUNCATE ON employee_bank_changes FROM app_user;
 EXCEPTION WHEN undefined_object OR insufficient_privilege THEN
   RAISE NOTICE 'revoke on the 0026 tables skipped';
 END
@@ -653,14 +729,14 @@ DOWNGRADE = (
     r"""
 DO $$
 BEGIN
-  IF EXISTS (SELECT 1 FROM payroll_publish_requests WHERE status IN ('submitted','approved'))
-     OR EXISTS (SELECT 1 FROM payroll_payment_batches WHERE status NOT IN ('draft','cancelled')) THEN
-    RAISE EXCEPTION 'cannot downgrade 0026: submitted / approved publish requests or submitted / approved / exported / closed payment batches exist (cancel or withdraw them first)';
+  IF EXISTS (SELECT 1 FROM payroll_publish_requests) OR EXISTS (SELECT 1 FROM payslip_deliveries)
+     OR EXISTS (SELECT 1 FROM payroll_payment_batches) OR EXISTS (SELECT 1 FROM payroll_payment_lines) THEN
+    RAISE EXCEPTION 'cannot downgrade 0026: publish requests, payslip deliveries or payment batches / lines exist (their evidence must not be dropped silently)';
   END IF;
 END
 $$;
 
-DELETE FROM settings WHERE key IN ('payroll.publish_request_ttl_hours', 'payroll.bank_file_requires_second_person', 'payroll.bank_file_format', 'payroll.bank_payment_type', 'payroll.bank_change_alert_days');
+DELETE FROM settings WHERE key IN ('payroll.publish_request_ttl_hours', 'payroll.bank_file_format', 'payroll.bank_payment_type', 'payroll.bank_change_alert_days');
 
 ALTER TABLE payroll_item_events DISABLE TRIGGER trg_payroll_item_events_no_update_delete;
 DELETE FROM payroll_item_events WHERE item_type IN ('publish_request','payment_batch') OR action IN ('export','confirm','expire','stale');
@@ -675,6 +751,7 @@ ALTER TABLE payroll_item_events ADD CONSTRAINT ck_payroll_item_events_item_type 
     + r"""));
 
 DROP TABLE IF EXISTS payroll_payment_lines;
+DROP FUNCTION IF EXISTS payroll_payslip_failed_by(uuid, uuid);
 DROP TABLE IF EXISTS payroll_payment_batches;
 DROP FUNCTION IF EXISTS payroll_payment_lines_lock();
 DROP FUNCTION IF EXISTS payroll_payment_batches_consistency();
@@ -690,6 +767,8 @@ DROP FUNCTION IF EXISTS company_bank_accounts_lock();
 
 DROP TRIGGER IF EXISTS trg_employee_payroll_details_bank_guard ON employee_payroll_details;
 DROP FUNCTION IF EXISTS employee_payroll_details_bank_guard();
+DROP TABLE IF EXISTS employee_bank_changes;
+DROP FUNCTION IF EXISTS employee_bank_changes_append_only();
 DROP INDEX IF EXISTS ix_employee_payroll_details_bank_changed_by;
 ALTER TABLE employee_payroll_details DROP CONSTRAINT IF EXISTS ck_employee_payroll_details_bank_changed;
 ALTER TABLE employee_payroll_details DROP COLUMN IF EXISTS bank_changed_at;

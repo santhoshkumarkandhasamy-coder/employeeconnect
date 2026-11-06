@@ -29,7 +29,19 @@ class _BankAccountsSectionState extends ConsumerState<BankAccountsSection> {
     setState(() => _busy = true);
     final repo = ref.read(payrollRepositoryProvider);
     try {
-      await repo.updateBankAccount(a.id, isDefault: isDefault, active: active);
+      if (isDefault != null) {
+        // Changing the default account is a payment control: it needs the caller's password (19.4).
+        final done = await runWithReauth(
+          context,
+          reason: 'Changing the account that salaries are paid from needs your password.',
+          action: (pw) async {
+            await repo.updateBankAccount(a.id, isDefault: isDefault, active: active, currentPassword: pw);
+          },
+        );
+        if (!done) return;
+      } else {
+        await repo.updateBankAccount(a.id, isDefault: isDefault, active: active);
+      }
       ref.invalidate(bankAccountsProvider);
     } on ApiException catch (e) {
       if (mounted) payrollSnack(context, phase5ErrorMessage(e));

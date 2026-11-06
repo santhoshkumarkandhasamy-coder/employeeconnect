@@ -16,7 +16,7 @@ from ..core.clock import utcnow
 from ..core.errors import AppError
 from ..core.pagination import PageParams, make_page
 from ..core.rbac import Principal
-from ..models import EmployeePayrollDetails, Payslip, SalaryStructure, User
+from ..models import EmployeeBankChange, EmployeePayrollDetails, Payslip, SalaryStructure, User
 from ..schemas.payroll import DetailsIn, StructureIn
 from . import admin_security
 from . import attendance as att
@@ -338,7 +338,9 @@ def _details_out(user_id: uuid.UUID, d: EmployeePayrollDetails | None, *, reveal
         "include_in_payroll": d.include_in_payroll if d else True,
         "overtime_eligible": d.overtime_eligible if d else False,
         "notice_period_days": d.notice_period_days if d else None,
-        "last_working_day": d.last_working_day.isoformat() if d and d.last_working_day else None,  # read-only (written by the F&F)
+        "last_working_day": d.last_working_day.isoformat()
+        if d and d.last_working_day
+        else None,  # read-only (written by the F&F)
         "bank_name": d.bank_name if d else None,
         "bank_account": m(d.bank_account if d else None, pc.mask_tail),
         "bank_ifsc": d.bank_ifsc if d else None,
@@ -386,7 +388,18 @@ async def put_details(
             changed.append(f)
     d.updated_by = actor.id
     if any(f in BANK_FIELDS for f in changed):  # migration 0026: the database refuses a bank change without a fresh marker
-        d.bank_changed_by, d.bank_changed_at = actor.id, utcnow()
+        stamp = utcnow()
+        d.bank_changed_by, d.bank_changed_at = actor.id, stamp
+        await pc.flush(session)  # PostgreSQL: the bank guard trigger appends the history row now
+        known = await session.execute(
+            select(EmployeeBankChange.id).where(
+                EmployeeBankChange.user_id == user_id,
+                EmployeeBankChange.changed_by == actor.id,
+                EmployeeBankChange.changed_at == stamp,
+            )
+        )
+        if known.first() is None:  # no trigger (SQLite test harness): the service writes the append-only history itself
+            session.add(EmployeeBankChange(user_id=user_id, changed_by=actor.id, changed_at=stamp))
     audit(session, action="payroll.details.update", actor=actor, entity_type="user", entity_id=user_id, after={"fields": changed})
     await pc.commit(session)
     await session.refresh(d)  # updated_at is set by the database

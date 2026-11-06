@@ -62,7 +62,7 @@ log = logging.getLogger("app.payroll")
 
 ENTITY = "payroll_publish_request"
 TTL_KEY = "payroll.publish_request_ttl_hours"
-LIFECYCLE_ACTIONS = ("process", "reopen", "pay", "carry", "propose")  # not the work of a maker
+LIFECYCLE_ACTIONS = ("process", "reopen", "pay", "carry")  # not the work of a maker; `propose` with a user as actor IS (arrears)
 MAX_PUSH_TARGETS = 20
 PUSH_COALESCE_S = 600
 ZERO = Decimal("0.00")
@@ -373,6 +373,12 @@ async def expire_overdue(session: AsyncSession, *, run_id: uuid.UUID | None = No
     q = select(PayrollPublishRequest).where(PayrollPublishRequest.status == "submitted", PayrollPublishRequest.expires_at < now)
     if run_id is not None:
         q = q.where(PayrollPublishRequest.run_id == run_id)
+    # lock order (as every other path): run first, request rows last. Peek at the candidates, lock their runs in id order, then lock
+    # and re-read the requests that are still overdue.
+    run_ids = sorted(set((await session.execute(q.with_only_columns(PayrollPublishRequest.run_id))).scalars()))
+    if not run_ids:
+        return 0
+    await session.execute(select(PayrollRun.id).where(PayrollRun.id.in_(run_ids)).order_by(PayrollRun.id).with_for_update())
     rows = list((await session.execute(q.order_by(PayrollPublishRequest.id).with_for_update())).scalars())
     if not rows:
         return 0
@@ -420,6 +426,13 @@ async def compute_makers(
             reasons[u].add("EDITED_PAYSLIP")
     if lock:
         await runs._share_lock_structures(session, payslips)
+    if lock:  # structures that triggered arrears rows are share-locked with the others, before the component rows
+        extra = {
+            r.trigger_structure_id
+            for (typ, _), r in (await _sources(session, payslips, lock=False)).items()
+            if typ == "arrears" and r.trigger_structure_id
+        }
+        await runs._share_lock_structures(session, [SimpleNamespace(structure_id=i) for i in extra])  # type: ignore[list-item]
     rows = await _sources(session, payslips, lock=lock)
     fnf_ids: set[uuid.UUID] = set()
     event_keys: dict[str, set[uuid.UUID]] = defaultdict(set)
@@ -445,7 +458,10 @@ async def compute_makers(
         for f in (await session.execute(fq)).scalars():
             for u in [*(f.contributors or []), *(str(x) for x in (f.created_by, f.last_edited_by, f.submitted_by) if x)]:
                 reasons[u].add("FNF_MAKER")
-    sids = sorted({p.structure_id for p in payslips if p.structure_id})
+    sids = {p.structure_id for p in payslips if p.structure_id}
+    # the structure that triggered an arrears row decided its amount: its creator and editors are makers too
+    sids |= {r.trigger_structure_id for (typ, _), r in rows.items() if typ == "arrears" and r.trigger_structure_id}
+    sids = sorted(sids)
     if sids:
         sq = select(SalaryStructure).where(SalaryStructure.id.in_(sids), SalaryStructure.source.in_(("manual", "import")))
         for s in (await session.execute(sq)).scalars():
