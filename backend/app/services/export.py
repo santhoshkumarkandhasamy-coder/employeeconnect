@@ -71,6 +71,7 @@ SHEETS: dict[str, SheetBuilder] = {
     "permission": export_sheets.permission_sheet,
     "on_duty": export_sheets.on_duty_sheet,
     "food": food_export.food_sheet,
+    "device_punches": export_sheets.device_punches_sheet,  # plan 18; NOT part of type=all
 }
 
 # Holding ANY of the listed permissions allows the type (on top of export.all / export.team, which decide the scope).
@@ -81,6 +82,7 @@ TYPE_PERMISSIONS: dict[str, tuple[str, ...]] = {
     "permission": ("request.view_all", "request.view_team"),
     "on_duty": ("request.view_all", "request.view_team"),
     "food": ("food.view_all",),
+    "device_punches": ("device.view",),
 }
 SENSITIVE_PERMISSION = "export.sensitive"  # needed for include_reasons=true
 SENSITIVE_TYPES = ("leave", "permission", "on_duty")  # the sheets that have Reason / Decision Comment columns
@@ -153,7 +155,9 @@ def check_dates(d_from: dt.date, d_to: dt.date) -> None:
 async def resolve_scope(session: AsyncSession, actor: Principal, names: list[str]) -> ExportScope:
     """Everyone only if the caller holds export.all AND the `.view_all` permission of every requested type; otherwise the
     caller's direct reports (so export.all together with only `*.view_team` never widens what the caller may read)."""
-    if actor.has("export.all") and all(any(p.endswith(".view_all") and actor.has(p) for p in TYPE_PERMISSIONS[n]) for n in names):
+    if actor.has("export.all") and all(
+        any((p.endswith(".view_all") or p == "device.view") and actor.has(p) for p in TYPE_PERMISSIONS[n]) for n in names
+    ):
         return ExportScope.everyone()
     ids = (await session.execute(select(User.id).where(User.manager_id == actor.id, User.deleted_at.is_(None)))).scalars().all()
     return ExportScope.team(set(ids))

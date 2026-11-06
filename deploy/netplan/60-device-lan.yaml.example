@@ -1,0 +1,10 @@
+# Secondary address so the VM can reach the attendance machines (192.168.0.201-203) from its main interface.
+# Copy to /etc/netplan/60-device-lan.yaml, set the interface name (ip -br link), then:  sudo netplan try
+# The main address (192.168.1.33/24 and the default route) stays in your existing netplan file; this file only ADDS an address.
+network:
+  version: 2
+  ethernets:
+    eth0:
+      addresses:
+        - 192.168.0.33/24
+      # no gateway here: the machines are on-link, the default route is unchanged

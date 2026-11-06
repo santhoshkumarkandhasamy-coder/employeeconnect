@@ -20,6 +20,7 @@ from .core.net import resolve_client_ip
 from .core.redis import close_redis
 from .routers import (
     admin_console,
+    admin_devices,
     admin_employees,
     admin_export,
     admin_masters,
@@ -101,6 +102,7 @@ def create_app() -> FastAPI:
     app.include_router(company.router, prefix="/api")
     app.include_router(admin_employees.router, prefix="/api")
     app.include_router(admin_console.router, prefix="/api")
+    app.include_router(admin_devices.router, prefix="/api")
     app.include_router(attendance.router, prefix="/api")
     app.include_router(files.router, prefix="/api")
     app.include_router(leave.router, prefix="/api")

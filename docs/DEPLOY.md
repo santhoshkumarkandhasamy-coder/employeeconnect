@@ -289,3 +289,16 @@ sudo iptables -A DOCKER-USER -i eth0 -j DROP    # eth0 = WAN/LAN interface; pers
 
 ### 6.9 Reload
 After replacing certificates: `docker compose exec nginx nginx -c /tmp/nginx.conf -s reload`. After editing `nginx.conf` or `.env`: `docker compose up -d nginx` (the container runs `nginx -t` first and exits with the error in `docker compose logs nginx`).
+
+## 7. Attendance devices (eSSL / ZK, plan 18)
+
+The worker (never the API) pulls users and punches from the office machines, read-only. Fingerprint and face data is never requested.
+
+1. **Second address on the VM.** Copy `deploy/netplan/60-device-lan.yaml.example` to `/etc/netplan/60-device-lan.yaml`, fix the interface name, run `sudo netplan try`. The VM then has `192.168.1.33` and `192.168.0.33`. Containers reach the machines through Docker NAT.
+2. **`.env`.** `DEVICE_ALLOWED_CIDRS=192.168.0.0/24` (SSRF allow-list; addresses outside it are refused with `DEVICE_ADDRESS_NOT_ALLOWED`), `DEVICE_BLOCKED_IPS=192.168.0.33` (the server itself), `EGRESS_SUBNET` and `WORKER_EGRESS_IP` (the worker gets this fixed address on the `egress` network). Then `docker compose up -d`.
+3. **Firewall.** Run `WORKER_EGRESS_IP=<ip> sudo -E deploy/firewall/devices.sh` (idempotent; also at boot). It allows only the worker to reach `192.168.0.201-203` on tcp/udp 4370 and drops every other container towards `192.168.0.0/24`. Verify: a connection to `192.168.0.201:4370` from the `api` container must fail and from the `worker` container must work.
+4. **Identify each machine first** (read-only): `docker compose exec worker python -m scripts.zk_probe --ip 192.168.0.201`. Note serial, model and firmware. Try `--transport udp` if TCP times out.
+5. **Add the devices** in the console (Admin, Attendance devices): name, IP, port, comm key if the machine has one, "ingest from" date. Use Test connection before saving. The first successful sync pins the serial number; a different machine later fails with `DEVICE_IDENTITY_CHANGED` until an admin chooses "Accept new identity".
+6. **eTimeTrackLite** keeps working, but its "delete logs from device after download" option must be OFF. If it is on, or someone clears a machine, the count-drop alert fires (we never clear logs). A machine accepts one connection at a time: `DEVICE_BUSY` means another program was connected; the next tick retries.
+7. **Field test before enabling the schedule.** `tcpdump -ni any port 4370` during a full sync must show only the allow-listed commands (1000, 1001, 1102, 11, 1100, 201, 50, 1503, 1504, 1502). Compare one day of punches with eTimeTrackLite.
+8. **Jobs** (worker): `devices.sync` every minute (5 minutes inside 05:00-23:30, hourly outside), `devices.queue` every 3 s (Sync now and Test connection), `devices.reconcile` 00:20, `devices.retention` 04:00. `GET /admin/system/health` shows a `devices` block. Recommended: put the machines on their own VLAN and set a comm key on each (the ZK protocol is unencrypted).

@@ -88,6 +88,10 @@ x-app-env: &app-env
   APP_VERSION: ${APP_VERSION:-latest}   # reported by the health endpoint
   STATUS_DIR: ${STATUS_DIR:-/status}    # backup.json written by the `backup` service (api/worker mount it read-only)
   TLS_CERT_FILE: ${TLS_CERT_FILE:-/certs/fullchain.pem}   # public cert only, for the expiry check
+  DEVICE_ALLOWED_CIDRS: ${DEVICE_ALLOWED_CIDRS:-192.168.0.0/24}   # attendance devices (plan 18): SSRF allow-list, not a UI setting
+  DEVICE_BLOCKED_IPS: ${DEVICE_BLOCKED_IPS:-192.168.0.33}         # this server's own LAN address is never a device
+  EGRESS_SUBNET: ${EGRESS_SUBNET:-172.29.250.0/24}
+  WORKER_EGRESS_IP: ${WORKER_EGRESS_IP:-172.29.250.10}
 
 services:
   postgres:
@@ -258,6 +262,7 @@ services:
     networks:
       backend:
       egress:
+        ipv4_address: ${WORKER_EGRESS_IP:-172.29.250.10}   # fixed: the host firewall lets only this address reach the devices
     healthcheck:
       disable: true                     # image HEALTHCHECK probes :8000, which the worker does not serve
     deploy:
@@ -358,7 +363,9 @@ networks:
     ipam:
       config: [{ subnet: "${NET_SUBNET:?set NET_SUBNET}" }]
   edge:                                 # nginx <-> host ports only
-  egress:                               # api/worker outbound (FCM, SMTP); nothing is published on it
+  egress:                               # api/worker outbound (FCM, SMTP, attendance devices); nothing is published on it
+    ipam:
+      config: [{ subnet: "${EGRESS_SUBNET:-172.29.250.0/24}" }]
 
 volumes:
   pgdata:

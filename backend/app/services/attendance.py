@@ -24,6 +24,7 @@ from ..core.rbac import Principal
 from ..models import (
     Attendance,
     ClientLocation,
+    Device,
     File,
     Holiday,
     LateRecord,
@@ -212,9 +213,20 @@ def user_summary(u: User, photo_file_id: uuid.UUID | None = None) -> dict[str, A
 
 
 def _record_out(
-    a: Attendance, shift: Shift | None, expose_distance: bool = False, site: ClientLocation | None = None
+    a: Attendance,
+    shift: Shift | None,
+    expose_distance: bool = False,
+    site: ClientLocation | None = None,
+    devices: dict[uuid.UUID, str] | None = None,
 ) -> dict[str, Any]:
-    """`distance_m` is only exposed to HR/admin viewers (to an employee it would map the office boundary)."""
+    """`distance_m` is only exposed to HR/admin viewers (to an employee it would map the office boundary).
+    A device check-in has within_fence true, no distance and no selfie (plan 18)."""
+    devices = devices or {}
+    device_in = a.check_in_source == "device"
+
+    def dev(did: uuid.UUID | None) -> dict[str, str] | None:
+        return {"id": str(did), "name": devices.get(did, "")} if did is not None else None
+
     return {
         "id": str(a.id),
         "work_date": a.work_date.isoformat(),
@@ -223,11 +235,15 @@ def _record_out(
         "status": a.status,
         "minutes_late": a.minutes_late,
         "worked_minutes": a.worked_minutes,
-        "within_fence": a.check_in_within_fence,
-        "distance_m": a.check_in_distance_m if expose_distance else None,
-        "selfie_url": f"/api/files/{a.check_in_selfie_file_id}" if a.check_in_selfie_file_id else None,
+        "within_fence": True if device_in else a.check_in_within_fence,
+        "distance_m": a.check_in_distance_m if expose_distance and not device_in else None,
+        "selfie_url": f"/api/files/{a.check_in_selfie_file_id}" if a.check_in_selfie_file_id and not device_in else None,
         "auto_closed": a.auto_closed,
         "manual": a.manual,  # entered or corrected by HR/Admin
+        "check_in_source": a.check_in_source,
+        "check_out_source": a.check_out_source,
+        "check_in_device": dev(a.check_in_device_id),
+        "check_out_device": dev(a.check_out_device_id),
         # on-duty punch: the client site it was checked against (null = office)
         "client_location": {"id": str(site.id), "name": site.name} if site is not None else None,
         "shift": (
@@ -247,8 +263,14 @@ async def _records_out(session: AsyncSession, rows: list[Attendance], expose_dis
     sites: dict[uuid.UUID, ClientLocation] = {}
     if loc_ids:
         sites = {c.id: c for c in (await session.execute(select(ClientLocation).where(ClientLocation.id.in_(loc_ids)))).scalars()}
+    dev_ids = {d for a in rows for d in (a.check_in_device_id, a.check_out_device_id) if d}
+    devices: dict[uuid.UUID, str] = {}
+    if dev_ids:
+        devices = {d.id: d.name for d in (await session.execute(select(Device).where(Device.id.in_(dev_ids)))).scalars()}
     return [
-        _record_out(a, shifts.get(a.shift_id), expose_distance, sites.get(a.client_location_id) if a.client_location_id else None)
+        _record_out(
+            a, shifts.get(a.shift_id), expose_distance, sites.get(a.client_location_id) if a.client_location_id else None, devices
+        )
         for a in rows
     ]
 
@@ -485,6 +507,8 @@ async def check_in(session: AsyncSession, actor: Principal, body: Any) -> dict[s
         suspicious=mock,
         status="late" if minutes_late else "present",
         minutes_late=minutes_late,
+        check_in_source="app",
+        app_check_in_at=now,  # kept so a recompute from device punches is repeatable (plan 18)
     )
     session.add(rec)
     try:
@@ -551,6 +575,7 @@ async def check_out(session: AsyncSession, actor: Principal, body: Any) -> dict[
         raise AppError("BAD_REQUEST", "Check-out must be after check-in")
     worked = int((now - ci).total_seconds() // 60)  # type: ignore[operator]
     rec.check_out_at = now
+    rec.check_out_source, rec.check_out_device_id, rec.app_check_out_at = "app", None, now
     rec.check_out_loc = {"lat": body.lat, "lng": body.lng, "accuracy_m": body.accuracy_m}
     rec.check_out_selfie_file_id = selfie_id
     rec.check_out_mock_location = mock
@@ -567,7 +592,15 @@ async def check_out(session: AsyncSession, actor: Principal, body: Any) -> dict[
     except IntegrityError:
         await session.rollback()
         raise AppError("SELFIE_REUSED", "This selfie was already used. Take a new one.") from None
-    return _record_out(rec, shift, site=site)
+    names = await _device_names(session, rec)
+    return _record_out(rec, shift, site=site, devices=names)
+
+
+async def _device_names(session: AsyncSession, rec: Attendance) -> dict[uuid.UUID, str]:
+    ids = {d for d in (rec.check_in_device_id, rec.check_out_device_id) if d}
+    if not ids:
+        return {}
+    return {d.id: d.name for d in (await session.execute(select(Device).where(Device.id.in_(ids)))).scalars()}
 
 
 async def today(session: AsyncSession, actor: Principal) -> dict[str, Any]:
@@ -630,7 +663,14 @@ async def manual_get(session: AsyncSession, actor: Principal, user_id: uuid.UUID
     out = (await _records_out(session, [rec], expose_distance=True))[0] if rec else None
     if rec is not None and rec.manual:
         out["manual_reason"] = rec.manual_reason  # type: ignore[index]
-    return {"user": user_summary(u, photos.get(u.id)), "work_date": work_date.isoformat(), "record": out}
+    from . import device_attendance  # lazy: that module imports this one
+
+    return {
+        "user": user_summary(u, photos.get(u.id)),
+        "work_date": work_date.isoformat(),
+        "record": out,
+        "device_punches": await device_attendance.day_punches_out(session, u.id, work_date),
+    }
 
 
 async def manual_upsert(
@@ -681,6 +721,9 @@ async def manual_upsert(
     rec.check_in_at, rec.check_out_at, rec.worked_minutes = in_utc, out_utc, worked
     rec.status, rec.minutes_late, rec.auto_closed = status, minutes_late, False
     rec.manual, rec.manual_by, rec.manual_reason = True, actor.id, body.reason
+    # a manual entry owns both times (plan 18); the phone punch times in app_* stay as evidence
+    rec.check_in_source, rec.check_in_device_id = "manual", None
+    rec.check_out_source, rec.check_out_device_id = ("manual" if out_utc else None), None
     await session.flush()
     if minutes_late:
         session.add(
@@ -698,6 +741,9 @@ async def manual_upsert(
         session, [user.id], type="attendance_manual", entity_id=rec.id,
         title="Attendance updated", body=f"HR updated your attendance for {work_date.strftime('%d %b %Y')}",
     )  # fmt: skip
+    from . import device_attendance
+
+    await device_attendance.refresh_day(session, user.id, work_date)  # device punches of that day become "manual_entry"
     return await manual_get(session, actor, user.id, work_date)
 
 
@@ -712,6 +758,12 @@ async def manual_delete(session: AsyncSession, actor: Principal, user_id: uuid.U
         raise AppError("CONFLICT", "Only manual entries can be removed. Correct the times instead.", status=409)
     if rec.check_in_within_fence is not None or rec.check_in_selfie_file_id is not None:  # set only by a real punch
         raise AppError("CONFLICT", "This day has a real punch; correct the times instead of removing it.", status=409)
+    from . import device_attendance
+
+    if await device_attendance.has_device_punches(session, user.id, work_date):  # a device punch is a real punch too
+        raise AppError(
+            "CONFLICT", "This day has device punches; use them or correct the times instead of removing it.", status=409
+        )
     before = _manual_snapshot(rec)
     await session.execute(delete(LateRecord).where(LateRecord.attendance_id == rec.id))
     await session.delete(rec)

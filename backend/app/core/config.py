@@ -121,6 +121,23 @@ class Settings(BaseSettings):
     leave_write_rate_per_day: int = 50
     leave_decide_rate_per_min: int = 60  # approve + reject per approver
 
+    # Attendance devices (plan 18). The API never connects to a device; only the worker does. DEVICE_ALLOWED_CIDRS is the SSRF
+    # guard (NOT a UI setting): device addresses outside it are refused. EGRESS_SUBNET / WORKER_EGRESS_IP / DEVICE_BLOCKED_IPS
+    # (this server's own addresses, e.g. the 192.168.0.33 secondary address) are refused as device targets too.
+    device_allowed_cidrs: str = "192.168.0.0/24"
+    device_blocked_ips: str = ""  # comma separated addresses/CIDRs that must never be a device (the server itself)
+    egress_subnet: str = ""  # docker egress network of the worker (refused as a device address)
+    worker_egress_ip: str = ""
+    zk_debug: bool = False  # redacted packet dumps; ignored in prod
+
+    @field_validator("device_allowed_cidrs", "device_blocked_ips", "egress_subnet")
+    @classmethod
+    def _cidrs(cls, v: str) -> str:
+        for item in v.split(","):
+            if item.strip():
+                ipaddress.ip_network(item.strip(), strict=False)  # garbage -> startup fails
+        return v
+
     @field_validator(
         "audit_hmac_key",
         "fcm_credentials_file",
@@ -220,6 +237,15 @@ class Settings(BaseSettings):
     @property
     def trusted_proxy_networks(self) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
         return [ipaddress.ip_network(i.strip(), strict=False) for i in self.trusted_proxies.split(",") if i.strip()]
+
+    @property
+    def device_allowed_networks(self) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+        return [ipaddress.ip_network(i.strip(), strict=False) for i in self.device_allowed_cidrs.split(",") if i.strip()]
+
+    @property
+    def device_blocked_networks(self) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+        items = [*self.device_blocked_ips.split(","), self.egress_subnet, self.worker_egress_ip]
+        return [ipaddress.ip_network(i.strip(), strict=False) for i in items if i.strip()]
 
     @property
     def cors_origin_list(self) -> list[str]:

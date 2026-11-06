@@ -14,6 +14,10 @@ Jobs (office timezone = `office.timezone` setting at start-up):
   payroll.publish_request_expiry       hourly at :20 (open publish requests past their expiry become stale / EXPIRED; plan 17 5a)
   worker.heartbeat                     every 60 s    (Redis ec:worker:heartbeat, read by GET /admin/system/health)
   tasks.reminders                      every minute  (pushes task reminders that are due; plan 14)
+  devices.sync                         every minute  (attendance devices that are due, plan 18; short lock)
+  devices.queue                        every 3 s     (Sync now / Test connection / mapping recompute jobs from Redis)
+  devices.reconcile                    daily 00:20   (syncs every device, recomputes the apply window; before auto_close 00:30)
+  devices.retention                    daily 04:00   (old raw punches, sync history, stale device user names / cards)
   leave.retention                      daily 03:45   (setting leave.reason_retention_days, 0 = off: nulls reason/comment of
                                                      old decided requests, deletes their unreferenced attachment files)
 
@@ -39,6 +43,7 @@ from ..core.db import dispose_engine, get_sessionmaker
 from ..core.redis import close_redis, get_redis
 from ..services import announcements as ann_svc
 from ..services import attendance as att
+from ..services import device_sync as device_sync_svc
 from ..services import files as files_svc
 from ..services import leave as leave_svc
 from ..services import license as license_svc
@@ -100,6 +105,26 @@ async def job_task_reminders() -> int:
         return await tasks_svc.send_due_reminders(s)
 
 
+async def job_devices_tick() -> int:
+    return await device_sync_svc.tick(get_sessionmaker(), await get_redis())
+
+
+async def job_devices_queue() -> None:
+    """Never raises; no database work unless a job is waiting."""
+    try:
+        await device_sync_svc.process_queue(get_sessionmaker(), await get_redis())
+    except Exception:  # noqa: BLE001
+        log.warning("device job queue could not be processed")
+
+
+async def job_devices_reconcile() -> int:
+    return await device_sync_svc.reconcile(get_sessionmaker(), await get_redis())
+
+
+async def job_devices_retention() -> int:
+    return sum((await device_sync_svc.retention(get_sessionmaker())).values())
+
+
 async def job_heartbeat() -> None:
     """Not lock-guarded and never raises: it only proves this worker is alive."""
     try:
@@ -136,6 +161,8 @@ def build_scheduler(tz: str) -> AsyncIOScheduler:
         ("announcements.retention", job_announcement_retention, CronTrigger(hour=3, minute=50, timezone=tz)),
         ("license.expiry_alert", job_license_alert, CronTrigger(hour=8, minute=0, timezone=tz)),
         ("payroll.publish_request_expiry", job_publish_request_expiry, CronTrigger(minute=20, timezone=tz)),
+        ("devices.reconcile", job_devices_reconcile, CronTrigger(hour=0, minute=20, timezone=tz)),
+        ("devices.retention", job_devices_retention, CronTrigger(hour=4, minute=0, timezone=tz)),
     ]
     for name, fn, trig in jobs:
         sched.add_job(_guarded, trig, args=[name, fn], id=name, name=name, replace_existing=True)
@@ -143,6 +170,11 @@ def build_scheduler(tz: str) -> AsyncIOScheduler:
         _guarded, IntervalTrigger(seconds=60), args=["tasks.reminders", job_task_reminders, 55],
         id="tasks.reminders", name="tasks.reminders", replace_existing=True,
     )  # fmt: skip
+    sched.add_job(  # short lock, like tasks.reminders
+        _guarded, IntervalTrigger(seconds=60), args=["devices.sync", job_devices_tick, 55],
+        id="devices.sync", name="devices.sync", replace_existing=True,
+    )  # fmt: skip
+    sched.add_job(job_devices_queue, IntervalTrigger(seconds=3), id="devices.queue", name="devices.queue", replace_existing=True)
     sched.add_job(
         job_heartbeat, IntervalTrigger(seconds=60), id="worker.heartbeat", name="worker.heartbeat", replace_existing=True
     )

@@ -31,7 +31,7 @@ MAX_RANGE_DAYS = 366
 
 @router.get("/export")
 async def export(
-    type: Literal["all", "attendance", "leave", "late", "permission", "on_duty", "food"] = "all",
+    type: Literal["all", "attendance", "leave", "late", "permission", "on_duty", "food", "device_punches"] = "all",
     from_: dt.date = Query(..., alias="from"),
     to: dt.date = Query(...),
     department_id: uuid.UUID | None = None,
@@ -59,6 +59,8 @@ async def export(
             raise AppError("VALIDATION_ERROR", "to must be >= from", details=[{"field": "to", "message": "must be >= from"}])
         if (to - from_).days + 1 > MAX_RANGE_DAYS:
             raise AppError("RANGE_TOO_LARGE", f"Range may not exceed {MAX_RANGE_DAYS} days")
+        if type == "device_punches" and (to - from_).days + 1 > 92:
+            raise AppError("INVALID_DATE_RANGE", "Device punches can be exported for at most 92 days at a time")
         names = export_svc.types_for(type)
         export_svc.require_type_permissions(actor, names)  # per-type permission, on top of export.all / export.team
         with_reasons = export_svc.require_sensitive(actor, names, include_reasons)  # export.sensitive, else 403

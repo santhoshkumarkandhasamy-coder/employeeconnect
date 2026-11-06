@@ -15,7 +15,9 @@ from ..core.pagination import PageParams
 from ..core.rbac import Principal, require_permission
 from ..core.redis import get_redis
 from ..schemas.attendance import HolidayIn, HolidayPatch, ManualAttendanceIn, PunchRequest
+from ..schemas.devices import UseDeviceIn
 from ..services import attendance as svc
+from ..services import device_attendance
 from ..services import late as late_svc
 
 router = APIRouter(tags=["attendance"])
@@ -84,6 +86,18 @@ async def summary(
     return await svc.summary(session, actor, month)
 
 
+@router.get("/attendance/punches")
+async def my_punches(
+    date: dt.date | None = None,
+    from_: dt.date | None = Query(None, alias="from"),
+    to: dt.date | None = None,
+    session: AsyncSession = Depends(get_session),
+    actor: Principal = Depends(require_permission()),
+):
+    """The caller's own device punches (plan 18): no ids, cards or device data."""
+    return await device_attendance.my_punches(session, actor, from_, to, date)
+
+
 @router.get("/attendance/team")
 async def team(
     params: PageParams = Depends(),
@@ -121,6 +135,19 @@ async def manual_upsert(
 ):
     await rate_limit.enforce(redis, [(f"rl:attendance:manual:{actor.id}", 60, 60)], fail_closed=True)
     return await svc.manual_upsert(session, actor, user_id, work_date, body)
+
+
+@router.post("/admin/attendance/{user_id}/{work_date}/use-device")
+async def use_device(
+    user_id: uuid.UUID,
+    work_date: dt.date,
+    body: UseDeviceIn,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = _MANUAL,
+):
+    await rate_limit.enforce(redis, [(f"rl:attendance:manual:{actor.id}", 60, 60)], fail_closed=True)
+    return await device_attendance.use_device(session, actor, user_id, work_date, body.reason)
 
 
 @router.delete("/admin/attendance/{user_id}/{work_date}", status_code=204)

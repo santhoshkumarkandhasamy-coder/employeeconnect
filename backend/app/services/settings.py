@@ -17,6 +17,7 @@ from ..core.errors import AppError
 from ..core.rbac import Principal
 from ..models import Setting
 from . import attendance as att
+from . import device_settings as dev_cfg
 from . import food as food_svc
 from . import leave as leave_svc
 from .auth import _CONFIG_DEFAULTS
@@ -26,6 +27,7 @@ KNOWN: dict[str, Any] = {
     **{k: v for k, v in _CONFIG_DEFAULTS.items() if v is not None},
     **food_svc.FOOD_DEFAULTS,
     **leave_svc._DEFAULTS,
+    **dev_cfg.DEFAULTS,
     "console.session_max_hours": 12,
     "console.inactivity_timeout_minutes": 15,
 }
@@ -74,6 +76,7 @@ SPECS: dict[str, Spec] = {
     "auth.offline_cache_max_hours": _i(0, 720),  # 0 = off, otherwise 12..720 (checked in validate)
     "console.session_max_hours": _i(1, 24),
     "console.inactivity_timeout_minutes": _i(5, 60),
+    **{k: Spec(kind, lo, hi) for k, (kind, lo, hi) in dev_cfg.BOUNDS.items()},  # attendance devices (plan 18)
 }
 
 
@@ -111,6 +114,10 @@ def validate(key: str, value: Any) -> Any:
             raise _bad(key, f"must be between {spec.lo:g} and {spec.hi:g}")
     if key == "auth.offline_cache_max_hours" and 0 < value < 12:
         raise _bad(key, "must be 0 (off) or between 12 and 720")
+    if key.startswith("device."):
+        problem = dev_cfg.validate_device_setting(key, value)
+        if problem:
+            raise _bad(key, problem)
     food_svc.validate_food_setting(key, value)
     att.validate_office_setting(key, value)
     return value
