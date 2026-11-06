@@ -19,7 +19,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 DB = Path(__file__).resolve().parents[2] / "database"
-MODEL_SRC = (Path(__file__).resolve().parents[1] / "app" / "models" / "payroll_tax.py").read_text(encoding="utf-8")
+MODEL_SRC = (Path(__file__).resolve().parents[1] / "app" / "models" / "payroll_tax.py").read_text(encoding="utf-8").split("class PayrollTaxComputation")[0]  # 0029 adds its own class to this file
 NEW_TABLES = ("tax_year_rules", "tax_declarations", "tax_proofs", "form16_documents")
 
 

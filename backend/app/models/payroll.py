@@ -447,6 +447,14 @@ class StatutoryChallan(TimestampMixin, Base):
             "(status = 'paid' AND paid_on IS NOT NULL) OR (status = 'unpaid' AND paid_on IS NULL AND reference_enc IS NULL)",
             name="ck_statutory_challans_paid",
         ),
+        CheckConstraint(  # migration 0029: only a paid TDS challan carries BSR / serial / deposit date
+            "(type = 'tds' AND status = 'paid') OR (bsr_code_enc IS NULL AND challan_serial_enc IS NULL AND deposited_on IS NULL)",
+            name="ck_statutory_challans_tds_fields",
+        ),
+        CheckConstraint("(bsr_code_enc IS NULL) = (challan_serial_enc IS NULL)", name="ck_statutory_challans_bsr_pair"),
+        CheckConstraint(
+            "deposited_on IS NULL OR deposited_on BETWEEN DATE '2000-01-01' AND DATE '2200-12-31'", name="ck_statutory_challans_deposited_on"
+        ),
         Index("ix_statutory_challans_period", "period"),
         Index("ix_statutory_challans_created_by", "created_by"),
         Index("ix_statutory_challans_updated_by", "updated_by"),
@@ -458,6 +466,9 @@ class StatutoryChallan(TimestampMixin, Base):
     amount: Mapped[str] = mapped_column("amount_enc", EncryptedString, nullable=False)
     paid_on: Mapped[dt.date | None] = mapped_column(Date)
     reference: Mapped[str | None] = mapped_column("reference_enc", EncryptedString)
+    bsr_code: Mapped[str | None] = mapped_column("bsr_code_enc", EncryptedString)  # migration 0029, TDS only
+    challan_serial: Mapped[str | None] = mapped_column("challan_serial_enc", EncryptedString)  # migration 0029, TDS only
+    deposited_on: Mapped[dt.date | None] = mapped_column(Date)  # migration 0029, TDS only
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'unpaid'"))
     created_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
     updated_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
@@ -474,6 +485,15 @@ class StatutoryChallanEvent(Base):
         CheckConstraint("status IN ('unpaid','paid')", name="ck_statutory_challan_events_status"),
         CheckConstraint(
             "prev_status IS NULL OR prev_status IN ('unpaid','paid')", name="ck_statutory_challan_events_prev_status"
+        ),
+        CheckConstraint(  # migration 0029
+            "type = 'tds' OR (bsr_code_enc IS NULL AND challan_serial_enc IS NULL AND deposited_on IS NULL AND prev_bsr_code_enc IS NULL "
+            "AND prev_challan_serial_enc IS NULL AND prev_deposited_on IS NULL)",
+            name="ck_statutory_challan_events_tds_fields",
+        ),
+        CheckConstraint(
+            "(bsr_code_enc IS NULL) = (challan_serial_enc IS NULL) AND (prev_bsr_code_enc IS NULL) = (prev_challan_serial_enc IS NULL)",
+            name="ck_statutory_challan_events_bsr_pair",
         ),
         Index("ix_statutory_challan_events_challan", "challan_id", "created_at"),
         Index("ix_statutory_challan_events_actor_id", "actor_id"),
@@ -493,5 +513,11 @@ class StatutoryChallanEvent(Base):
     prev_paid_on: Mapped[dt.date | None] = mapped_column(Date)
     prev_reference: Mapped[str | None] = mapped_column("prev_reference_enc", EncryptedString)
     prev_amount: Mapped[str | None] = mapped_column("prev_amount_enc", EncryptedString)
+    bsr_code: Mapped[str | None] = mapped_column("bsr_code_enc", EncryptedString)  # migration 0029
+    challan_serial: Mapped[str | None] = mapped_column("challan_serial_enc", EncryptedString)
+    deposited_on: Mapped[dt.date | None] = mapped_column(Date)
+    prev_bsr_code: Mapped[str | None] = mapped_column("prev_bsr_code_enc", EncryptedString)
+    prev_challan_serial: Mapped[str | None] = mapped_column("prev_challan_serial_enc", EncryptedString)
+    prev_deposited_on: Mapped[dt.date | None] = mapped_column(Date)
     actor_id: Mapped[uuid.UUID] = fk_uuid("users.id")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

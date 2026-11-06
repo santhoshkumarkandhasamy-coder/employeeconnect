@@ -20,7 +20,7 @@ from .payroll import (
     StatutoryChallan,
     StatutoryChallanEvent,
 )
-from .payroll_tax import Form16Document, TaxDeclaration, TaxProof, TaxYearRule
+from .payroll_tax import Form16Document, PayrollTaxComputation, TaxDeclaration, TaxProof, TaxYearRule
 from .payroll_controls import (
     CompanyBankAccount,
     EmployeeBankChange,
@@ -51,6 +51,6 @@ __all__ = [
     "Company", "License", "SalaryStructure", "SalaryIncrement", "SalaryIncrementBatch", "EmployeePayrollDetails", "FnfSettlement", "PayrollRun", "Payslip", "StatutoryChallan", "StatutoryChallanEvent",
     "PayrollItemEvent", "PayrollImportBatch", "PayrollOneTimeItem", "PayrollLoan", "PayrollLoanInstallment", "PayrollArrears", "LeaveEncashment", "ReimbursementClaim", "OvertimeDay",
     "PayrollPublishRequest", "PayslipDelivery", "CompanyBankAccount", "PayrollPaymentBatch", "PayrollPaymentLine", "EmployeeBankChange",
-    "TaxYearRule", "TaxDeclaration", "TaxProof", "Form16Document",
+    "TaxYearRule", "TaxDeclaration", "TaxProof", "Form16Document", "PayrollTaxComputation",
     "FoodEnrollment", "Announcement", "AnnouncementDepartment", "AnnouncementRead",
 ]

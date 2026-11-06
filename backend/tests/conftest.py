@@ -106,6 +106,7 @@ TABLES = [
     "tax_declarations",
     "tax_proofs",
     "form16_documents",
+    "payroll_tax_computations",
     "statutory_challans",
     "statutory_challan_events",
     "payroll_import_batches",

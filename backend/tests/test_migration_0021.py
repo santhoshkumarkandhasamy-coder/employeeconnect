@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 DB = Path(__file__).resolve().parents[2] / "database"
+LATER = (Path(__file__).resolve().parents[2] / "database" / "alembic" / "versions" / "0029_tds_engine.py").read_text(encoding="utf-8")  # 0029 adds columns / constraints
 
 
 def _load():
@@ -55,7 +56,7 @@ def test_model_matches_migration_and_money_is_encrypted():
         assert idx.name in mod.UPGRADE, idx.name
     for con in t.constraints:
         if con.name:
-            assert con.name in mod.UPGRADE, con.name
+            assert con.name in mod.UPGRADE or con.name in LATER, con.name
     # FK columns are indexed
     indexed = {c.name for i in t.indexes for c in i.columns}
     assert {"created_by", "updated_by"} <= indexed

@@ -3598,5 +3598,147 @@ $$;
 
 UPDATE alembic_version SET version_num='0028' WHERE alembic_version.version_num = '0027';
 
+-- Running upgrade 0028 -> 0029
+
+-- ---------------------------------------------------------------- tax computation snapshots
+CREATE TABLE payroll_tax_computations (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  payslip_id uuid NOT NULL REFERENCES payslips(id) ON DELETE CASCADE,
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  fy text NOT NULL,
+  rules_id uuid NOT NULL REFERENCES tax_year_rules(id) ON DELETE RESTRICT,
+  rules_version integer NOT NULL,
+  regime text NOT NULL,
+  declaration_version integer,
+  proofs_digest text NOT NULL,
+  mode text NOT NULL,
+  computation_enc bytea NOT NULL,
+  suggested_enc bytea NOT NULL,
+  applied boolean NOT NULL DEFAULT false,
+  override_reason_enc bytea,
+  created_by uuid REFERENCES users(id) ON DELETE RESTRICT,
+  updated_by uuid REFERENCES users(id) ON DELETE RESTRICT,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT uq_payroll_tax_computations_payslip UNIQUE (payslip_id),
+  CONSTRAINT ck_payroll_tax_computations_fy CHECK (fy ~ '^[0-9]{4}-[0-9]{2}$'),
+  CONSTRAINT ck_payroll_tax_computations_rules_version CHECK (rules_version >= 1),
+  CONSTRAINT ck_payroll_tax_computations_regime CHECK (regime IN ('old','new')),
+  CONSTRAINT ck_payroll_tax_computations_declaration_version CHECK (declaration_version IS NULL OR declaration_version >= 1),
+  CONSTRAINT ck_payroll_tax_computations_proofs_digest CHECK (char_length(proofs_digest) BETWEEN 1 AND 128),
+  CONSTRAINT ck_payroll_tax_computations_mode CHECK (mode IN ('suggest','apply')),
+  CONSTRAINT ck_payroll_tax_computations_applied CHECK (NOT applied OR mode = 'apply'),
+  CONSTRAINT ck_payroll_tax_computations_override CHECK (override_reason_enc IS NULL OR mode = 'apply')
+);
+
+CREATE INDEX ix_payroll_tax_computations_user_fy ON payroll_tax_computations (user_id, fy);
+
+CREATE INDEX ix_payroll_tax_computations_rules_id ON payroll_tax_computations (rules_id);
+
+CREATE INDEX ix_payroll_tax_computations_created_by ON payroll_tax_computations (created_by);
+
+CREATE INDEX ix_payroll_tax_computations_updated_by ON payroll_tax_computations (updated_by);
+
+CREATE FUNCTION payroll_tax_computations_lock() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  slip record;
+  rl record;
+  y integer;
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    SELECT p.status INTO slip FROM payslips p WHERE p.id = OLD.payslip_id;
+    IF FOUND AND slip.status <> 'draft' THEN
+      RAISE EXCEPTION 'tax computation % belongs to a % payslip and cannot be deleted', OLD.id, slip.status USING ERRCODE = '23000';
+    END IF;
+    RETURN OLD;  -- draft payslip, or the payslip itself is being deleted (cascade)
+  END IF;
+  IF TG_OP = 'UPDATE' THEN
+    IF NEW.payslip_id IS DISTINCT FROM OLD.payslip_id OR NEW.user_id IS DISTINCT FROM OLD.user_id OR NEW.fy IS DISTINCT FROM OLD.fy
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+      RAISE EXCEPTION 'tax computation %: payslip, employee, FY and creation time never change', OLD.id USING ERRCODE = '23000';
+    END IF;
+    -- app.key_rotation is a plain session setting: rotation runs as the application role, so a role check is not possible
+    IF current_setting('app.key_rotation', true) = 'on'
+       AND payroll_strip_enc(to_jsonb(NEW)) IS NOT DISTINCT FROM payroll_strip_enc(to_jsonb(OLD)) THEN
+      RETURN NEW;  -- key rotation: only *_enc columns changed
+    END IF;
+  END IF;
+  SELECT p.status, p.user_id, r.period INTO slip FROM payslips p JOIN payroll_runs r ON r.id = p.run_id WHERE p.id = NEW.payslip_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'tax computation: the payslip does not exist' USING ERRCODE = '23000';
+  END IF;
+  IF slip.status <> 'draft' THEN
+    RAISE EXCEPTION 'tax computation of payslip % is frozen (the payslip is %)', NEW.payslip_id, slip.status USING ERRCODE = '23000';
+  END IF;
+  IF slip.user_id IS DISTINCT FROM NEW.user_id THEN
+    RAISE EXCEPTION 'tax computation: the employee must equal the payslip''s' USING ERRCODE = '23000';
+  END IF;
+  y := extract(year FROM slip.period)::integer - CASE WHEN extract(month FROM slip.period) < 4 THEN 1 ELSE 0 END;
+  IF NEW.fy IS DISTINCT FROM (y::text || '-' || lpad(((y + 1) % 100)::text, 2, '0')) THEN
+    RAISE EXCEPTION 'tax computation: FY % is not the financial year of the payslip period', NEW.fy USING ERRCODE = '23000';
+  END IF;
+  SELECT t.fy, t.version, t.status INTO rl FROM tax_year_rules t WHERE t.id = NEW.rules_id;
+  IF NOT FOUND OR rl.fy IS DISTINCT FROM NEW.fy OR rl.version IS DISTINCT FROM NEW.rules_version OR rl.status NOT IN ('verified','superseded') THEN
+    RAISE EXCEPTION 'tax computation: the rules must be a verified (or superseded) version of the same FY, with the stated version' USING ERRCODE = '23000';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+CREATE TRIGGER trg_payroll_tax_computations_lock BEFORE INSERT OR UPDATE OR DELETE ON payroll_tax_computations FOR EACH ROW EXECUTE FUNCTION payroll_tax_computations_lock();
+
+CREATE TRIGGER trg_payroll_tax_computations_updated_at BEFORE UPDATE ON payroll_tax_computations FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- ---------------------------------------------------------------- TDS challan details
+ALTER TABLE statutory_challans ADD COLUMN bsr_code_enc bytea;
+
+ALTER TABLE statutory_challans ADD COLUMN challan_serial_enc bytea;
+
+ALTER TABLE statutory_challans ADD COLUMN deposited_on date;
+
+ALTER TABLE statutory_challans ADD CONSTRAINT ck_statutory_challans_tds_fields CHECK ((type = 'tds' AND status = 'paid') OR (bsr_code_enc IS NULL AND challan_serial_enc IS NULL AND deposited_on IS NULL));
+
+ALTER TABLE statutory_challans ADD CONSTRAINT ck_statutory_challans_bsr_pair CHECK ((bsr_code_enc IS NULL) = (challan_serial_enc IS NULL));
+
+ALTER TABLE statutory_challans ADD CONSTRAINT ck_statutory_challans_deposited_on CHECK (deposited_on IS NULL OR deposited_on BETWEEN DATE '2000-01-01' AND DATE '2200-12-31');
+
+ALTER TABLE statutory_challan_events ADD COLUMN bsr_code_enc bytea;
+
+ALTER TABLE statutory_challan_events ADD COLUMN challan_serial_enc bytea;
+
+ALTER TABLE statutory_challan_events ADD COLUMN deposited_on date;
+
+ALTER TABLE statutory_challan_events ADD COLUMN prev_bsr_code_enc bytea;
+
+ALTER TABLE statutory_challan_events ADD COLUMN prev_challan_serial_enc bytea;
+
+ALTER TABLE statutory_challan_events ADD COLUMN prev_deposited_on date;
+
+ALTER TABLE statutory_challan_events ADD CONSTRAINT ck_statutory_challan_events_tds_fields CHECK (type = 'tds' OR (bsr_code_enc IS NULL AND challan_serial_enc IS NULL AND deposited_on IS NULL AND prev_bsr_code_enc IS NULL AND prev_challan_serial_enc IS NULL AND prev_deposited_on IS NULL));
+
+ALTER TABLE statutory_challan_events ADD CONSTRAINT ck_statutory_challan_events_bsr_pair CHECK ((bsr_code_enc IS NULL) = (challan_serial_enc IS NULL) AND (prev_bsr_code_enc IS NULL) = (prev_challan_serial_enc IS NULL));
+
+-- ---------------------------------------------------------------- settings
+INSERT INTO settings (key, value) VALUES ('payroll.tds_engine_enabled', 'false'::jsonb) ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO settings (key, value) VALUES ('payroll.tds_engine_mode', '"suggest"'::jsonb) ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO settings (key, value) VALUES ('payroll.tds_one_time_in_month', 'true'::jsonb) ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO settings (key, value) VALUES ('payroll.tds_proofs_from_month', '1'::jsonb) ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO settings (key, value) VALUES ('payroll.tds_include_other_income', 'false'::jsonb) ON CONFLICT (key) DO NOTHING;
+
+DO $$
+BEGIN
+  REVOKE DELETE, TRUNCATE ON payroll_tax_computations FROM app_user;
+  GRANT UPDATE (bsr_code_enc, challan_serial_enc, prev_bsr_code_enc, prev_challan_serial_enc) ON statutory_challan_events TO app_user;
+EXCEPTION WHEN undefined_object OR insufficient_privilege THEN
+  RAISE NOTICE 'revoke / grant on the 0029 objects skipped';
+END
+$$;
+
+UPDATE alembic_version SET version_num='0029' WHERE alembic_version.version_num = '0028';
+
 COMMIT;
 

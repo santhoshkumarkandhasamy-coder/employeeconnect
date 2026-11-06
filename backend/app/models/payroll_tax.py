@@ -1,4 +1,4 @@
-"""Payroll tax data (migration 0028, plan docs/plans/17-payroll-phase5.md work package 5b): tax year rules, employee declarations,
+"""Payroll tax data (migration 0028; PayrollTaxComputation = migration 0029, plan docs/plans/17-payroll-phase5.md work package 5b): tax year rules, employee declarations,
 proofs and uploaded Form 16 documents.
 
 Tax slabs, rates and limits live ONLY in `TaxYearRule.rules` (data, not secret), verified by a second person. The database repeats the
@@ -226,4 +226,45 @@ class Form16Document(TimestampMixin, Base):
     withdrawn_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     withdraw_reason: Mapped[str | None] = mapped_column("withdraw_reason_enc", EncryptedString)
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    updated_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
+
+
+class PayrollTaxComputation(TimestampMixin, Base):
+    """TDS engine snapshot (migration 0029, decision T8): one row per draft / processed payslip. Written while the payslip is `draft`
+    (payroll_tax_computations_lock) and FROZEN once it is processed, so write it BEFORE moving the payslip to `processed`.
+    `rules_id` must be a verified / superseded rules row of the same FY with `rules_version`; `fy` is the April-March year of the run period.
+    `applied` and the override reason exist only in mode `apply`. Computation, suggested TDS and override reason are application-encrypted."""
+
+    __tablename__ = "payroll_tax_computations"
+    __table_args__ = (
+        UniqueConstraint("payslip_id", name="uq_payroll_tax_computations_payslip"),
+        CheckConstraint(f"fy {_FY}", name="ck_payroll_tax_computations_fy"),
+        CheckConstraint("rules_version >= 1", name="ck_payroll_tax_computations_rules_version"),
+        CheckConstraint("regime IN ('old','new')", name="ck_payroll_tax_computations_regime"),
+        CheckConstraint("declaration_version IS NULL OR declaration_version >= 1", name="ck_payroll_tax_computations_declaration_version"),
+        CheckConstraint("char_length(proofs_digest) BETWEEN 1 AND 128", name="ck_payroll_tax_computations_proofs_digest"),
+        CheckConstraint("mode IN ('suggest','apply')", name="ck_payroll_tax_computations_mode"),
+        CheckConstraint("NOT applied OR mode = 'apply'", name="ck_payroll_tax_computations_applied"),
+        CheckConstraint("override_reason_enc IS NULL OR mode = 'apply'", name="ck_payroll_tax_computations_override"),
+        Index("ix_payroll_tax_computations_user_fy", "user_id", "fy"),
+        Index("ix_payroll_tax_computations_rules_id", "rules_id"),
+        Index("ix_payroll_tax_computations_created_by", "created_by"),
+        Index("ix_payroll_tax_computations_updated_by", "updated_by"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    payslip_id: Mapped[uuid.UUID] = fk_uuid("payslips.id", ondelete="CASCADE")
+    user_id: Mapped[uuid.UUID] = fk_uuid("users.id")
+    fy: Mapped[str] = mapped_column(Text, nullable=False)
+    rules_id: Mapped[uuid.UUID] = fk_uuid("tax_year_rules.id")
+    rules_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    regime: Mapped[str] = mapped_column(Text, nullable=False)
+    declaration_version: Mapped[int | None] = mapped_column(Integer)
+    proofs_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    mode: Mapped[str] = mapped_column(Text, nullable=False)
+    computation: Mapped[dict] = mapped_column("computation_enc", EncryptedJSON, nullable=False)
+    suggested: Mapped[str] = mapped_column("suggested_enc", EncryptedString, nullable=False)
+    applied: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    override_reason: Mapped[str | None] = mapped_column("override_reason_enc", EncryptedString)
+    created_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
     updated_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
