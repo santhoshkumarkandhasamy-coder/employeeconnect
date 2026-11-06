@@ -30,7 +30,7 @@ Map<String, dynamic> _listItem({String id = 'f1', String status = 'submitted'}) 
       'warnings': ['CLAIMS_OPEN'],
     };
 
-Map<String, dynamic> _preview({String net = '47900.00'}) => {
+Map<String, dynamic> _preview({String net = '47900.00', Map<String, dynamic>? tds, List<String> warnings = const []}) => {
       'estimate': true,
       'days': {'basis_days': 31.0, 'employed_days': 15.0, 'lop_days': 0.0, 'paid_days': 15.0},
       'earnings': [
@@ -40,8 +40,9 @@ Map<String, dynamic> _preview({String net = '47900.00'}) => {
         {'code': 'PF', 'label': 'PF', 'amount': '4100.00'},
       ],
       'totals': {'gross_earnings': '52000.00', 'total_deductions': '4100.00', 'net_pay': net},
-      'warnings': <String>[],
+      'warnings': warnings,
       'source': 'structure',
+      'tds': tds,
     };
 
 class Fake4b extends FakeRepo {
@@ -179,6 +180,28 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('fnf-submit')));
       await tester.pumpAndSettle();
       expect(repo.calls4b, ['submit:3']);
+    });
+
+    testWidgets('the settlement shows the TDS shortfall and its warning', (tester) async {
+      final repo = Fake4b()
+        ..preview = FnfPreview.fromJson(
+          _preview(
+            tds: {'mode': 'apply', 'suggested': '9000.00', 'applied': '6000.00', 'shortfall': '3000.00'},
+            warnings: ['TDS_SHORTFALL_FINAL'],
+          ),
+        );
+      await pumpPayroll(tester, const FnfDetailScreen(fnfId: 'f1'), repo: repo, perms: _manage);
+      await tester.scrollUntilVisible(find.byKey(const ValueKey('fnf-tds-shortfall')), 300, scrollable: find.byType(Scrollable).first);
+      expect(find.byKey(const ValueKey('fnf-tds-suggested')), findsOneWidget);
+      expect(find.byKey(const ValueKey('fnf-tds-applied')), findsOneWidget);
+      expect(find.byKey(const ValueKey('fnf-tds-shortfall')), findsOneWidget);
+      expect(find.textContaining('set a TDS override with a reason'), findsOneWidget);
+    });
+
+    testWidgets('no tds block when the engine is off', (tester) async {
+      final repo = Fake4b();
+      await pumpPayroll(tester, const FnfDetailScreen(fnfId: 'f1'), repo: repo, perms: _manage);
+      expect(find.byKey(const ValueKey('fnf-tds-suggested')), findsNothing);
     });
 
     testWidgets('negative settlement blocks submit and approve', (tester) async {

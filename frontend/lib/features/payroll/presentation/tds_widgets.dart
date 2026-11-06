@@ -163,6 +163,9 @@ class TdsCard extends StatelessWidget {
       ...c.flags,
       for (final w in payslip.warnings)
         if (tdsWarningLabels.containsKey(w)) w,
+      // Blocking engine errors (RULES_CHANGED, TDS_SHORTFALL_FINAL) arrive in errors[] (19.16).
+      for (final e in payslip.errors)
+        if (tdsWarningLabels.containsKey(e)) e,
     }.toList();
     final showUse = editable && !c.isApply && manual != c.suggested && onUseSuggested != null;
     return SectionCard(

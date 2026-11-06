@@ -1080,6 +1080,21 @@ const Map<String, String> payrollErrorLabels = {
 String payrollFlagLabel(String code) =>
     payrollErrorLabels[code] ?? payrollWarningLabels[code] ?? code;
 
+/// What to do about a blocking code (`errors[]` / `PAYROLL_BLOCKED` details), or null.
+String? payrollBlockHint(String code) => switch (code) {
+      'RULES_CHANGED' => 'Refresh the run to use the newer tax rules, then process again.',
+      'TDS_SHORTFALL_FINAL' =>
+        'Set a TDS override with a reason on this payslip (any amount), then process again.',
+      'STRUCTURE_MISSING' => 'Add a salary structure for this employee.',
+      _ => null,
+    };
+
+/// Label plus hint, for the blocked dialog and message.
+String payrollBlockText(String code) {
+  final h = payrollBlockHint(code);
+  return h == null ? payrollFlagLabel(code) : '${payrollFlagLabel(code)}. $h';
+}
+
 const Map<String, String> payrollStatusLabels = {
   'draft': 'Draft',
   'processed': 'Processed',
@@ -1163,7 +1178,7 @@ String payrollErrorMessage(ApiException e) {
       return 'This payroll is locked (already published, or not ready for this step). '
           'Reload to see its current state.';
     case 'PAYROLL_BLOCKED':
-      final lines = e.details.map((d) => '${d.field}: ${payrollFlagLabel(d.message)}');
+      final lines = e.details.map((d) => '${d.field}: ${payrollBlockText(d.message)}');
       return lines.isEmpty
           ? 'Some payslips have errors, so payroll cannot be processed.'
           : 'Payroll cannot be processed yet:\n${lines.join('\n')}';

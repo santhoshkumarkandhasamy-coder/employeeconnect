@@ -129,11 +129,12 @@ void main() {
       Map<String, dynamic>? tds,
       String status = 'draft',
       List<String> warnings = const [],
+      List<String> errors = const [],
       String tdsLine = '1200.00',
       List<String> perms = _manage,
     }) async {
-      final repo = Fake5c()
-        ..adminPayslip = Payslip.fromJson(adminTdsPayslip(status: status, tds: tds, warnings: warnings, tdsLine: tdsLine));
+      final j = adminTdsPayslip(status: status, tds: tds, warnings: warnings, tdsLine: tdsLine)..['errors'] = errors;
+      final repo = Fake5c()..adminPayslip = Payslip.fromJson(j);
       await pumpPayroll(tester, const PayslipEditScreen(payslipId: 'p1'), repo: repo, perms: perms);
       return repo;
     }
@@ -246,7 +247,22 @@ void main() {
 
     testWidgets('rules changed is offered as a warning to refresh the run', (tester) async {
       await open(tester, tds: tdsJson(flags: ['RULES_CHANGED']), warnings: ['RULES_CHANGED']);
-      expect(find.textContaining('Refresh the draft run'), findsOneWidget);
+      expect(find.textContaining('refresh the draft run'), findsOneWidget);
+    });
+
+    testWidgets('blocking errors RULES_CHANGED and TDS_SHORTFALL_FINAL come with a plain hint', (tester) async {
+      await open(
+        tester,
+        tds: tdsJson(mode: 'apply', applied: '1000.00', flags: ['TDS_SHORTFALL_FINAL']),
+        errors: ['RULES_CHANGED', 'TDS_SHORTFALL_FINAL'],
+        warnings: ['TDS_MANUAL_REPLACED', 'PREV_EMPLOYER_UNVERIFIED', 'RULES_SUPERSEDED'],
+      );
+      expect(find.byKey(const ValueKey('tds-flag-RULES_CHANGED')), findsOneWidget);
+      expect(find.byKey(const ValueKey('tds-flag-TDS_SHORTFALL_FINAL')), findsOneWidget);
+      expect(find.textContaining('set a TDS override with a reason'), findsOneWidget);
+      expect(find.byKey(const ValueKey('tds-flag-TDS_MANUAL_REPLACED')), findsOneWidget);
+      expect(find.byKey(const ValueKey('tds-flag-PREV_EMPLOYER_UNVERIFIED')), findsOneWidget);
+      expect(find.byKey(const ValueKey('tds-flag-RULES_SUPERSEDED')), findsOneWidget);
     });
 
     testWidgets('engine off: no TDS card at all', (tester) async {
@@ -444,7 +460,7 @@ void main() {
       final repo = Fake5c()..settingsMap = settings();
       await pumpPayroll(tester, const Scaffold(body: PayrollSettingsTab()), repo: repo, perms: _manage);
       await tester.scrollUntilVisible(find.byKey(const ValueKey('tds-settings-help')), 300, scrollable: find.byType(Scrollable).first);
-      expect(find.textContaining('needs the administrator password'), findsOneWidget);
+      expect(find.textContaining('needs the administrator role and your password'), findsOneWidget);
       expect(find.text('Count only verified proofs from month (1 = January)'), findsOneWidget);
     });
 
@@ -477,9 +493,14 @@ void main() {
       expect(tester.widget<SwitchListTile>(sw).onChanged, isNull);
     });
 
-    testWidgets('mode, month and the two switches are ordinary settings: no password', (tester) async {
+    testWidgets('mode, month and the two switches need role.assign and the password', (tester) async {
       final repo = Fake5c()..settingsMap = settings(enabled: true);
-      await pumpPayroll(tester, const Scaffold(body: PayrollSettingsTab()), repo: repo, perms: _manage);
+      await pumpPayroll(
+        tester,
+        const Scaffold(body: PayrollSettingsTab()),
+        repo: repo,
+        perms: const [..._manage, 'role.assign'],
+      );
       final month = find.widgetWithText(TextFormField, 'Count only verified proofs from month (1 = January)');
       await tester.scrollUntilVisible(month, 300, scrollable: find.byType(Scrollable).first);
       await tester.enterText(month, '13');
@@ -491,10 +512,30 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(other);
       await tester.pumpAndSettle();
-      await _tap(tester, 'save-settings');
-      expect(find.byKey(const ValueKey('reauth-password')), findsNothing);
+      await tester.ensureVisible(find.byKey(const ValueKey('save-settings')));
+      await tester.tap(find.byKey(const ValueKey('save-settings')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+      await _password(tester, 'pw');
       expect(repo.savedSettings.single, {tdsProofsFromMonthKey: 4, tdsIncludeOtherIncomeKey: true});
-      expect(repo.settingsPasswords.single, isNull);
+      expect(repo.settingsPasswords.single, 'pw');
+    });
+
+    testWidgets('without role.assign mode, month and the switches are disabled', (tester) async {
+      final repo = Fake5c()..settingsMap = settings(enabled: true);
+      await pumpPayroll(tester, const Scaffold(body: PayrollSettingsTab()), repo: repo, perms: _manage);
+      final month = find.widgetWithText(TextFormField, 'Count only verified proofs from month (1 = January)');
+      await tester.scrollUntilVisible(month, 300, scrollable: find.byType(Scrollable).first);
+      expect(tester.widget<TextFormField>(month).enabled, isFalse);
+      for (final t in [
+        'Charge the tax on bonus and arrears in the month they are paid',
+        'Include the other income employees declare',
+      ]) {
+        expect(tester.widget<SwitchListTile>(find.widgetWithText(SwitchListTile, t)).onChanged, isNull, reason: t);
+      }
+      final dd = find.byType(DropdownButtonFormField<String>);
+      await tester.ensureVisible(dd.last);
+      expect(tester.widget<DropdownButton<String>>(find.descendant(of: dd.last, matching: find.byType(DropdownButton<String>))).onChanged, isNull);
     });
   });
 

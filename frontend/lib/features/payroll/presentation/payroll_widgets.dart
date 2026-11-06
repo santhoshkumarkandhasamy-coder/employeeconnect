@@ -73,7 +73,7 @@ Future<void> showBlockedDialog(BuildContext context, ApiException e) => showDial
                         contentPadding: EdgeInsets.zero,
                         leading: const Icon(Icons.error_outline),
                         title: Text(d.field),
-                        subtitle: Text(payrollFlagLabel(d.message)),
+                        subtitle: Text(payrollBlockText(d.message)),
                       ),
                   ],
                 ),

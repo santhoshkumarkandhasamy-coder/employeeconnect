@@ -12,6 +12,7 @@ import '../domain/payroll_models.dart' show canManagePayroll, periodTitle;
 import '../domain/payroll_money.dart';
 import '../domain/phase4a_models.dart' show canApprovePayroll;
 import '../domain/phase4b_models.dart';
+import '../domain/tds_computation.dart' show tdsModeLabel;
 import 'fnf_editor_screen.dart';
 import 'fnf_widgets.dart';
 import 'increment_widgets.dart' show showCommentDialog;
@@ -433,6 +434,29 @@ class FnfPreviewCard extends ConsumerWidget {
               ...payslipLineRows(p.deductions),
               const Divider(),
               _totals(p.grossEarnings, p.totalDeductions, p.netPay),
+              if (p.tds != null) ...[
+                const SizedBox(height: 8),
+                Text('Income tax (TDS) on this settlement', style: Theme.of(context).textTheme.titleSmall),
+                AmountRow(
+                  key: const ValueKey('fnf-tds-suggested'),
+                  label: 'Computed by the engine',
+                  value: formatRupees(p.tds!.suggested),
+                  caption: tdsModeLabel(p.tds!.mode),
+                ),
+                if (p.tds!.applied != null)
+                  AmountRow(
+                    key: const ValueKey('fnf-tds-applied'),
+                    label: 'Deducted',
+                    value: formatRupees(p.tds!.applied!),
+                  ),
+                if (p.tds!.hasShortfall)
+                  AmountRow(
+                    key: const ValueKey('fnf-tds-shortfall'),
+                    label: 'Shortfall (cannot be collected)',
+                    value: formatRupees(p.tds!.shortfall),
+                    caption: 'Set a TDS override with a reason on the final payslip.',
+                  ),
+              ],
               if (p.warnings.isNotEmpty) ...[
                 const SizedBox(height: 6),
                 FnfWarnings(p.warnings),

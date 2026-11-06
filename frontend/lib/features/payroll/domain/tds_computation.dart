@@ -25,7 +25,11 @@ const Map<String, String> tdsWarningLabels = {
   'TDS_CAPPED_NET': 'TDS reduced to fit the pay',
   'TDS_OVERRIDDEN': 'TDS set by hand',
   'TAX_RULES_NOT_VERIFIED': 'Tax rules not verified',
-  'RULES_CHANGED': 'Newer tax rules available',
+  'RULES_CHANGED': 'Newer tax rules: refresh the run',
+  'TDS_SHORTFALL_FINAL': 'TDS cannot be collected: set a TDS override',
+  'TDS_MANUAL_REPLACED': 'Manual TDS replaced by the computed figure',
+  'PREV_EMPLOYER_UNVERIFIED': 'Previous employer details not verified',
+  'RULES_SUPERSEDED': 'Tax rules superseded',
   'NO_PAN_206AA': 'No PAN: higher TDS rate',
   'PERQUISITE_REVIEW': 'Check loan perquisite',
   'LEAVE_ENCASH_REVIEW': 'Check leave encashment tax',
@@ -42,7 +46,16 @@ const Map<String, String> tdsFlagExplanations = {
   'TDS_OVERRIDDEN': 'The TDS on this payslip was typed in by hand instead of using the computed figure.',
   'TAX_RULES_NOT_VERIFIED': 'The tax rules for this financial year are not verified, so nothing was computed. '
       'The manual TDS figure is used.',
-  'RULES_CHANGED': 'Newer verified tax rules exist than the ones this run uses. Refresh the draft run to use them.',
+  'RULES_CHANGED': 'Newer verified tax rules exist than the ones this run uses. This blocks processing: '
+      'refresh the draft run to use them.',
+  'TDS_SHORTFALL_FINAL': 'The TDS due cannot be fully collected from the pay left, and this is the last payslip. '
+      'This blocks processing: set a TDS override with a reason.',
+  'TDS_MANUAL_REPLACED': 'A TDS figure typed earlier was replaced by the computed one. Set an override or hand '
+      'the line back to the engine to confirm.',
+  'PREV_EMPLOYER_UNVERIFIED': 'Income and TDS from a previous employer are not counted until HR verifies the '
+      'proof (Form 12B).',
+  'RULES_SUPERSEDED': 'The rules used by this run have been superseded. This run cannot be refreshed, so it keeps '
+      'the rules it was made with.',
   'NO_PAN_206AA': 'The employee has no valid PAN, so the higher no-PAN rate applies.',
   'PERQUISITE_REVIEW': 'The employee has an outstanding loan above the limit in the rules. The tax on the loan '
       'benefit is not computed: check it and use a manual figure if needed.',

@@ -146,6 +146,10 @@ void main() {
         'LEAVE_ENCASH_REVIEW',
         'REGIME_DEFAULT',
         'NO_DECLARATION',
+        'TDS_SHORTFALL_FINAL',
+        'TDS_MANUAL_REPLACED',
+        'PREV_EMPLOYER_UNVERIFIED',
+        'RULES_SUPERSEDED',
       ]) {
         expect(tdsFlagLabel(f), isNot(f), reason: f);
         expect(tdsFlagExplanation(f), isNot(f), reason: f);
@@ -153,7 +157,18 @@ void main() {
       expect(tdsFlagLabel('SOMETHING_NEW'), 'SOMETHING_NEW');
       // the run review and the payslip chips use the same texts
       expect(payrollFlagLabel('TDS_CAPPED_NET'), tdsFlagLabel('TDS_CAPPED_NET'));
-      expect(payrollFlagLabel('RULES_CHANGED'), 'Newer tax rules available');
+      expect(payrollFlagLabel('RULES_CHANGED'), tdsFlagLabel('RULES_CHANGED'));
+      expect(payrollBlockHint('RULES_CHANGED'), contains('Refresh the run'));
+      expect(payrollBlockHint('TDS_SHORTFALL_FINAL'), contains('TDS override'));
+      expect(payrollBlockHint('NO_PAN'), isNull);
+      final blocked = payrollErrorMessage(
+        const ApiException(
+          code: 'PAYROLL_BLOCKED',
+          message: 'x',
+          details: [FieldError('EMP001', 'RULES_CHANGED'), FieldError('EMP002', 'TDS_SHORTFALL_FINAL')],
+        ),
+      );
+      expect(blocked, allOf(contains('EMP001'), contains('Refresh the run'), contains('EMP002'), contains('TDS override')));
     });
   });
 

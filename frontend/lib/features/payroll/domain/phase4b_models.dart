@@ -71,6 +71,12 @@ const Map<String, String> fnfWarningLabels = {
   'ACCOUNT_STILL_ACTIVE': 'The account is still active after the last working day',
   'NEGATIVE_NET_ESTIMATE': 'The employee would owe the company: record a loan as paid outside or reduce the items',
   'TDS_REVIEW': 'Check the income tax (TDS) on this settlement',
+  'TDS_SHORTFALL_FINAL':
+      'The income tax (TDS) due cannot be fully collected from this final pay: set a TDS override with a reason',
+  'RULES_CHANGED': 'Newer tax rules exist: refresh the run',
+  'TDS_MANUAL_REPLACED': 'A manual TDS figure was replaced by the computed one',
+  'PREV_EMPLOYER_UNVERIFIED': 'Previous employer details are not verified',
+  'RULES_SUPERSEDED': 'The tax rules of this run were superseded',
   'NO_JOIN_DATE': 'No joining date: gratuity cannot be worked out',
   'STRUCTURE_MISSING': 'No salary structure for the settlement month',
   'ENCASHMENT_INVALID': 'A leave encashment line is not valid any more',
@@ -587,6 +593,28 @@ class FnfQuery {
   int get hashCode => Object.hash(status, q);
 }
 
+/// `tds` of the F&F preview (19.16): null on the preview = engine off / no computation.
+class FnfTds {
+  const FnfTds({required this.mode, required this.suggested, this.applied, this.shortfall = '0.00'});
+
+  factory FnfTds.fromJson(Map<String, dynamic> j) => FnfTds(
+        mode: _opt(j['mode']) ?? 'suggest',
+        suggested: _opt(j['suggested']) ?? '0.00',
+        applied: _opt(j['applied']),
+        shortfall: _opt(j['shortfall']) ?? '0.00',
+      );
+
+  static FnfTds? parse(Object? v) => v is Map ? FnfTds.fromJson(v.cast<String, dynamic>()) : null;
+
+  /// `suggest` | `apply`
+  final String mode;
+  final String suggested;
+  final String? applied;
+  final String shortfall;
+
+  bool get hasShortfall => shortfall.replaceAll(RegExp(r'[0\.\s]'), '').isNotEmpty;
+}
+
 /// `GET /admin/payroll/fnf/{id}/preview`: an estimate of the final payslip.
 class FnfPreview {
   const FnfPreview({
@@ -602,6 +630,7 @@ class FnfPreview {
     required this.netPay,
     required this.warnings,
     required this.source,
+    this.tds,
   });
 
   factory FnfPreview.fromJson(Map<String, dynamic> j) {
@@ -620,10 +649,14 @@ class FnfPreview {
       netPay: _opt(t['net_pay']) ?? '0.00',
       warnings: _strings(j['warnings']),
       source: _opt(j['source']) ?? 'structure',
+      tds: FnfTds.parse(j['tds']),
     );
   }
 
   final bool estimate;
+
+  /// TDS engine figures, null when the engine is off.
+  final FnfTds? tds;
   final double basisDays;
   final double employedDays;
   final double lopDays;

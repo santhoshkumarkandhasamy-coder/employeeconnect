@@ -44,8 +44,8 @@ const List<String> tdsSettingKeys = [
 /// Explanations shown with the TDS engine settings.
 const String tdsSettingsIntro =
     'The TDS engine works out each employee\'s monthly income tax from their salary, the verified tax rules '
-    'and their declaration. It only runs when the tax rules for the year are verified. Switching it on or off '
-    'needs the administrator password.';
+    'and their declaration. It only runs when the tax rules for the year are verified. Changing any of these '
+    'settings needs the administrator role and your password.';
 const String tdsModeHelp =
     'Suggestion only: the payslip keeps the TDS figure that HR types, and the computed figure is shown beside '
     'it. Applied automatically: the computed figure is put on the payslip, and changing it needs a reason.';
@@ -179,6 +179,10 @@ const Map<String, String> tdsSummaryFlagLabels = {
   'TDS_OVERRIDDEN': 'Set by hand',
   'NO_PAN_206AA': 'No PAN',
   'RULES_CHANGED': 'Newer rules',
+  'RULES_SUPERSEDED': 'Rules superseded',
+  'TDS_SHORTFALL_FINAL': 'TDS shortfall on last payslip',
+  'TDS_MANUAL_REPLACED': 'Manual TDS replaced',
+  'PREV_EMPLOYER_UNVERIFIED': 'Previous employer not verified',
   'NO_DECLARATION': 'No declaration',
   'REGIME_DEFAULT': 'Default regime',
   'PERQUISITE_REVIEW': 'Loan perquisite',

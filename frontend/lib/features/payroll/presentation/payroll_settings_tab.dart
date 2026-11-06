@@ -33,7 +33,12 @@ const Set<String> stepUpSettingKeys = {
   structureApprovalKey,
   bankChangeAlertDaysKey,
   form16SecondPersonKey,
+  // 19.16: every TDS engine setting is guarded like the switch.
   tdsEngineEnabledKey,
+  tdsEngineModeKey,
+  tdsProofsFromMonthKey,
+  tdsIncludeOtherIncomeKey,
+  tdsOneTimeKey,
 };
 
 class PayrollSettingsTab extends ConsumerWidget {
@@ -370,13 +375,17 @@ class _PayrollSettingsFormState extends State<PayrollSettingsForm> {
           isExpanded: true,
           decoration: InputDecoration(
             labelText: s.label,
+            helperText: stepUpSettingKeys.contains(s.key) && !widget.canChangeSecondPerson
+                ? 'Only an administrator can change this.'
+                : null,
             border: const OutlineInputBorder(),
             errorText: _serverErrors[s.key],
           ),
           items: [
             for (final o in s.options) DropdownMenuItem(value: o.$1, child: Text(o.$2)),
           ],
-          onChanged: enabled ? (v) => setState(() => _choices[s.key] = v ?? _choices[s.key]!) : null,
+          onChanged: enabled && (!stepUpSettingKeys.contains(s.key) || widget.canChangeSecondPerson)
+              ?(v) => setState(() => _choices[s.key] = v ?? _choices[s.key]!) : null,
         );
       case PayrollSettingKind.number:
         final guarded = stepUpSettingKeys.contains(s.key);
