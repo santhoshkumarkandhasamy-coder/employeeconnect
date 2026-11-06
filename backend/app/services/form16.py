@@ -48,6 +48,8 @@ DRY_RUN_TTL_S = 15 * 60
 PUBLISH_MAX = 500
 _PAN_TOKEN = re.compile(r"(?<![A-Z0-9])[A-Z]{5}[0-9]{4}[A-Z](?![A-Z0-9])")
 _PDF_SUFFIX = re.compile(r"\.PDF$")
+_YEAR_LIKE = re.compile(r"^(FY)?(19|20)\d{2}([-_/]?\d{2,4})?$")  # a year or a financial year is never an Employee ID
+MIN_EID_LEN = 3
 
 
 def check_kind(kind: str) -> str:
@@ -92,17 +94,29 @@ def _has_token(stem: str, token: str) -> bool:
     return False
 
 
+def _stem(name: str) -> str:
+    return _PDF_SUFFIX.sub("", name.strip().upper())
+
+
+def has_pan_token(name: str | None) -> bool:
+    return bool(name) and _PAN_TOKEN.search(_stem(name or "")) is not None
+
+
 def match_name(name: str | None, d: Directory) -> set[uuid.UUID]:
-    """Employees a file NAME points to: a PAN-shaped token owned by an employee, or an Employee ID token (delimited by anything that is
-    not a letter or digit, so `_`, `-`, space and `.` all separate)."""
+    """Employees a file NAME points to. When the name holds a PAN-shaped token ONLY the PANs decide (Employee ID tokens are ignored, so a
+    stray ID cannot redirect a document); otherwise an Employee ID token decides (delimited by anything that is not a letter or digit).
+    Employee IDs shorter than 3 characters or shaped like a year / financial year never match."""
     if not name:
         return set()
-    stem = _PDF_SUFFIX.sub("", name.strip().upper())
+    stem = _stem(name)
+    tokens = _PAN_TOKEN.findall(stem)
     found: set[uuid.UUID] = set()
-    for m in _PAN_TOKEN.finditer(stem):
-        found |= d.pans.get(m.group(0), set())
+    if tokens:
+        for tok in tokens:
+            found |= d.pans.get(tok, set())
+        return found
     for eid, uid in d.eids:
-        if _has_token(stem, eid):
+        if len(eid) >= MIN_EID_LEN and not _YEAR_LIKE.match(eid) and _has_token(stem, eid):
             found.add(uid)
     return found
 
@@ -126,7 +140,7 @@ async def _read_upload(up: UploadFile) -> bytes | None:
     return bytes(buf)
 
 
-async def parse_uploads(session: AsyncSession, uploads: list[UploadFile]) -> list[Parsed]:
+async def parse_uploads(session: AsyncSession, uploads: list[UploadFile], actor: Principal | None = None) -> list[Parsed]:
     if not 1 <= len(uploads) <= MAX_FILES:
         raise AppError("VALIDATION_ERROR", f"Send 1 to {MAX_FILES} PDF files",
                        details=[{"field": "files", "message": f"send 1 to {MAX_FILES} files"}])  # fmt: skip
@@ -145,12 +159,14 @@ async def parse_uploads(session: AsyncSession, uploads: list[UploadFile]) -> lis
         p.data, p.sha = data, hashlib.sha256(data).hexdigest()
         hits = match_name(up.filename, d)
         if not hits:
-            p.error = "UNMATCHED"
+            p.error = "UNKNOWN_PAN" if has_pan_token(up.filename) else "UNMATCHED"
         elif len(hits) > 1:
             p.error = "AMBIGUOUS"
         else:
             (p.user_id,) = hits
-            if d.users[p.user_id].deleted_at is not None:
+            if actor is not None and p.user_id == actor.id:
+                p.error = "FORBIDDEN"  # nobody uploads their own Form 16
+            elif d.users[p.user_id].deleted_at is not None:
                 p.error = "DELETED_EMPLOYEE"
     seen: dict[uuid.UUID, list[Parsed]] = {}
     for p in out:
@@ -164,8 +180,9 @@ async def parse_uploads(session: AsyncSession, uploads: list[UploadFile]) -> lis
 
 
 def manifest(fy: str, kind: str, parsed: list[Parsed]) -> str:
-    shas = sorted(p.sha for p in parsed if p.sha)
-    return hashlib.sha256(f"{fy}|{kind}|{','.join(shas)}".encode()).hexdigest()
+    """sha256 of `fy|kind|sorted (file hash:employee id) pairs`: the commit must reproduce the very mapping that was reviewed."""
+    pairs = sorted(f"{p.sha}:{p.user_id or '-'}" for p in parsed if p.sha)
+    return hashlib.sha256(f"{fy}|{kind}|{','.join(pairs)}".encode()).hexdigest()
 
 
 def _binding_key(actor: Principal, fy: str, kind: str, man: str) -> str:
@@ -238,7 +255,7 @@ async def upload(
             raise AppError("VALIDATION_ERROR", "Request validation failed",
                            details=[{"field": "manifest_sha256", "message": "must be the 64 hex characters of the dry run"}])  # fmt: skip
         await admin_security.require_reauth(session, redis, actor, password, action="payroll.form16.commit")
-    parsed = await parse_uploads(session, uploads)
+    parsed = await parse_uploads(session, uploads, actor)
     man = manifest(fy, kind, parsed)
     users = {
         u.id: u
@@ -271,18 +288,18 @@ async def upload(
                        details=[{"field": f"files[{e['index']}]", "message": e["message"]} for e in errors])  # fmt: skip
     key = _binding_key(actor, fy, kind, man)
     try:
-        found = await redis.get(key)
+        found = await redis.getdel(key)  # L6: consumed before any work, so two parallel commits cannot both run
     except Exception:  # noqa: BLE001
         log.error("Form 16 dry-run record unavailable; failing closed")
         raise _unavailable() from None
     if found is None:
         raise AppError("IMPORT_NOT_CHECKED", "Run the dry run for these files first (it is valid for 15 minutes)")
-    second = bool(await ps.current_value(session, ps.FORM16_SECOND_KEY))
-    uids = [p.user_id for p in parsed if p.user_id]
-    old = await _live(session, fy, kind, uids, lock=True)
     batch_id = uuid.uuid4()
     stored: list[File] = []
     try:
+        second = bool(await ps.current_value(session, ps.FORM16_SECOND_KEY))
+        uids = [p.user_id for p in parsed if p.user_id]
+        old = await _live(session, fy, kind, uids, lock=True)
         now = utcnow()
         for doc in old.values():
             doc.status, doc.withdrawn_by, doc.withdrawn_at, doc.withdraw_reason = (
@@ -327,11 +344,11 @@ async def upload(
     except BaseException:
         for f in stored:
             await files_svc.delete_blob(f)
+        try:
+            await redis.set(key, "1", ex=DRY_RUN_TTL_S)  # the commit failed: the reviewed dry run stays usable
+        except Exception:  # noqa: BLE001
+            log.warning("Form 16 dry-run record could not be restored")
         raise
-    try:
-        await redis.delete(key)  # one commit per dry run
-    except Exception:  # noqa: BLE001
-        log.warning("Form 16 dry-run record could not be removed (it expires by itself)")
     return 201, {"upload_batch_id": str(batch_id), "created": len(created), "replaced": len(old)}
 
 
@@ -390,6 +407,8 @@ async def admin_file(session: AsyncSession, actor: Principal, doc_id: uuid.UUID)
         raise AppError("NOT_FOUND", "Document not found")
     user = await session.get(User, doc.user_id)
     f = await session.get(File, doc.file_id)
+    if f is None:
+        raise AppError("FILE_UNAVAILABLE", "The document file is not available")
     data = await files_svc.load_bytes(f)
     _audit(session, actor, "payroll.form16.download", doc.id, fy=doc.fy, kind=doc.kind)
     await _commit(session)
@@ -503,6 +522,8 @@ async def own_file(session: AsyncSession, actor: Principal, doc_id: uuid.UUID) -
     if doc is None or doc.user_id != actor.id or doc.status != "published":
         raise await pc.deny(session, actor, entity_type=ENTITY, entity_id=doc_id, reason="not_owner_or_unpublished", status=404)
     f = await session.get(File, doc.file_id)
+    if f is None:
+        raise AppError("FILE_UNAVAILABLE", "The document file is not available")
     data = await files_svc.load_bytes(f)
     _audit(session, actor, "payroll.form16.view_own", doc.id, fy=doc.fy, kind=doc.kind)
     await _commit(session)

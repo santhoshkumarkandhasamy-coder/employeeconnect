@@ -112,8 +112,8 @@ def _detail(path: str, kind: str, key: str, v: Any, fy: str) -> Any:
         return c
     if kind == "pan":
         p = v.strip().upper() if isinstance(v, str) else ""
-        if not tr.PAN_RE.match(p):
-            raise _bad(path, "must be a PAN such as ABCDE1234F")
+        if not tr.valid_pan(p):
+            raise _bad(path, "must be a PAN such as ABCPE1234F")
         return p
     if kind == "month":
         if not isinstance(v, str) or not tr.month_in_fy(fy, v):
@@ -139,6 +139,7 @@ def build_items(
     allowed_here = set(regimes.get(effective, {}).get("allowed_sections", []))
     next_n = _next_ids(current, submitted, [{"id": i} for i in draft_ids])
     seen_ids: set[str] = set()
+    existing = {i["id"]: i for i in current}
     out: list[dict] = []
     for idx, it in enumerate(raw):
         p = f"items[{idx}]"
@@ -151,6 +152,9 @@ def build_items(
                 raise _bad(f"{p}.id", "unknown item id")
             if it.id in seen_ids:
                 raise _bad(f"{p}.id", "duplicate item id")
+            old = existing.get(it.id)
+            if old is not None and old["section"] != it.section:
+                raise _bad(f"{p}.section", "the section of an item cannot change; remove it and add a new item")
             item_id = it.id
         else:
             next_n += 1
@@ -162,6 +166,10 @@ def build_items(
             if k not in fields:
                 raise _bad(f"{p}.details.{k}", "not a field of this section")
             kind = tr.SECTION_FIELDS[k]
+            stored = ((existing.get(it.id) or {}).get("details") or {}).get(k) if it.id is not None else None
+            if kind == "pan" and stored and isinstance(v, str) and v.strip().upper() == pc.mask_pan(stored):
+                details[k] = stored  # the client sent back the masked value it was shown: keep the stored PAN
+                continue
             val = _detail(f"{p}.details.{k}", kind, k, v, fy)
             details[k] = tr._m(val) if isinstance(val, Decimal) else val
         flags: list[str] = []
@@ -209,6 +217,52 @@ def _proof_window_ok(rules: dict, old: list[dict], new: list[dict]) -> bool:
     return keep(old) == keep(new)
 
 
+async def _live_items(session: AsyncSession, decl_id: uuid.UUID) -> set[str]:
+    """Item ids that hold a live (submitted / verified) proof."""
+    rows = await session.execute(
+        select(TaxProof.item_id).where(TaxProof.declaration_id == decl_id, TaxProof.status.in_(("submitted", "verified")))
+    )
+    return set(rows.scalars())
+
+
+def _check_proofed_items(live: set[str], submitted: list[dict], new: list[dict]) -> None:
+    """M1: an item with a live proof cannot be edited or removed (cancel a submitted proof first; a verified one is final)."""
+    if not live:
+        return
+    frozen = {i["id"]: _canon(i) for i in submitted if i["id"] in live}
+    now = {i["id"]: _canon(i) for i in new}
+    if any(now.get(iid) != canon for iid, canon in frozen.items()):
+        raise AppError("CONFLICT", "An item with a proof cannot be changed or removed; cancel the proof first")
+
+
+def _regime_is_locked(d: TaxDeclaration, reason: str, new_regime: str | None, unlock_allows: bool) -> bool:
+    """M2: the regime follows the window. A closed window with an HR unlock keeps the chosen regime unless the unlock allowed a change."""
+    if reason == "DECLARATION_WINDOW":
+        return False
+    chosen = d.regime if d.regime is not None else d.regime_draft
+    if reason == "UNLOCKED":
+        return chosen is not None and new_regime != chosen and not unlock_allows
+    return new_regime != d.regime_draft
+
+
+async def _unlock_allows_regime(session: AsyncSession, d: TaxDeclaration) -> bool:
+    """The newest `unlock` event of the declaration (encrypted detail) says whether an approver allowed a regime change.
+    "Newest" is the highest declaration `version` recorded in the event: timestamps can tie, ids are random."""
+    if d.id is None:
+        return False
+    events = (
+        await session.execute(
+            select(PayrollItemEvent).where(
+                PayrollItemEvent.item_type == "tax_declaration",
+                PayrollItemEvent.item_id == d.id,
+                PayrollItemEvent.action == "unlock",
+            )
+        )
+    ).scalars()
+    newest = max(events, key=lambda e: int((e.detail or {}).get("version", 0)), default=None)
+    return bool(newest and (newest.detail or {}).get("allow_regime_change") is True)
+
+
 # ============================================================================================ output
 def _mask_item(item: dict, reveal: bool) -> dict:
     d = dict(item.get("details") or {})
@@ -232,7 +286,7 @@ def _items_of(blob: dict | None) -> list[dict]:
 def declaration_out(
     decl: TaxDeclaration | None, *, fy: str, rules: TaxYearRule | None, windows: dict | None, day: dt.date,
     counts: dict[str, int] | None = None, user: User | None = None, entered_by: User | None = None, admin: bool = False,
-    reveal: bool = False,
+    reveal: bool = False, catalogue: dict[str, Any] | None = None,
 ) -> dict[str, Any]:  # fmt: skip
     can_edit, reason = edit_state(decl, windows, day)
     draft_items = _items_of(decl.draft) if decl else []
@@ -259,11 +313,26 @@ def declaration_out(
         "proofs": {s: (counts or {}).get(s, 0) for s in PROOF_STATES},
         "version": decl.version if decl else 0,
     }  # fmt: skip
+    if catalogue is not None:
+        out.update(catalogue)
     if admin:
         out["user"] = pc.user_out(user)
         out["entered_by"] = pc.user_out(entered_by)
         out["unlocked_until"] = decl.unlocked_until.isoformat() if decl and decl.unlocked_until else None
     return out
+
+
+async def catalogue_of(session: AsyncSession, rules: TaxYearRule | None) -> dict[str, Any]:
+    """What the employee form needs from the VERIFIED rules: the sections (code, name, limits, proof flag, fields) and the proof file cap."""
+    sections = [
+        {
+            "code": s["code"], "name": s["name"], "limit": s.get("limit"), "senior_limit": s.get("senior_limit"),
+            "proof_required": bool(s.get("proof_required")), "fields": list(s.get("fields", [])),
+            "landlord_pan_above": s.get("landlord_pan_above"),
+        }
+        for s in (rules.rules if rules else {}).get("sections", [])
+    ]  # fmt: skip
+    return {"sections": sections, "proof_max_files": int(await ps.current_value(session, "payroll.tax_proof_max_files"))}
 
 
 async def _counts(session: AsyncSession, decl_ids: list[uuid.UUID]) -> dict[uuid.UUID, dict[str, int]]:
@@ -386,7 +455,8 @@ async def get_own(session: AsyncSession, actor: Principal, fy: str | None) -> di
     rules = await tr.verified_rules(session, fy)
     d = await _decl(session, actor.id, fy)
     counts = (await _counts(session, [d.id])).get(d.id, {}) if d else {}
-    out = declaration_out(d, fy=fy, rules=rules, windows=rules.windows, day=day, counts=counts)
+    out = declaration_out(d, fy=fy, rules=rules, windows=rules.windows, day=day, counts=counts,
+                          catalogue=await catalogue_of(session, rules))  # fmt: skip
     audit(session, action="payroll.tax_declaration.view_own", actor=actor, entity_type=ENTITY, entity_id=d.id if d else None,
           after={"fy": fy})  # fmt: skip
     await _commit(session)
@@ -411,6 +481,14 @@ async def get_admin(session: AsyncSession, actor: Principal, user_id: uuid.UUID,
     return out
 
 
+async def reveal_admin(
+    session: AsyncSession, redis: Redis, actor: Principal, user_id: uuid.UUID, fy: str | None, password: Any
+) -> dict[str, Any]:  # fmt: skip
+    """M5: unmasked third-party PANs need payroll.manage (router) and the caller's own password."""
+    await admin_security.require_reauth(session, redis, actor, password, action="payroll.tax_declaration.reveal")
+    return await get_admin(session, actor, user_id, fy, True)
+
+
 # ============================================================================================ declaration: save / submit
 async def _save(
     session: AsyncSession, actor: Principal, target: User, body: DeclarationSave, *, on_behalf: bool
@@ -429,12 +507,16 @@ async def _save(
     if not can_edit:
         raise AppError("WINDOW_CLOSED", "The declaration window is closed")
     regime_changed = body.regime != d.regime_draft
-    if regime_changed and reason == "PROOF_WINDOW":
+    if regime_changed and _regime_is_locked(
+        d, reason, body.regime, reason == "UNLOCKED" and await _unlock_allows_regime(session, d)
+    ):
         raise AppError("REGIME_LOCKED", "The tax regime is fixed once the declaration window has closed")
     old_items = _items_of(d.draft)
     items = build_items(
         rules.rules, body.fy, body.regime, body.items, {i["id"] for i in old_items}, _items_of(d.submitted), old_items
     )  # fmt: skip
+    if d.id is not None:
+        _check_proofed_items(await _live_items(session, d.id), _items_of(d.submitted), items)
     if reason == "PROOF_WINDOW" and not _proof_window_ok(rules.rules, old_items, items):
         raise AppError("WINDOW_CLOSED", "Only items that need a proof can be changed in the proof window")
     d.regime_draft, d.draft, d.updated_by = body.regime, {"items": items}, actor.id
@@ -459,12 +541,37 @@ async def _declaration_view(
     counts = (await _counts(session, [d.id])).get(d.id, {})
     entered = await session.get(User, d.entered_by) if admin and d.entered_by else None
     return declaration_out(
-        d, fy=d.fy, rules=rules, windows=rules.windows, day=day, counts=counts, user=user, entered_by=entered, admin=admin
+        d,
+        fy=d.fy,
+        rules=rules,
+        windows=rules.windows,
+        day=day,
+        counts=counts,
+        user=user,
+        entered_by=entered,
+        admin=admin,
+        catalogue=None if admin else await catalogue_of(session, rules),
     )
 
 
 async def save_own(session: AsyncSession, actor: Principal, body: DeclarationSave) -> dict[str, Any]:
     return await _save(session, actor, actor.user, body, on_behalf=False)
+
+
+async def _forbid_if_decider(session: AsyncSession, actor: Principal, user_id: uuid.UUID, fy: str) -> None:
+    """L1: whoever decided on a proof of this declaration must not also enter or submit it on behalf of the employee."""
+    hit = (
+        await session.execute(
+            select(TaxProof.id)
+            .join(TaxDeclaration, TaxDeclaration.id == TaxProof.declaration_id)
+            .where(TaxDeclaration.user_id == user_id, TaxDeclaration.fy == fy, TaxProof.verified_by == actor.id)
+            .limit(1)
+        )
+    ).first()
+    if hit:
+        raise AppError(
+            "SECOND_PERSON_REQUIRED", "The person who decided on a proof of this declaration cannot enter it on behalf"
+        )
 
 
 async def save_on_behalf(
@@ -473,6 +580,7 @@ async def save_on_behalf(
     await admin_security.require_reauth(session, redis, actor, password, action="payroll.tax_declaration.save")
     await pc.forbid_self(session, actor, user_id, entity_type=ENTITY, entity_id=user_id)
     target = await _active_user(session, user_id)
+    await _forbid_if_decider(session, actor, user_id, body.fy)
     return await _save(session, actor, target, body, on_behalf=True)
 
 
@@ -495,9 +603,13 @@ async def _submit(
     prior = _items_of(d.submitted)
     if d.submitted is not None and _same(d.regime_draft, items, d.regime, prior):
         raise AppError("NO_CHANGE", "The draft is identical to the submitted declaration")
+    if d.regime_draft != d.regime and (
+        reason == "PROOF_WINDOW"
+        or (reason == "UNLOCKED" and d.regime is not None and not await _unlock_allows_regime(session, d))
+    ):
+        raise AppError("REGIME_LOCKED", "The tax regime is fixed once the declaration window has closed")
+    _check_proofed_items(await _live_items(session, d.id), prior, items)
     if reason == "PROOF_WINDOW":
-        if d.regime_draft != d.regime:
-            raise AppError("REGIME_LOCKED", "The tax regime is fixed once the declaration window has closed")
         if not _proof_window_ok(rules.rules, prior, items):
             raise AppError("WINDOW_CLOSED", "Only items that need a proof can be changed in the proof window")
     refreshed = build_items(  # flags follow the CURRENT verified rules at the moment of submission
@@ -539,11 +651,17 @@ async def submit_on_behalf(
     await admin_security.require_reauth(session, redis, actor, password, action="payroll.tax_declaration.submit")
     await pc.forbid_self(session, actor, user_id, entity_type=ENTITY, entity_id=user_id)
     target = await _active_user(session, user_id)
+    await _forbid_if_decider(session, actor, user_id, body.fy)
     return await _submit(session, actor, target, body, on_behalf=True)
 
 
-async def unlock(session: AsyncSession, actor: Principal, user_id: uuid.UUID, body: DeclarationUnlock) -> dict[str, Any]:
+async def unlock(
+    session: AsyncSession, redis: Redis, actor: Principal, user_id: uuid.UUID, body: DeclarationUnlock
+) -> dict[str, Any]:  # fmt: skip
+    await admin_security.require_reauth(session, redis, actor, body.current_password, action="payroll.tax_declaration.unlock")
     await pc.forbid_self(session, actor, user_id, entity_type=ENTITY, entity_id=user_id)
+    if body.allow_regime_change and not actor.has("payroll.approve"):
+        raise AppError("FORBIDDEN", "Only an approver can allow a regime change when unlocking")
     target = await _active_user(session, user_id)
     day = await tr.today(session)
     _first, last = tr.fy_bounds(body.fy)
@@ -560,8 +678,31 @@ async def unlock(session: AsyncSession, actor: Principal, user_id: uuid.UUID, bo
     if created:
         session.add(d)
     await _flush(session)
-    _decl_event(session, d, "unlock", actor.id, reason=body.reason, until=body.until.isoformat())
-    _audit(session, actor, "payroll.tax_declaration.unlock", d, on_behalf=False)
+    _decl_event(
+        session,
+        d,
+        "unlock",
+        actor.id,
+        reason=body.reason,
+        until=body.until.isoformat(),
+        allow_regime_change=body.allow_regime_change,
+        version=d.version,
+    )
+    _audit(session, actor, "payroll.tax_declaration.unlock", d, on_behalf=False, allow_regime_change=body.allow_regime_change)
+    approvers = [u for u in await tr.holders(session, "payroll.approve") if u != actor.id][:20]
+    did, fy, until, who = d.id, body.fy, body.until.isoformat(), actor.employee_id
+
+    async def _send() -> None:
+        await notifications.notify(
+            session, [user_id], type="tax_declaration_changed", entity_id=did, title="Tax declaration unlocked",
+            body=f"HR reopened your FY {fy} declaration until {until}.",
+        )  # fmt: skip
+        await notifications.notify(
+            session, approvers, type="payroll_approval", entity_id=did, title="Tax declaration unlocked",
+            body=f"{who} unlocked an FY {fy} declaration until {until}.", extra={"kind": "tax_declaration"},
+        )  # fmt: skip
+
+    pc.after_commit(session, _send)
     await _commit(session)
     rows = await tr.rows_of(session, body.fy)
     rules = next((r for r in rows if r.status == "verified"), None)
@@ -696,7 +837,7 @@ async def create_proof(session: AsyncSession, actor: Principal, body: ProofCreat
             raise _bad(f"file_ids[{i}]", "must be one of your own proof uploads")
     used = {
         str(x)
-        for ids in (await session.execute(select(TaxProof.file_ids).where(TaxProof.status != "cancelled"))).scalars()
+        for ids in (await session.execute(select(TaxProof.file_ids).where(TaxProof.user_id == actor.id, TaxProof.status != "cancelled"))).scalars()
         for x in ids
     }  # fmt: skip
     for i, fid in enumerate(body.file_ids):
@@ -846,6 +987,9 @@ async def verify_proof(session: AsyncSession, actor: Principal, proof_id: uuid.U
         raise AppError("VERSION_CONFLICT", "The proof was changed by someone else; reload and retry")
     verified = tr.money("verified", body.verified)
     claimed = Decimal((p.claimed or {}).get("amount", "0"))
+    item = next((i for i in _items_of(d.submitted) if i["id"] == p.item_id), None)  # M1: the item must still be what was proved
+    if item is None or item["section"] != p.section or Decimal(item["amount"]) < claimed:
+        raise AppError("CONFLICT", "The declared item no longer matches this proof; reject it so the employee can resubmit")
     if verified > claimed:
         raise AppError("AMOUNT_ABOVE_LIMIT", "The verified amount is above the claimed amount",
                        details=[{"field": "verified", "message": "must not exceed the claimed amount"}])  # fmt: skip

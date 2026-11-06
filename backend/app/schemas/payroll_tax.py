@@ -24,6 +24,7 @@ __all__ = [
     "DeclarationSaveOnBehalf",
     "DeclarationSubmitOnBehalf",
     "DeclarationUnlock",
+    "DeclarationReveal",
     "ProofCreate",
     "ProofVerify",
     "ProofReject",
@@ -100,6 +101,9 @@ class WindowsIn(_Strict):
     declaration_closes_on: dt.date | None = None
     proof_opens_on: dt.date | None = None
     proof_closes_on: dt.date | None = None
+    current_password: SecretStr | None = Field(
+        default=None, min_length=1, max_length=128
+    )  # needed to reopen / extend a passed window
 
 
 # ---------------------------------------------------------------------------------------------- declarations (19.7)
@@ -145,9 +149,21 @@ class DeclarationUnlock(_Strict):
     fy: str
     until: dt.date
     reason: str
+    current_password: SecretStr = Field(min_length=1, max_length=128)
+    allow_regime_change: bool = False  # only payroll.approve holders may set it
 
     _fy = field_validator("fy")(check_fy)
     _r = field_validator("reason")(_reason)
+
+
+class DeclarationReveal(_Strict):
+    fy: str | None = None
+    current_password: SecretStr = Field(min_length=1, max_length=128)
+
+    @field_validator("fy")
+    @classmethod
+    def _f(cls, v: str | None) -> str | None:
+        return check_fy(v) if v is not None else None
 
 
 class ProofCreate(_Strict):

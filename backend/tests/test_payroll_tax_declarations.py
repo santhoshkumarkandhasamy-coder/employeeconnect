@@ -26,6 +26,7 @@ from tests.payroll_tax_helpers import (  # noqa: F401  (fixtures)
     PAN_EMP,
     TAX,
     add_rules,
+    clerk,
     err,
     fld,
     item,
@@ -97,11 +98,11 @@ async def test_save_normalises_items_and_masks_pans(client, H, db, uid):
             from_month="2026-04",
             to_month="2027-03",
             landlord_name="R K",
-            landlord_pan="abcde1234f",
+            landlord_pan="abcpe1234f",
             city="Chennai",
             metro=True,
         ),
-        item("24B", "180000.00", lender_name="Bank", lender_pan="PQRST6789K"),
+        item("24B", "180000.00", lender_name="Bank", lender_pan="PQRPT6789K"),
         item("OTHER_INCOME", "5000.00", description="Interest"),
     ]
     d = await save(client, H["employee"], items)
@@ -137,7 +138,7 @@ async def test_save_validation_errors(client, H, db, uid):
 
     r = await put([item("NOPE", "1000.00")])
     assert r.status_code == 422 and err(r) == "INVALID_SECTION"
-    r = await put([item("80C", "1000.00", lender_pan="ABCDE1234F")])
+    r = await put([item("80C", "1000.00", lender_pan="ABCPE1234F")])
     assert r.status_code == 422 and fld(r) == "items[0].details.lender_pan"  # not a field of 80C
     r = await put([item("24B", "1000.00", lender_pan="not-a-pan")])
     assert r.status_code == 422 and fld(r) == "items[0].details.lender_pan"
@@ -149,15 +150,15 @@ async def test_save_validation_errors(client, H, db, uid):
     r = await put([item("HRA", None, monthly_rent="20000.00", from_month="2026-04", to_month="2027-03")])
     assert r.status_code == 422 and err(r) == "LANDLORD_PAN_REQUIRED"  # 240000 a year > 100000.00 threshold
     r = await put(
-        [item("HRA", None, monthly_rent="5000.00", from_month="2026-03", to_month="2026-09", landlord_pan="ABCDE1234F")]
+        [item("HRA", None, monthly_rent="5000.00", from_month="2026-03", to_month="2026-09", landlord_pan="ABCPE1234F")]
     )
     assert r.status_code == 422 and fld(r) == "items[0].details.from_month"  # before the financial year
     r = await put(
-        [item("HRA", None, monthly_rent="5000.00", from_month="2026-09", to_month="2026-05", landlord_pan="ABCDE1234F")]
+        [item("HRA", None, monthly_rent="5000.00", from_month="2026-09", to_month="2026-05", landlord_pan="ABCPE1234F")]
     )
     assert r.status_code == 422 and fld(r) == "items[0].details.to_month"
     r = await put(
-        [item("HRA", None, monthly_rent="10000001.00", from_month="2026-04", to_month="2026-04", landlord_pan="ABCDE1234F")]
+        [item("HRA", None, monthly_rent="10000001.00", from_month="2026-04", to_month="2026-04", landlord_pan="ABCPE1234F")]
     )
     assert r.status_code == 422 and fld(r) == "items[0].details.monthly_rent"
     r = await put([item("80C", "1.00", description="x")] * 41)
@@ -295,28 +296,50 @@ async def test_window_closed_and_regime_locked(client, H, db, uid, clock):
     assert r.status_code == 200 and r.json()["submitted"]["version"] == 2
 
 
-async def test_hr_unlock_reopens_editing_and_the_regime(client, H, db, uid, clock):
+async def test_hr_unlock_reopens_editing_but_keeps_the_regime_unless_an_approver_allows_it(client, H, db, uid, clock, seeded):
     await verified(db, uid)
+    _, clk = await clerk(client, db, seeded)
     await declared(client, H)
     clock.day = D_CLOSED
-    body = {"fy": FY, "until": "2026-09-30", "reason": "Joined late"}
-    assert (
-        await client.post(f"{TAX}/declarations/{uid['employee']}/unlock", json=body, headers=H["employee"])
-    ).status_code == 403
+    body = {"fy": FY, "until": "2026-09-30", "reason": "Joined late", "current_password": PASSWORD}
+    url = f"{TAX}/declarations/{uid['employee']}/unlock"
+    assert (await client.post(url, json=body, headers=H["employee"])).status_code == 403
     r = await client.post(f"{TAX}/declarations/{uid['hr']}/unlock", json=body, headers=H["hr"])
     assert r.status_code == 403 and err(r) == "FORBIDDEN"  # not self
     for bad in ({**body, "until": "2026-08-14"}, {**body, "until": "2027-04-01"}, {**body, "reason": "x"}):
-        r = await client.post(f"{TAX}/declarations/{uid['employee']}/unlock", json=bad, headers=H["hr"])
+        r = await client.post(url, json=bad, headers=H["hr"])
         assert r.status_code == 422, bad
-    r = await client.post(f"{TAX}/declarations/{uid['employee']}/unlock", json=body, headers=H["hr"])
+    no_pw = {k: v for k, v in body.items() if k != "current_password"}
+    assert (await client.post(url, json=no_pw, headers=H["hr"])).status_code == 422  # M2: step-up is required
+    r = await client.post(url, json={**body, "current_password": "wrong"}, headers=H["hr"])
+    assert r.status_code == 403 and err(r) == "REAUTH_FAILED"
+    r = await client.post(url, json={**body, "allow_regime_change": True}, headers=clk)
+    assert r.status_code == 403 and err(r) == "FORBIDDEN"  # only payroll.approve holders may free the regime
+    assert (await db.execute(select(TaxDeclaration).where(TaxDeclaration.unlocked_until.is_not(None)))).first() is None
+    notifications.OUTBOX.clear()
+    r = await client.post(url, json=body, headers=H["hr"])
     assert r.status_code == 200 and r.json()["unlocked_until"] == "2026-09-30" and r.json()["edit_reason"] == "UNLOCKED"
+    types = [m["payload"]["type"] for m in notifications.OUTBOX]
+    assert "tax_declaration_changed" in types  # the employee is told
     items = [{"id": "i-1", "section": "80C", "amount": "50000.00", "details": {"description": "PPF"}}]
+    version = r.json()["version"]
     r = await client.put(
-        f"{ME}/declaration",
-        json={"fy": FY, "expected_version": r.json()["version"], "regime": "new", "items": items},
-        headers=H["employee"],
+        f"{ME}/declaration", json={"fy": FY, "expected_version": version, "regime": "new", "items": items}, headers=H["employee"]
     )
-    assert r.status_code == 200 and r.json()["draft"]["regime"] == "new"  # an unlock also frees the regime
+    assert r.status_code == 409 and err(r) == "REGIME_LOCKED"  # an unlock alone does not free the regime
+    r = await client.put(
+        f"{ME}/declaration", json={"fy": FY, "expected_version": version, "regime": "old", "items": items}, headers=H["employee"]
+    )
+    assert r.status_code == 200 and r.json()["draft"]["regime"] == "old"
+    version = r.json()["version"]
+    # an approver (ADM001) unlocks with allow_regime_change: the regime may change
+    r = await client.post(url, json={**body, "allow_regime_change": True}, headers=H["admin"])
+    assert r.status_code == 200
+    version = r.json()["version"]
+    r = await client.put(
+        f"{ME}/declaration", json={"fy": FY, "expected_version": version, "regime": "new", "items": items}, headers=H["employee"]
+    )
+    assert r.status_code == 200 and r.json()["draft"]["regime"] == "new"
     clock.day = dt.date(2026, 10, 1)  # past the unlock date
     r = await client.put(
         f"{ME}/declaration",
@@ -325,9 +348,12 @@ async def test_hr_unlock_reopens_editing_and_the_regime(client, H, db, uid, cloc
     )
     assert err(r) == "WINDOW_CLOSED"
     ev = [e for e in (await db.execute(select(PayrollItemEvent).where(PayrollItemEvent.action == "unlock"))).scalars()]
-    assert len(ev) == 1 and ev[0].detail["reason"] == "Joined late"
+    assert len(ev) == 2 and {e.detail["reason"] for e in ev} == {"Joined late"}
+    assert sorted(e.detail["allow_regime_change"] for e in ev) == [False, True]
     row = (await db.execute(select(TaxDeclaration))).scalars().one()
     assert row.unlock_reason == "Joined late"
+    audits = list((await db.execute(select(AuditLog).where(AuditLog.action == "payroll.tax_declaration.unlock"))).scalars())
+    assert len(audits) == 2 and "Joined late" not in json.dumps([a.after for a in audits])
 
 
 # ================================================================================================ on behalf
@@ -544,7 +570,11 @@ async def test_proof_decider_is_not_the_employee_nor_the_person_who_entered_the_
     assert row.entered_by == uuid.UUID(uid["hr"])  # set once
     r = await client.put(
         f"{TAX}/declarations/{uid['employee']}",
-        json={**base, "expected_version": row.version, "items": [item("80C", "90000.00", description="LIC2")]},
+        json={
+            **base,
+            "expected_version": row.version,
+            "items": [{"id": "i-1", "section": "80C", "amount": "90000.00", "details": {"description": "LIC"}}],
+        },
         headers=hr2,
     )
     assert r.status_code == 200, r.text
@@ -632,7 +662,7 @@ async def test_admin_lists_and_reveal(client, H, db, uid, clock):
     await add_rules(db, uid, fy="2025-26", status="verified")  # another year does not matter
     await declared(
         client, H,
-        [item("24B", "50000.00", lender_name="Bank", lender_pan="PQRST6789K"), item("80C", "10000.00", description="x")],
+        [item("24B", "50000.00", lender_name="Bank", lender_pan="PQRPT6789K"), item("80C", "10000.00", description="x")],
     )  # fmt: skip
     r = await client.get(f"{TAX}/declarations", params={"fy": FY}, headers=H["hr"])
     assert r.status_code == 200
@@ -649,15 +679,24 @@ async def test_admin_lists_and_reveal(client, H, db, uid, clock):
     assert (await client.get(f"{TAX}/declarations", headers=H["employee"])).status_code == 403
     masked = (await client.get(f"{TAX}/declarations/{uid['employee']}", params={"fy": FY}, headers=H["hr"])).json()
     assert masked["submitted"]["items"][0]["details"]["lender_pan"] == "XXXXX6789X" and masked["user"]["employee_id"] == "EMP001"
-    shown = (
-        await client.get(f"{TAX}/declarations/{uid['employee']}", params={"fy": FY, "reveal": "true"}, headers=H["hr"])
-    ).json()
-    assert shown["submitted"]["items"][0]["details"]["lender_pan"] == "PQRST6789K"
+    rev = f"{TAX}/declarations/{uid['employee']}/reveal"
+    r = await client.get(f"{TAX}/declarations/{uid['employee']}", params={"fy": FY, "reveal": "true"}, headers=H["hr"])
+    assert r.status_code == 422 and "PQRPT6789K" not in r.text  # M5: GET never reveals
+    assert (await client.post(rev, json={"fy": FY}, headers=H["hr"])).status_code == 422
+    r = await client.post(rev, json={"fy": FY, "current_password": "nope"}, headers=H["hr"])
+    assert r.status_code == 403 and err(r) == "REAUTH_FAILED"
+    # payroll.manage is required as well as the password
+    r = await client.post(rev, json={"fy": FY, "current_password": PASSWORD}, headers=H["manager"])
+    assert r.status_code == 403
+    r = await client.post(rev, json={"fy": FY, "current_password": PASSWORD}, headers=H["hr"])
+    assert r.status_code == 200 and r.headers["cache-control"] == "no-store"
+    shown = r.json()
+    assert shown["submitted"]["items"][0]["details"]["lender_pan"] == "PQRPT6789K"
     views = [
         r.after for r in (await db.execute(select(AuditLog).where(AuditLog.action == "payroll.tax_declaration.view"))).scalars()
     ]
     assert sorted(v["revealed"] for v in views) == [False, True]
-    assert "PQRST6789K" not in json.dumps([r.after for r in (await db.execute(select(AuditLog))).scalars()])
+    assert "PQRPT6789K" not in json.dumps([r.after for r in (await db.execute(select(AuditLog))).scalars()])
     assert (await client.get(f"{TAX}/declarations/{uuid.uuid4()}", headers=H["hr"])).status_code == 404
     assert (await client.get(f"{TAX}/proofs", params={"fy": FY}, headers=H["hr"])).json()["items"] == []
     assert (await client.get(f"{TAX}/proofs", headers=H["employee"])).status_code == 403
@@ -665,7 +704,7 @@ async def test_admin_lists_and_reveal(client, H, db, uid, clock):
 
 async def test_declarations_xlsx_masks_identifiers_unless_asked_with_the_password(client, H, db, uid, clock):
     await verified(db, uid)
-    await declared(client, H, [item("24B", "50000.00", lender_name="Bank", lender_pan="PQRST6789K")])
+    await declared(client, H, [item("24B", "50000.00", lender_name="Bank", lender_pan="PQRPT6789K")])
     url = f"{TAX}/reports/declarations?fy={FY}"
     r = await client.post(url, json={}, headers=H["hr"])
     assert r.status_code == 200 and r.headers["cache-control"] == "no-store"
@@ -684,7 +723,7 @@ async def test_declarations_xlsx_masks_identifiers_unless_asked_with_the_passwor
     r = await client.post(url, json={"include_identifiers": True, "current_password": "bad"}, headers=H["hr"])
     assert r.status_code == 403
     r = await client.post(url, json={"include_identifiers": True, "current_password": PASSWORD}, headers=H["hr"])
-    assert list(load_workbook(io.BytesIO(r.content)).active.iter_rows(values_only=True))[1][7] == "PQRST6789K"
+    assert list(load_workbook(io.BytesIO(r.content)).active.iter_rows(values_only=True))[1][7] == "PQRPT6789K"
     assert (await client.post(url, json={}, headers=H["employee"])).status_code == 403
     audits = list((await db.execute(select(AuditLog).where(AuditLog.action == "payroll.report.export"))).scalars())
     assert [a.after["kind"] for a in audits] == ["tax_declarations", "tax_declarations"] and "PQRST" not in json.dumps(
@@ -694,8 +733,179 @@ async def test_declarations_xlsx_masks_identifiers_unless_asked_with_the_passwor
 
 async def test_rows_are_unreadable_without_the_key_and_encrypted_at_rest(client, H, db, uid):
     await verified(db, uid)
-    await save(client, H["employee"], [item("24B", "50000.00", lender_name="Bank", lender_pan="PQRST6789K")])
+    await save(client, H["employee"], [item("24B", "50000.00", lender_name="Bank", lender_pan="PQRPT6789K")])
     raw = (await db.execute(__import__("sqlalchemy").text("SELECT draft_enc FROM tax_declarations"))).scalar_one()
-    assert b"PQRST6789K" not in bytes(raw) and b"50000" not in bytes(raw)
+    assert b"PQRPT6789K" not in bytes(raw) and b"50000" not in bytes(raw)
     p = TaxProof.__table__.c
     assert p.claimed_enc is not None and p.verified_enc is not None and p.comment_enc is not None
+
+
+# ================================================================================================ phase 5b security review
+async def test_masked_or_untyped_pans_are_refused_and_a_masked_roundtrip_keeps_the_stored_pan(client, H, db, uid):
+    await verified(db, uid)
+
+    async def put(items, version=0):
+        return await client.put(
+            f"{ME}/declaration",
+            json={"fy": FY, "expected_version": version, "regime": "old", "items": items},
+            headers=H["employee"],
+        )
+
+    for bad in ("XXXXX1234X", "xxxxx1234x", "ABCDE1234F", "ABCXE1234F"):  # the mask, and a 4th letter that is no holder type
+        r = await put([item("24B", "1000.00", lender_name="Bank", lender_pan=bad)])
+        assert r.status_code == 422 and fld(r) == "items[0].details.lender_pan", bad
+    d = (await put([item("24B", "1000.00", lender_name="Bank", lender_pan="PQRPT6789K")])).json()
+    shown = d["draft"]["items"][0]
+    assert shown["details"]["lender_pan"] == "XXXXX6789X"
+    # the app sends back exactly what it was shown: the stored PAN stays
+    echo = [{"id": shown["id"], "section": "24B", "amount": "2000.00", "details": shown["details"]}]
+    d = (await put(echo, d["version"])).json()
+    assert d["draft"]["items"][0]["amount"] == "2000.00"
+    row = (await db.execute(select(TaxDeclaration))).scalars().one()
+    await db.refresh(row)
+    assert row.draft["items"][0]["details"]["lender_pan"] == "PQRPT6789K"
+    # a NEW item (no id) cannot use the mask
+    r = await put(echo + [item("24B", "10.00", lender_name="B", lender_pan="XXXXX6789X")], d["version"])
+    assert r.status_code == 422
+    # the mask of a different PAN than the stored one is no shortcut either
+    other = [
+        {"id": shown["id"], "section": "24B", "amount": "2000.00", "details": {**shown["details"], "lender_pan": "XXXXX1111X"}}
+    ]
+    assert (await put(other, d["version"])).status_code == 422
+
+
+async def test_item_section_is_fixed_and_proofed_items_cannot_change(client, H, db, uid, clock):
+    await verified(db, uid)
+    d = await save(
+        client, H["employee"], [item("80C", "100000.00", description="PPF"), item("80CCD1B", "10000.00", description="NPS")]
+    )
+    ids = [i["id"] for i in d["draft"]["items"]]
+    swap = [{"id": ids[0], "section": "80CCD1B", "amount": "100000.00", "details": {"description": "PPF"}}]
+    r = await client.put(
+        f"{ME}/declaration",
+        json={"fy": FY, "expected_version": d["version"], "regime": "old", "items": swap},
+        headers=H["employee"],
+    )
+    assert r.status_code == 422 and fld(r) == "items[0].section"  # a new id is required for another section
+    d = await submit(client, H["employee"], d["version"])
+    fid = await upload_proof_file(client, H["employee"])
+    clock.day = P_OPEN
+    r = await client.post(
+        f"{ME}/proofs", json={"fy": FY, "item_id": ids[0], "claimed": "100000.00", "file_ids": [fid]}, headers=H["employee"]
+    )
+    assert r.status_code == 201
+    proof = r.json()
+    keep = [{"id": i["id"], "section": i["section"], "amount": i["amount"], "details": i["details"]} for i in d["draft"]["items"]]
+
+    async def put(items, version):
+        return await client.put(
+            f"{ME}/declaration",
+            json={"fy": FY, "expected_version": version, "regime": "old", "items": items},
+            headers=H["employee"],
+        )
+
+    edited = [dict(keep[0], amount="50000.00"), keep[1]]
+    r = await put(edited, d["version"])
+    assert r.status_code == 409 and err(r) == "CONFLICT"  # edit of an item with a live proof
+    r = await put([keep[1]], d["version"])
+    assert r.status_code == 409 and err(r) == "CONFLICT"  # removal
+    r = await put([keep[0], dict(keep[1], amount="11000.00")], d["version"])  # the other item (no proof) may change
+    assert r.status_code == 200
+    # a draft that drifted from the submitted item cannot be submitted while the proof lives (tampered here)
+    row = (await db.execute(select(TaxDeclaration))).scalars().one()
+    await db.refresh(row)
+    row.draft = {"items": [dict(keep[0], amount="1.00"), keep[1]]}
+    await db.commit()
+    r = await client.post(f"{ME}/declaration/submit", json={"fy": FY, "expected_version": row.version}, headers=H["employee"])
+    assert r.status_code == 409 and err(r) == "CONFLICT"
+    # once the proof is cancelled the item is editable again
+    assert (await client.post(f"{ME}/proofs/{proof['id']}/cancel", headers=H["employee"])).status_code == 200
+    r = await put([dict(keep[0], amount="50000.00"), keep[1]], row.version)
+    assert r.status_code == 200
+
+
+async def test_verify_rechecks_the_declared_item(client, H, db, uid, clock):
+    await verified(db, uid)
+    await proof_ready(client, H, db, uid)
+    fid = await upload_proof_file(client, H["employee"])
+    clock.day = P_OPEN
+    r = await client.post(
+        f"{ME}/proofs", json={"fy": FY, "item_id": "i-1", "claimed": "100000.00", "file_ids": [fid]}, headers=H["employee"]
+    )
+    pid = r.json()["id"]
+    row = (await db.execute(select(TaxDeclaration))).scalars().one()
+    await db.refresh(row)
+    row.submitted = {"items": [dict(row.submitted["items"][0], amount="40000.00")]}  # tampering that bypassed the API
+    await db.commit()
+    r = await client.post(f"{TAX}/proofs/{pid}/verify", json={"expected_version": 1, "verified": "100000.00"}, headers=H["admin"])
+    assert r.status_code == 409 and err(r) == "CONFLICT"
+    row.submitted = {"items": [dict(row.submitted["items"][0], amount="100000.00", section="80CCD1B")]}
+    await db.commit()
+    r = await client.post(f"{TAX}/proofs/{pid}/verify", json={"expected_version": 1, "verified": "100000.00"}, headers=H["admin"])
+    assert r.status_code == 409 and err(r) == "CONFLICT"
+    row.submitted = {"items": [dict(row.submitted["items"][0], section="80C")]}
+    await db.commit()
+    r = await client.post(f"{TAX}/proofs/{pid}/verify", json={"expected_version": 1, "verified": "100000.00"}, headers=H["admin"])
+    assert r.status_code == 200
+
+
+async def test_a_proof_decider_cannot_then_enter_the_declaration_on_behalf(client, H, db, uid, clock):
+    await verified(db, uid)
+    await proof_ready(client, H, db, uid)
+    fid = await upload_proof_file(client, H["employee"])
+    clock.day = P_OPEN
+    r = await client.post(
+        f"{ME}/proofs", json={"fy": FY, "item_id": "i-1", "claimed": "100000.00", "file_ids": [fid]}, headers=H["employee"]
+    )
+    r = await client.post(
+        f"{TAX}/proofs/{r.json()['id']}/verify", json={"expected_version": 1, "verified": "100000.00"}, headers=H["hr"]
+    )
+    assert r.status_code == 200
+    row = (await db.execute(select(TaxDeclaration))).scalars().one()
+    await db.refresh(row)
+    body = {
+        "fy": FY,
+        "expected_version": row.version,
+        "regime": "old",
+        "items": [{"id": "i-1", "section": "80C", "amount": "100000.00", "details": {"description": "PPF"}}],
+        "current_password": PASSWORD,
+    }
+    r = await client.put(f"{TAX}/declarations/{uid['employee']}", json=body, headers=H["hr"])
+    assert r.status_code == 403 and err(r) == "SECOND_PERSON_REQUIRED"
+    r = await client.post(
+        f"{TAX}/declarations/{uid['employee']}/submit",
+        json={"fy": FY, "expected_version": row.version, "current_password": PASSWORD},
+        headers=H["hr"],
+    )
+    assert r.status_code == 403 and err(r) == "SECOND_PERSON_REQUIRED"
+    r = await client.put(f"{TAX}/declarations/{uid['employee']}", json=body, headers=H["admin"])  # somebody else may
+    assert r.status_code == 200
+
+
+async def test_the_employee_gets_the_section_catalogue_and_the_file_cap(client, H, db, uid):
+    await verified(db, uid)
+    d = (await client.get(f"{ME}/declaration", headers=H["employee"])).json()
+    secs = {s["code"]: s for s in d["sections"]}
+    assert set(secs) >= {"80C", "HRA", "24B", "OTHER_INCOME"}
+    assert secs["80D_SELF"]["senior_limit"] == "50000.00" and secs["80D_SELF"]["fields"] == ["description", "senior"]
+    assert secs["HRA"]["landlord_pan_above"] == "100000.00" and secs["80C"]["proof_required"] is True
+    assert secs["OTHER_INCOME"]["proof_required"] is False and d["proof_max_files"] == 5
+    saved = await save(client, H["employee"], [item("80C", "1000.00", description="x")])
+    assert [s["code"] for s in saved["sections"]] == [s["code"] for s in d["sections"]]  # also on save / submit answers
+    admin_view = (await client.get(f"{TAX}/declarations/{uid['employee']}", params={"fy": FY}, headers=H["hr"])).json()
+    assert "sections" not in admin_view
+
+
+async def test_a_used_upload_cannot_back_a_second_proof(client, H, db, uid, clock):
+    await verified(db, uid)
+    await declared(client, H, [item("80C", "100000.00", description="a"), item("80CCD1B", "10000.00", description="b")])
+    fid = await upload_proof_file(client, H["employee"])
+    clock.day = P_OPEN
+    ok = await client.post(
+        f"{ME}/proofs", json={"fy": FY, "item_id": "i-1", "claimed": "1000.00", "file_ids": [fid]}, headers=H["employee"]
+    )
+    assert ok.status_code == 201
+    r = await client.post(
+        f"{ME}/proofs", json={"fy": FY, "item_id": "i-2", "claimed": "1000.00", "file_ids": [fid]}, headers=H["employee"]
+    )
+    assert r.status_code == 422 and fld(r) == "file_ids[0]"

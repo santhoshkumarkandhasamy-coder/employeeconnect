@@ -14,11 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTask
 
 from ..core.db import get_session
+from ..core.errors import AppError
 from ..core.pagination import PageParams
 from ..core.rbac import Principal, require_permission
 from ..core.redis import get_redis
 from ..schemas.payroll import EmptyIn
 from ..schemas.payroll_tax import (
+    DeclarationReveal,
     DeclarationSave,
     DeclarationSaveOnBehalf,
     DeclarationsReportIn,
@@ -117,7 +119,7 @@ async def set_windows(
     actor: Principal = Depends(MANAGE),
 ):
     await _write(redis, actor)
-    return await tax_rules.set_windows(session, actor, fy, body)
+    return await tax_rules.set_windows(session, redis, actor, fy, body)
 
 
 @admin_router.get("/rules/{rules_id}")
@@ -216,10 +218,24 @@ async def get_declaration(
     redis: Redis = Depends(get_redis),
     actor: Principal = Depends(VIEW_ALL),
 ):
+    if reveal:  # M5: unmasking is a step-up action, so it is a POST with the caller's password
+        raise AppError("VALIDATION_ERROR", "Request validation failed",
+                       details=[{"field": "reveal", "message": "use POST /declarations/{user_id}/reveal with your password"}])  # fmt: skip
     await _read(redis, actor)
-    if reveal:
-        await pc.limit(redis, actor, "reveal", (30, 60), (200, 86400), closed=True)
-    return await tax_declarations.get_admin(session, actor, user_id, fy, reveal)
+    return await tax_declarations.get_admin(session, actor, user_id, fy, False)
+
+
+@admin_router.post("/declarations/{user_id}/reveal")
+async def reveal_declaration(
+    user_id: uuid.UUID,
+    body: DeclarationReveal,
+    session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
+    actor: Principal = Depends(MANAGE),
+):
+    await pc.limit(redis, actor, "reveal", (30, 60), (200, 86400), closed=True)
+    out = await tax_declarations.reveal_admin(session, redis, actor, user_id, body.fy, body.current_password)
+    return JSONResponse(content=out, headers={"Cache-Control": "no-store"})
 
 
 @admin_router.put("/declarations/{user_id}")
@@ -255,7 +271,7 @@ async def unlock_declaration(
     actor: Principal = Depends(MANAGE),
 ):
     await _write(redis, actor)
-    return await tax_declarations.unlock(session, actor, user_id, body)
+    return await tax_declarations.unlock(session, redis, actor, user_id, body)
 
 
 @admin_router.get("/proofs")

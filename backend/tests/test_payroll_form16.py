@@ -100,7 +100,7 @@ async def test_dry_run_reports_every_kind_of_problem_by_index(client, H, db, uid
         (f"{PAN_MGR}.pdf", pdf("6")),  # 6 DUPLICATE_EMPLOYEE
         ("HR001.pdf", big),  # 7 FILE_TOO_LARGE
         ("ZZZZZ9999Z.pdf", pdf("8")),  # 8 DELETED_EMPLOYEE
-        ("EMP001_" + PAN_MGR + ".pdf", pdf("9")),  # 9 AMBIGUOUS (ID of one, PAN of another)
+        ("EMP001_" + PAN_MGR + ".pdf", pdf("9")),  # 9 PAN decides (MGR001): DUPLICATE_EMPLOYEE with 5 and 6
         (None, pdf("10")),
     ]
     gone.deleted_at = utcnow()
@@ -112,7 +112,7 @@ async def test_dry_run_reports_every_kind_of_problem_by_index(client, H, db, uid
     assert r.status_code == 200, r.text
     got = {e["index"]: e["message"] for e in r.json()["errors"]}
     assert got == {0: "UNMATCHED", 1: "AMBIGUOUS", 2: "AMBIGUOUS", 3: "NOT_PDF", 4: "UNMATCHED", 5: "DUPLICATE_EMPLOYEE",
-                   6: "DUPLICATE_EMPLOYEE", 7: "FILE_TOO_LARGE", 8: "DELETED_EMPLOYEE", 9: "AMBIGUOUS"}  # fmt: skip
+                   6: "DUPLICATE_EMPLOYEE", 7: "FILE_TOO_LARGE", 8: "DELETED_EMPLOYEE", 9: "DUPLICATE_EMPLOYEE"}  # fmt: skip
     assert r.json()["matched"] == []
     for leak in ("nobody", "EMP0011", "ZZZZZ", PAN_EMP):
         assert leak not in r.text
@@ -545,3 +545,105 @@ async def test_orphan_purge_never_deletes_form16_files(client, H, db, uid, peopl
     removed = await files_svc.cleanup_orphans(db)
     ids = {str(f.id) for f in (await db.execute(select(File))).scalars()}
     assert removed == 1 and str(doc.file_id) in ids and stray.json()["id"] not in ids
+
+
+# ================================================================================================ phase 5b security review
+async def test_a_pan_in_the_name_decides_alone_and_an_unknown_pan_is_not_rescued_by_an_employee_id(client, H, db, uid, people):
+    r = await upload(
+        client, H["hr"],
+        [(f"EMP001_{PAN_MGR}.pdf", pdf("1")), ("EMP001_ZZZZZ0000Z.pdf", pdf("2")), ("MGR001.pdf", pdf("3"))],
+        expect=200,
+    )  # fmt: skip
+    body = r.json()
+    got = {e["index"]: e["message"] for e in body["errors"]}
+    assert got[1] == "UNKNOWN_PAN"
+    assert got[0] == got[2] == "DUPLICATE_EMPLOYEE"  # both point at MGR001: the PAN of file 0 won over the ID EMP001
+    assert "EMP001" not in {m["user"]["employee_id"] for m in body["matched"]}
+    assert "ZZZZZ0000Z" not in r.text
+
+
+async def test_short_and_year_shaped_employee_ids_never_match(client, H, db, uid, people, seeded):
+    await extra_user(client, db, seeded, "AB", "employee")
+    await extra_user(client, db, seeded, "2026", "employee")
+    await extra_user(client, db, seeded, "FY2026-27", "employee")
+    r = await upload(
+        client, H["hr"],
+        [("AB.pdf", pdf("1")), ("Form16_2026.pdf", pdf("2")), ("Form16_FY2026-27.pdf", pdf("3")), ("Form16_EMP001.pdf", pdf("4"))],
+        expect=200,
+    )  # fmt: skip
+    body = r.json()
+    assert {e["index"]: e["message"] for e in body["errors"]} == {0: "UNMATCHED", 1: "UNMATCHED", 2: "UNMATCHED"}
+    assert [m["user"]["employee_id"] for m in body["matched"]] == ["EMP001"]
+
+
+async def test_the_manifest_binds_the_reviewed_file_to_employee_mapping(client, H, db, uid, people):
+    files = [(f"{PAN_MGR}.pdf", pdf("m"))]
+    dry = (await upload(client, H["hr"], files, expect=200)).json()
+    assert dry["matched"][0]["user"]["employee_id"] == "MGR001"
+    # between the dry run and the commit the PAN changes hands: same bytes, same name, another employee
+    await set_pan(db, uid["manager"], None)
+    await set_pan(db, uid["employee"], PAN_MGR)
+    r = await upload(client, H["hr"], files, dry=False, manifest=dry["manifest_sha256"])
+    assert r.status_code == 409 and err(r) == "IMPORT_FILE_CHANGED"
+    assert await docs(db) == []
+    # with the mapping unchanged a new dry run commits to the new owner
+    again = (await upload(client, H["hr"], files, expect=200)).json()
+    assert again["manifest_sha256"] != dry["manifest_sha256"]
+    r = await upload(client, H["hr"], files, dry=False, manifest=again["manifest_sha256"], expect=201)
+    assert [str(d.user_id) for d in await docs(db)] == [uid["employee"]]
+
+
+async def test_nobody_uploads_their_own_form16(client, H, db, uid, people):
+    await set_pan(db, uid["hr"], "HRPPP1234H")
+    r = await upload(
+        client, H["hr"], [("HR001.pdf", pdf("1")), ("HRPPP1234H_x.pdf", pdf("2")), ("EMP001.pdf", pdf("3"))], expect=200
+    )
+    assert {e["index"]: e["message"] for e in r.json()["errors"]} == {0: "FORBIDDEN", 1: "FORBIDDEN"}
+    commit_files = [("HR001.pdf", pdf("1"))]
+    r = await upload(client, H["hr"], commit_files, dry=False, manifest="0" * 64)
+    assert r.status_code == 409  # never reaches the store
+    assert await docs(db) == []
+    # somebody else may upload HR001's document
+    r = await upload(client, H["admin"], [("HR001.pdf", pdf("4"))], expect=200)
+    assert r.json()["errors"] == []
+
+
+async def test_a_document_without_its_file_row_is_unavailable_not_a_crash(client, H, db, uid, people):
+    await commit(client, H["hr"], [("EMP001.pdf", pdf("1"))])
+    doc = (await docs(db))[0]
+    await db.execute(
+        text(
+            "UPDATE form16_documents SET status = 'published', published_by = :a, published_at = CURRENT_TIMESTAMP WHERE id = :i"
+        ),
+        {"a": uid["admin"].replace("-", ""), "i": doc.id.hex},
+    )
+    await db.execute(text("DELETE FROM files WHERE id = :i"), {"i": doc.file_id.hex})
+    await db.commit()
+    r = await client.get(f"{TAX}/form16/{doc.id}/file", headers=H["hr"])
+    assert r.status_code == 503 and err(r) == "FILE_UNAVAILABLE"
+    r = await client.get(f"{ME}/form16/{doc.id}/file", headers=H["employee"])
+    assert r.status_code == 503 and err(r) == "FILE_UNAVAILABLE"
+
+
+async def test_the_dry_run_record_is_consumed_before_the_work_and_restored_when_it_fails(
+    client, H, db, uid, people, redis, monkeypatch
+):
+    files = [("EMP001.pdf", pdf("1"))]
+    dry = (await upload(client, H["hr"], files, expect=200)).json()
+    seen = {}
+    real = files_svc.store_blob
+
+    async def boom(*a, **kw):
+        seen["keys"] = [k async for k in redis.scan_iter("payroll:form16:dry:*")]
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(files_svc, "store_blob", boom)
+    with pytest.raises(RuntimeError):
+        await upload(client, H["hr"], files, dry=False, manifest=dry["manifest_sha256"])
+    assert seen["keys"] == []  # consumed before any work: a parallel commit finds nothing
+    assert [k async for k in redis.scan_iter("payroll:form16:dry:*")] != []  # restored after the failure
+    monkeypatch.setattr(files_svc, "store_blob", real)
+    r = await upload(client, H["hr"], files, dry=False, manifest=dry["manifest_sha256"], expect=201)
+    assert [k async for k in redis.scan_iter("payroll:form16:dry:*")] == []
+    r = await upload(client, H["hr"], files, dry=False, manifest=dry["manifest_sha256"])
+    assert err(r) == "IMPORT_NOT_CHECKED"  # single use

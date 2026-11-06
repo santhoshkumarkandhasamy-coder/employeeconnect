@@ -1850,10 +1850,10 @@ Audit `payroll.payment_batch.create|update|submit|withdraw|approve|reject|cancel
 | POST | /admin/payroll/tax/rules/{id}/withdraw | `payroll.manage` (submitted -> draft) |
 | POST | /admin/payroll/tax/rules/{id}/verify | `payroll.approve` + step-up (submitted) |
 | POST | /admin/payroll/tax/rules/{id}/reject | `payroll.approve` (submitted -> draft) |
-| PUT | /admin/payroll/tax/years/{fy}/windows | `payroll.manage` |
+| PUT | /admin/payroll/tax/years/{fy}/windows | `payroll.manage` (+ `current_password` when a passed window is reopened or its closing date moved later) |
 
 **years** -> `{ "items":[ { "fy":"2026-27","verified_version":null|2,"open_version":{ "id","version":1,"status":"draft" }|null,"windows":Windows,"current":true } ] }` (FYs with a rules row, plus the current FY).
-**Windows** `{ "declaration_opens_on":"2026-04-01","declaration_closes_on":"2026-06-30","proof_opens_on":"2027-01-01","proof_closes_on":"2027-02-28" }` (inside the FY, opens <= closes; 422 `INVALID_DATE`). Window changes are audited `payroll.tax_rules.windows` (dates) and send `tax_window` pushes when a window opens.
+**Windows** `{ "declaration_opens_on":"2026-04-01","declaration_closes_on":"2026-06-30","proof_opens_on":"2027-01-01","proof_closes_on":"2027-02-28" }` (inside the FY, opens <= closes; 422 `INVALID_DATE`). Reopening a window whose closing date has passed, or moving that date later, needs `current_password` in the body (422 when missing, 403 `REAUTH_FAILED`) and alerts the admins (`admin_alert`, no dates); window changes are audited `payroll.tax_rules.windows` (dates, `reopened`) and send `tax_window` pushes when a window opens.
 **TaxRules** (object; plain JSON, not secret):
 ```json
 { "id":"uuid","fy":"2026-27","version":1,"status":"draft|submitted|verified|superseded","rules_sha256":"<64 hex>","note":"UNVERIFIED seed copied from FY 2025-26 ...",
@@ -1905,7 +1905,7 @@ Employee (`payroll.view_own`; the FY must have a verified rules version, else 40
 | GET | /me/tax/proofs?fy= | own proofs |
 | POST | /me/tax/proofs/{id}/cancel | `submitted` only |
 
-**Declaration** (employee and admin; admin adds `user`, `entered_by`, `unlocked_until`):
+**Declaration** (employee and admin; admin adds `user`, `entered_by`, `unlocked_until`; the employee's GET / PUT / submit answers also carry `sections` and `proof_max_files`, see the end of this block):
 ```json
 { "id":"uuid"|null,"fy":"2026-27","rules_version":2,"windows":Windows,"can_edit":true,"edit_reason":"DECLARATION_WINDOW|PROOF_WINDOW|UNLOCKED|CLOSED",
   "draft":{ "regime":"old|new"|null,
@@ -1916,30 +1916,32 @@ Employee (`payroll.view_own`; the FY must have a verified rules version, else 40
   "proofs":{ "submitted":1,"verified":2,"rejected":0 },
   "version":5 }
 ```
+Employee answers add `"sections":[ { "code","name","limit":"150000.00"|null,"senior_limit":null,"proof_required":true,"fields":["description"],"landlord_pan_above":null } ]` (the catalogue of the VERIFIED rules; build the form from it) and `"proof_max_files":5` (setting `payroll.tax_proof_max_files`).
 `dirty` = the draft differs from the submitted version. PAN fields are masked in GET (the employee sees their own landlord / lender PAN masked too; admin reveal see below). `amount` = annual amount (HRA: computed annual rent, read-only from `monthly_rent` x months).
 **PUT** `{ "fy":"2026-27","expected_version":5,"regime":"old|new"|null,"items":[ { "id":"i-1"|null,"section":"80C","amount":"150000.00","details":{...} } ] }` (<= 40 items; `id` null = new, server assigns) -> 200.
-Rules: section must exist in the verified rules (422 `INVALID_SECTION`); `details` keys only those of the section's `fields` (422); PAN per 13.4 format; `landlord_pan` required when annual rent > `landlord_pan_above` (422 `LANDLORD_PAN_REQUIRED`); months inside the FY; sections not allowed by the regime are kept with flag `NOT_IN_REGIME`;
+Rules: section must exist in the verified rules (422 `INVALID_SECTION`); `details` keys only those of the section's `fields` (422); PAN per 13.4 format AND a real holder type (4th letter one of `ABCFGHJLPT`); the masked form `XXXXX1234X` is 422 for a new value, but an existing item id that sends back the mask of its own stored PAN keeps the stored PAN; the `section` of an existing item id cannot change (422, use a new item); an item with a live (`submitted` / `verified`) proof cannot be edited or removed (409 `CONFLICT`, cancel a submitted proof first); `landlord_pan` required when annual rent > `landlord_pan_above` (422 `LANDLORD_PAN_REQUIRED`); months inside the FY; sections not allowed by the regime are kept with flag `NOT_IN_REGIME`;
 regime change after `declaration_closes_on` (and no unlock) -> 409 `REGIME_LOCKED`; outside every window -> 409 `WINDOW_CLOSED` (proof window allows edits of items of sections with `proof_required` only, not the regime).
 **submit** `{ "fy","expected_version" }` -> 200 (copies draft to `submitted`, `submitted.version` + 1; identical -> 422 `NO_CHANGE`).
 **Proof** `{ "id","fy","item_id":"i-1","section":"80C","claimed":"150000.00","files":[ { "id":"uuid","url":"/api/files/<id>","content_type":"application/pdf" } ],"status":"submitted|verified|rejected|cancelled","verified":"120000.00"|null,"comment":null,"verified_at":"ts|null","version":1 }`.
-**POST /me/tax/proofs** `{ "fy","item_id","claimed":"150000.00","file_ids":["uuid"] (1..5, own unused `tax_proof` uploads) }` -> 201. `item_id` must be in the SUBMITTED version (422 `ITEM_NOT_SUBMITTED`); `claimed` <= the submitted item amount (422 `AMOUNT_ABOVE_LIMIT`); proof window or unlock (409 `WINDOW_CLOSED`); <= 10 live proofs per item.
+**POST /me/tax/proofs** `{ "fy","item_id","claimed":"150000.00","file_ids":["uuid"] (1..`proof_max_files` (default 5), own unused `tax_proof` uploads) }` -> 201. `item_id` must be in the SUBMITTED version (422 `ITEM_NOT_SUBMITTED`); `claimed` <= the submitted item amount (422 `AMOUNT_ABOVE_LIMIT`); proof window or unlock (409 `WINDOW_CLOSED`); <= 10 live proofs per item.
 
 Admin:
 | Method | Path | Perm |
 |---|---|---|
 | GET | /admin/payroll/tax/declarations?fy=&status=none\|draft\|submitted&regime=&q=&page=&page_size= | `payroll.view_all` (audit `payroll.tax_declaration.list`, `after={count}`) |
-| GET | /admin/payroll/tax/declarations/{user_id}?fy=&reveal=false | `payroll.view_all` (audit `payroll.tax_declaration.view`, `after.revealed`; reveal = unmasked third-party PAN, `payroll:reveal` limits of 13.0) |
+| GET | /admin/payroll/tax/declarations/{user_id}?fy= | `payroll.view_all` (audit `payroll.tax_declaration.view`, `after.revealed=false`; third-party PANs masked; `?reveal=true` is 422) |
+| POST | /admin/payroll/tax/declarations/{user_id}/reveal | `payroll.manage` + step-up. Body `{ "fy"?, "current_password" }` -> the declaration with unmasked third-party PANs (`no-store`; audit `payroll.tax_declaration.view`, `after.revealed=true`; `payroll:reveal` limits of 13.0) |
 | PUT | /admin/payroll/tax/declarations/{user_id} | `payroll.manage` + step-up (on behalf; not self) |
 | POST | /admin/payroll/tax/declarations/{user_id}/submit | `payroll.manage` + step-up (on behalf) |
-| POST | /admin/payroll/tax/declarations/{user_id}/unlock | `payroll.manage` (not self) |
+| POST | /admin/payroll/tax/declarations/{user_id}/unlock | `payroll.manage` + step-up (not self) |
 | GET | /admin/payroll/tax/proofs?fy=&status=&user_id=&page=&page_size= | `payroll.view_all` (audit `payroll.tax_proof.list`, `after={count}`) |
 | POST | /admin/payroll/tax/proofs/{id}/verify | `payroll.manage` (submitted) |
 | POST | /admin/payroll/tax/proofs/{id}/reject | `payroll.manage` (submitted) |
 | POST | /admin/payroll/tax/reports/declarations?fy= | `payroll.view_all` (+ step-up when `include_identifiers`) |
 
 List item `{ "user":UserSummary,"fy","status":"none|draft|submitted","regime":"old|new"|null,"submitted_at","dirty":false,"items":7,"proofs":{ "submitted":1,"verified":2,"rejected":0 },"flags":["NO_PAN"] }` (no money).
-On-behalf PUT / submit: body as the employee's plus `current_password`; sets `entered_by`; push `tax_declaration_changed` to the employee. **unlock** `{ "fy","until":"2026-07-15","reason" }` -> 200 (until <= FY end, >= today).
-**verify** `{ "expected_version":1,"verified":"120000.00","comment":null }` -> 200 Proof; `verified` 0.00..claimed (0.00 = nothing accepted, comment required); verifier not the employee (403 `FORBIDDEN`) and not the declaration's `entered_by` (403 `SECOND_PERSON_REQUIRED`).
+On-behalf PUT / submit: body as the employee's plus `current_password`; sets `entered_by`; push `tax_declaration_changed` to the employee. **unlock** `{ "fy","until":"2026-07-15","reason","current_password","allow_regime_change":false }` -> 200 (until <= FY end, >= today). An unlock keeps the chosen regime locked (409 `REGIME_LOCKED`) unless `allow_regime_change` is true, which only `payroll.approve` holders may set (403 `FORBIDDEN`). The employee and the approvers are notified.
+**verify** `{ "expected_version":1,"verified":"120000.00","comment":null }` -> 200 Proof; `verified` 0.00..claimed (0.00 = nothing accepted, comment required); verifier not the employee (403 `FORBIDDEN`) and not the declaration's `entered_by` (403 `SECOND_PERSON_REQUIRED`); the item must still exist in the submitted version with the proof's section and an amount >= `claimed` (409 `CONFLICT`). Whoever decided on a proof of a declaration cannot then PUT / submit it on behalf (403 `SECOND_PERSON_REQUIRED`).
 **reject** `{ "expected_version","comment":"required" }` -> 200. Push `tax_proof_decision`.
 **declarations xlsx** body `{ "include_identifiers":false,"current_password"? }`: sheet `Declarations` (employee, regime, section, declared, proof verified; identifiers masked unless `include_identifiers`), `no-store`. Audit `payroll.report.export` (`kind: tax_declarations`, rows, include_identifiers).
 Errors (all): 409 `TAX_RULES_NOT_VERIFIED`, `WINDOW_CLOSED`, `REGIME_LOCKED`, `VERSION_CONFLICT`, `NOT_PENDING`; 422 `INVALID_SECTION`, `LANDLORD_PAN_REQUIRED`, `ITEM_NOT_SUBMITTED`, `AMOUNT_ABOVE_LIMIT`, `NO_CHANGE`, `VALIDATION_ERROR`; 403 `FORBIDDEN`, `SECOND_PERSON_REQUIRED`, `REAUTH_FAILED`; 404.
@@ -1957,7 +1959,7 @@ Files: `GET /api/files/{id}` for a `tax_proof` file = owner, `payroll.view_all` 
 | GET | /me/tax/form16 | `payroll.view_own` |
 | GET | /me/tax/form16/{id}/file | `payroll.view_own` (owner, `published`; audit `payroll.form16.view_own`) |
 
-**upload** multipart: `files` (1..20 PDFs, each <= 2 MB, total <= 40 MB; PDF checks of `POST /files`), for `dry_run=false` also `manifest_sha256` (from the dry run) and `current_password`. Matching uses the file NAME only: exactly one employee PAN (10 chars, case-insensitive) or one `Employee ID` token separated by `_`, `-`, space or `.`.
+**upload** multipart: `files` (1..20 PDFs, each <= 2 MB, total <= 40 MB; PDF checks of `POST /files`), for `dry_run=false` also `manifest_sha256` (from the dry run) and `current_password`. Matching uses the file NAME only: when the name holds a PAN-shaped token ONLY PANs decide (an unknown PAN is `UNKNOWN_PAN`; Employee ID tokens are ignored); otherwise one `Employee ID` token separated by `_`, `-`, space or `.` (IDs shorter than 3 characters or shaped like a year / FY never match). A file that names the caller is `FORBIDDEN`.
 Dry run -> 200 (stores nothing but the HMAC binding `actor | fy | kind | sorted file sha256 list`, Redis 15 min, fail closed):
 ```json
 { "fy":"2026-27","kind":"form16","manifest_sha256":"<64 hex>","files":4,
@@ -2081,7 +2083,7 @@ Where the backend refines 19.6 to 19.8 (Flutter should follow these). Errors kee
 - **Rules**: `TaxRules` also carries `windows`. `rules.note` is the editable note (`PUT` `note`: absent keeps `rules.note`, `""` removes it); `submit` answers 422 `VALIDATION_ERROR` (`details.field` `rules.note`) while it still starts with `UNVERIFIED` (the database refuses to verify such rules too), so the seed needs an edited,
   reviewed copy first. The seed lists old-regime `allowed_sections` (80CCC, 80CCD1, 80D_PARENTS, 80E, 80G, 80TTA) that its own `sections` catalogue does not define: validation (422 `rules.regimes.old.allowed_sections[i]`) forces the reviewer to add those sections or drop the codes. Validation is strict (unknown keys 422); declaration `fields` are limited to
   `description, senior, lender_name, lender_pan, monthly_rent, from_month, to_month, landlord_name, landlord_pan, city, metro, income, tds, pt, pf`. `POST .../rules` for a financial year without rows copies the newest version of the latest earlier year with `rules.note = "UNVERIFIED copy of FY ..."`; 404 when there is nothing to copy.
-  `reject` follows the same rule as `verify` (403 `SECOND_PERSON_REQUIRED` for creator, editors, submitter and `contributors`; the maker uses `withdraw`). Reject / withdraw return the version to `draft`, clear `submitted_by/at`, and the reject comment is stored encrypted in `payroll_item_events.detail_enc` (`{"comment"}`); withdraw makes the caller a contributor.
+  `reject` follows the same rule as `verify` (403 `SECOND_PERSON_REQUIRED` for creator, editors, submitter and `contributors`; the maker uses `withdraw`). Reject / withdraw return the version to `draft`, clear `submitted_by/at`, and the reject comment is stored encrypted in `payroll_item_events.detail_enc` (`{"comment"}`); `withdraw` is limited to the submitter or a `payroll.approve` holder (403 `FORBIDDEN`) and adds nobody to `contributors` except the submitter.
   `PUT .../windows` changes every version row of the FY (both pairs or neither per window; omitted / null = closed); the `tax_window` push goes out only when a window becomes open today through that call (no scheduler job yet for "closes in 3 days").
 - **Declarations**: `GET /me/tax/declaration` for an employee without a row returns `id: null`, `version: 0`; the first `PUT` must send `expected_version: 0`, later ones the returned version; `regime` must be sent (null clears it). `edit_reason` priority: `DECLARATION_WINDOW`, `UNLOCKED`, `PROOF_WINDOW`, `CLOSED`.
   In the proof window the regime is locked (409 `REGIME_LOCKED`) and only items of sections with `proof_required` may be added / changed / removed (409 `WINDOW_CLOSED`); submit applies the same limits against the submitted version. Item flags: `NOT_IN_REGIME` (the section is allowed in the other regime only; sections that no regime lists, such as `PREV_EMPLOYER`, never get it) and `ABOVE_LIMIT`
@@ -2091,7 +2093,7 @@ Where the backend refines 19.6 to 19.8 (Flutter should follow these). Errors kee
   Proof creation needs the proof window or an unlock (409 `WINDOW_CLOSED`) and a section with `proof_required`. Verify / reject: employee 403 `FORBIDDEN` (audited `payroll.denied`), then entered-by 403 `SECOND_PERSON_REQUIRED`, then `NOT_PENDING`, `VERSION_CONFLICT`. Admin proof objects carry `user` and `claimed`.
   `GET /api/files/{id}` of a `tax_proof` file: owner, or `payroll.view_all` once a proof lists it (audited `file.view_other`); a `form16` file is never served by `/api/files` (404 for everybody, including the uploader).
 - **Form 16**: `dry_run` defaults to `true`. Dry-run `matched[]` entries also carry `"warnings": ["REPLACES"]` when `replaces_id` is set. Matching tokens are delimited by any non-alphanumeric character; a file naming two different employees (two Employee IDs, two PANs, or an ID and a PAN) is `AMBIGUOUS`; every file of an employee that appears twice is `DUPLICATE_EMPLOYEE`.
-  `manifest_sha256` = sha256 of `fy|kind|sorted file hashes`; the Redis binding (15 min, single use) is an HMAC over `actor | fy | kind | manifest`. Commit order: step-up, `IMPORT_FILE_CHANGED`, `IMPORT_INVALID` (`details[].field` = `files[i]`, `message` = the error code), `IMPORT_NOT_CHECKED`. Publish `failed[].reason` order: `NOT_UPLOADED` (also another FY / unknown id), `FORBIDDEN`, `SHA_MISMATCH`, `SECOND_PERSON_REQUIRED`.
+  `manifest_sha256` = sha256 of `fy|kind|sorted (file sha256:employee id) pairs`, so a commit must reproduce the reviewed file-to-employee mapping (else `IMPORT_FILE_CHANGED`); the Redis binding (15 min, single use, consumed with GETDEL before any work and restored when the commit fails) is an HMAC over `actor | fy | kind | manifest`. A document whose stored file row is missing is 503 `FILE_UNAVAILABLE`. Commit order: step-up, `IMPORT_FILE_CHANGED`, `IMPORT_INVALID` (`details[].field` = `files[i]`, `message` = the error code), `IMPORT_NOT_CHECKED`. Publish `failed[].reason` order: `NOT_UPLOADED` (also another FY / unknown id), `FORBIDDEN`, `SHA_MISMATCH`, `SECOND_PERSON_REQUIRED`.
   `withdraw` of a document of the caller's own: 403 `FORBIDDEN`; an already withdrawn one: 409 `CONFLICT`. `payroll.form16_requires_second_person` is a guarded setting (`role.assign` + password + `admin_alert`); each document keeps the value it was uploaded under.
 - **Audit** (never amounts, PANs, file names, comments, reasons, attestation): `payroll.tax_rules.*`, `payroll.tax_declaration.save|submit|unlock|view|list|view_own`, `payroll.tax_proof.create|cancel|verify|reject|list`, `payroll.form16.dry_run|commit|publish|withdraw|download|view_own|list`, `payroll.report.export` (`kind: tax_declarations`). Money history: `item_type` `tax_rules` / `tax_declaration` / `tax_proof` / `form16` (publish is action `approve`; `user_id` of a rules event is the actor).
 

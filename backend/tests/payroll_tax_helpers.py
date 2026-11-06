@@ -166,6 +166,24 @@ async def set_pan(db, user_id, pan: str | None, *, on_payroll: bool = True) -> N
     await db.commit()
 
 
+async def clerk(client, db, seeded, eid="CLK001"):
+    """A payroll clerk: payroll.manage + view_all, but NOT payroll.approve (the seeded HR role holds approve as well)."""
+    from sqlalchemy import select
+
+    from app.models import Permission, Role, RolePermission
+    from tests.payroll_controls_helpers import extra_user
+
+    role = Role(name="clerk", description="clerk", is_system=False)
+    db.add(role)
+    await db.flush()
+    for code in ("payroll.manage", "payroll.view_all", "payroll.view_own"):
+        perm = (await db.execute(select(Permission).where(Permission.code == code))).scalar_one()
+        db.add(RolePermission(role_id=role.id, permission_id=perm.id))
+    await db.commit()
+    seeded["roles"]["clerk"] = role.id
+    return await extra_user(client, db, seeded, eid, "clerk")
+
+
 def item(section="80C", amount="100000.00", **details):
     return {"id": None, "section": section, "amount": amount, "details": details}
 

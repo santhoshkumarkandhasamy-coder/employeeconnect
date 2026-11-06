@@ -49,6 +49,14 @@ _GROUP_CODE = re.compile(r"^[A-Z0-9_]{2,24}$")
 _LABEL_KEY = re.compile(r"^[a-z0-9_]{1,24}$")
 _UNVERIFIED = re.compile(r"^\s*UNVERIFIED", re.IGNORECASE)
 PAN_RE = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")
+PAN_HOLDER_TYPES = "ABCFGHJLPT"  # 4th character of a real PAN: the holder type
+
+
+def valid_pan(p: str) -> bool:
+    """A PAN-shaped value with a real holder type. The masked form (`XXXXX1234X`) is never a PAN (H1)."""
+    return bool(PAN_RE.match(p)) and not p.startswith("XXXXX") and p[3] in PAN_HOLDER_TYPES
+
+
 MONTH_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])$")
 # declaration detail fields a section may ask for, and their kind (the declaration service validates the values by kind)
 SECTION_FIELDS: dict[str, str] = {
@@ -650,10 +658,13 @@ async def withdraw(session: AsyncSession, actor: Principal, rules_id: uuid.UUID,
     r = await _get(session, rules_id, lock=True)
     if r.status != "submitted":
         raise AppError("NOT_SUBMITTED", "Only a submitted version can be withdrawn")
+    if actor.id != r.submitted_by and not actor.has("payroll.approve"):  # L4
+        raise AppError("FORBIDDEN", "Only the person who submitted these rules, or an approver, can withdraw them")
     _check_version(r, body.version_row)
     maker = r.submitted_by
     r.status, r.submitted_by, r.submitted_at, r.updated_by = "draft", None, None, actor.id
-    pc.touch(r, actor.id)
+    if actor.id == maker:  # an approver who withdraws must stay free to verify the next submission
+        pc.touch(r, actor.id)
     r.version_row += 1
     await _flush(session)
     _event(session, r, "withdraw", actor.id)
@@ -757,7 +768,19 @@ def validate_windows(fy: str, body: WindowsIn) -> dict[str, str | None]:
     return out
 
 
-async def set_windows(session: AsyncSession, actor: Principal, fy: str, body: WindowsIn) -> dict[str, Any]:
+def _reopens(before: dict, new: dict, day: dt.date) -> bool:
+    """M3: a window whose closing date has passed is reopened, or its closing date is moved later."""
+    for kind in ("declaration", "proof"):
+        old_close = before.get(f"{kind}_closes_on")
+        new_close = new.get(f"{kind}_closes_on")
+        if old_close and new_close and dt.date.fromisoformat(old_close) < day and new_close > old_close:
+            return True
+    return False
+
+
+async def set_windows(
+    session: AsyncSession, redis: Redis, actor: Principal, fy: str, body: WindowsIn
+) -> dict[str, Any]:  # fmt: skip
     check_fy(fy)
     new = validate_windows(fy, body)
     rows = await rows_of(session, fy, lock=True)
@@ -765,6 +788,9 @@ async def set_windows(session: AsyncSession, actor: Principal, fy: str, body: Wi
         raise AppError("NOT_FOUND", "There are no tax rules for this financial year")
     day = await today(session)
     before = windows_out(rows[0].windows)
+    reopened = _reopens(before, new, day)
+    if reopened:
+        await admin_security.require_reauth(session, redis, actor, body.current_password, action="payroll.tax_rules.windows")
     opened = [
         kind for kind in ("declaration", "proof")
         if window_open(new, kind, day) and not window_open(before, kind, day)
@@ -773,8 +799,17 @@ async def set_windows(session: AsyncSession, actor: Principal, fy: str, body: Wi
     for r in rows:
         await session.refresh(r)
     audit(session, action="payroll.tax_rules.windows", actor=actor, entity_type=ENTITY, entity_id=rows[0].id,
-          after={"fy": fy, "version": rows[0].version, "status": rows[0].status, "windows": new})  # fmt: skip
+          after={"fy": fy, "version": rows[0].version, "status": rows[0].status, "windows": new, "reopened": reopened})  # fmt: skip
     _event(session, rows[0], "update", actor.id, {"windows": new})
+    if reopened:
+        entity, who = rows[0].id, actor.employee_id
+        pc.after_commit(
+            session,
+            lambda: admin_security.notify_admins(
+                session, entity_id=entity, title="Tax window reopened",
+                body=f"A closed tax window of FY {fy} was reopened or extended by {who}.",
+            ),
+        )  # fmt: skip
     if opened:
         kind = "declaration" if "declaration" in opened else "proof"
         pc.after_commit(session, lambda: _push_window(session, fy, kind, new))

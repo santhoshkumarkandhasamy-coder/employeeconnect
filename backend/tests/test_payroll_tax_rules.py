@@ -6,6 +6,7 @@ HR001 is the maker, ADM001 / ADM002 / ADM003 are checkers.
 
 from __future__ import annotations
 
+import datetime as dt
 import importlib.util
 import json
 import sys
@@ -24,6 +25,7 @@ from tests.payroll_tax_helpers import (  # noqa: F401  (fixtures)
     TAX,
     WINDOWS,
     add_rules,
+    clerk,
     err,
     fld,
     rules_copy,
@@ -398,3 +400,59 @@ async def test_windows_are_validated_audited_and_pushed(client, payroll, db, uid
     ).status_code == 404
     cleared = await client.put(f"{TAX}/years/{FY}/windows", json={}, headers=payroll["hr"])
     assert cleared.status_code == 200 and all(v is None for v in cleared.json()["windows"].values())
+
+
+# ================================================================================================ phase 5b security review
+async def test_only_the_submitter_or_an_approver_can_withdraw_and_an_approver_stays_free_to_verify(
+    client, payroll, db, uid, seeded
+):
+    await add_rules(db, uid, status="verified")
+    _, clk = await clerk(client, db, seeded)
+    row = await _submit(client, payroll["hr"], await _draft(client, payroll["hr"]))
+    url = f"{TAX}/rules/{row['id']}/withdraw"
+    r = await client.post(url, json={"version_row": row["version_row"]}, headers=clk)
+    assert r.status_code == 403 and err(r) == "FORBIDDEN"  # neither the submitter nor an approver
+    r = await client.post(url, json={"version_row": row["version_row"]}, headers=payroll["admin"])  # an approver may
+    assert r.status_code == 200 and r.json()["status"] == "draft"
+    stored = (await db.execute(select(TaxYearRule).where(TaxYearRule.id == uuid.UUID(row["id"])))).scalar_one()
+    await db.refresh(stored)
+    assert str(uid["admin"]) not in (stored.contributors or [])  # withdrawing did not make the approver a party
+    row = await _submit(client, payroll["hr"], r.json())
+    await _verify(client, payroll["admin"], row)  # still free to verify
+    # the submitter withdrawing is unchanged
+    row2 = await _submit(client, payroll["hr"], await _draft(client, payroll["hr"]))
+    r = await client.post(f"{TAX}/rules/{row2['id']}/withdraw", json={"version_row": row2["version_row"]}, headers=payroll["hr"])
+    assert r.status_code == 200
+
+
+async def test_reopening_a_passed_window_needs_the_password_and_alerts_the_admins(client, payroll, db, uid, seeded, clock):
+    await add_rules(db, uid, status="verified")
+    url = f"{TAX}/years/{FY}/windows"
+    # before the window closes: extending it is an ordinary change
+    later = {**WINDOWS, "declaration_closes_on": "2026-07-15"}
+    assert (await client.put(url, json=later, headers=payroll["hr"])).status_code == 200
+    clock.day = dt.date(2026, 8, 15)  # the declaration window (closes 15 July) has passed
+    notifications.OUTBOX.clear()
+    same = await client.put(url, json=later, headers=payroll["hr"])
+    assert same.status_code == 200  # nothing reopened
+    shorter = {**WINDOWS, "declaration_closes_on": "2026-06-01"}
+    assert (await client.put(url, json=shorter, headers=payroll["hr"])).status_code == 200  # closing earlier is free
+    assert not [m for m in notifications.OUTBOX if m["payload"]["type"] == "admin_alert"]
+    reopen = {**WINDOWS, "declaration_closes_on": "2026-09-30"}
+    r = await client.put(url, json=reopen, headers=payroll["hr"])
+    assert r.status_code == 422  # step-up needed
+    r = await client.put(url, json={**reopen, "current_password": "wrong"}, headers=payroll["hr"])
+    assert r.status_code == 403 and err(r) == "REAUTH_FAILED"
+    assert (await client.get(f"{TAX}/years", headers=payroll["hr"])).json()["items"][0]["windows"][
+        "declaration_closes_on"
+    ] == "2026-06-01"
+    r = await client.put(url, json={**reopen, "current_password": PASSWORD}, headers=payroll["hr"])
+    assert r.status_code == 200 and r.json()["windows"]["declaration_closes_on"] == "2026-09-30"
+    alerts = [m for m in notifications.OUTBOX if m["payload"]["type"] == "admin_alert"]
+    assert alerts and "2026-09-30" not in json.dumps(alerts)
+    log = [a for a in (await db.execute(select(AuditLog).where(AuditLog.action == "payroll.tax_rules.windows"))).scalars()][-1]
+    assert log.after["reopened"] is True and "current_password" not in json.dumps(log.after)
+    # the same for the proof window
+    clock.day = dt.date(2027, 3, 10)
+    r = await client.put(url, json={**reopen, "proof_closes_on": "2027-03-20"}, headers=payroll["hr"])
+    assert r.status_code == 422
