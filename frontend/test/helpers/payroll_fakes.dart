@@ -13,6 +13,7 @@ import 'package:employee_connect/features/payroll/domain/pay_items_models.dart';
 import 'package:employee_connect/features/payroll/domain/payroll_models.dart';
 import 'package:employee_connect/features/payroll/domain/phase4b_models.dart';
 import 'package:employee_connect/features/payroll/domain/phase5a_models.dart';
+import 'package:employee_connect/features/payroll/domain/phase5b_models.dart';
 import 'package:employee_connect/features/payroll/presentation/payroll_providers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -147,6 +148,14 @@ class FakeRepo extends PayrollRepository {
 
   @override
   Future<Paged<PublishRequest>> publishRequests(PublishRequestQuery q, {int page = 1}) async =>
+      const Paged(items: [], page: 1, total: 0, pageSize: 20);
+
+  // phase 5b defaults: nothing to verify or publish
+  @override
+  Future<List<TaxYear>> taxYears() async => const [];
+
+  @override
+  Future<Paged<Form16Doc>> form16Documents(Form16Query q, {int page = 1}) async =>
       const Paged(items: [], page: 1, total: 0, pageSize: 20);
 
   @override

@@ -13,6 +13,7 @@ import '../domain/pay_items_models.dart';
 import '../domain/phase4a_models.dart';
 import '../domain/phase4b_models.dart';
 import '../domain/phase5a_models.dart';
+import '../domain/phase5b_models.dart';
 import '../domain/payroll_models.dart';
 
 /// A downloaded file held in memory (a payslip PDF or the register workbook).
@@ -1256,6 +1257,302 @@ class PayrollRepository {
       PaymentBatch.fromJson(
         await _json('POST', '$_a/payment-batches/$id/confirm', body: body.toJson(currentPassword)),
       );
+
+  // ---- phase 5b: tax year rules (19.6) -------------------------------------------------------
+
+  static const _t = '/admin/payroll/tax';
+
+  Future<List<TaxYear>> taxYears() async => TaxYear.parseList(await _json('GET', '$_t/years'));
+
+  /// All versions of a financial year, newest first.
+  Future<List<TaxRules>> taxRuleVersions(String fy) async =>
+      TaxRules.parseList(await _json('GET', '$_t/years/$fy/rules'));
+
+  Future<TaxRules> taxRules(String id) async => TaxRules.fromJson(await _json('GET', '$_t/rules/$id'));
+
+  /// A new draft = a copy of the newest version (409 DRAFT_EXISTS when one is open).
+  Future<TaxRules> createTaxRules(String fy) async =>
+      TaxRules.fromJson(await _json('POST', '$_t/years/$fy/rules', body: <String, Object?>{}));
+
+  /// The whole `rules` object is replaced. [note]: null keeps it, empty removes it.
+  Future<TaxRules> saveTaxRules(
+    String id, {
+    required int versionRow,
+    required Map<String, dynamic> rules,
+    String? note,
+  }) async =>
+      TaxRules.fromJson(await _json('PUT', '$_t/rules/$id', body: {
+        'version_row': versionRow,
+        'rules': rules,
+        if (note != null) 'note': note.trim(),
+      },),);
+
+  Future<TaxRules> submitTaxRules(String id, {required int versionRow}) async =>
+      TaxRules.fromJson(await _json('POST', '$_t/rules/$id/submit', body: {'version_row': versionRow}));
+
+  Future<TaxRules> withdrawTaxRules(String id, {required int versionRow}) async =>
+      TaxRules.fromJson(await _json('POST', '$_t/rules/$id/withdraw', body: {'version_row': versionRow}));
+
+  /// Needs `payroll.approve` and the caller's own password (step-up, never kept).
+  Future<TaxRules> verifyTaxRules(
+    String id, {
+    required int versionRow,
+    required String rulesSha256,
+    required String attestation,
+    required String currentPassword,
+  }) async =>
+      TaxRules.fromJson(await _json('POST', '$_t/rules/$id/verify', body: {
+        'version_row': versionRow,
+        'rules_sha256': rulesSha256,
+        'attestation': attestation.trim(),
+        'current_password': currentPassword,
+      },),);
+
+  Future<TaxRules> rejectTaxRules(String id, {required int versionRow, required String comment}) async =>
+      TaxRules.fromJson(await _json('POST', '$_t/rules/$id/reject', body: {
+        'version_row': versionRow,
+        'comment': comment.trim(),
+      },),);
+
+  Future<TaxWindows> saveTaxWindows(String fy, TaxWindows w) async =>
+      TaxWindows.fromJson((await _json('PUT', '$_t/years/$fy/windows', body: w.toJson()))['windows']);
+
+  // ---- phase 5b: declarations and proofs, admin (19.7) ---------------------------------------
+
+  Future<Paged<DeclarationListItem>> taxDeclarations(TaxDeclarationQuery q, {int page = 1}) async => Paged.parse(
+        await _json('GET', '$_t/declarations', query: {
+          if (q.fy != null) 'fy': q.fy,
+          if (q.status != null) 'status': q.status,
+          if (q.regime != null) 'regime': q.regime,
+          if (q.q.trim().isNotEmpty) 'q': q.q.trim(),
+          'page': page,
+          'page_size': 20,
+        },),
+        DeclarationListItem.fromJson,
+      );
+
+  /// [reveal] shows the landlord / lender PAN unmasked (audited, rate limited). Never kept.
+  Future<TaxDeclaration> taxDeclarationOf(String userId, {String? fy, bool reveal = false}) async =>
+      TaxDeclaration.fromJson(await _json('GET', '$_t/declarations/$userId', query: {
+        if (fy != null) 'fy': fy,
+        'reveal': reveal,
+      },),);
+
+  /// On behalf of an employee: needs `payroll.manage` and the caller's password.
+  Future<TaxDeclaration> saveDeclarationOnBehalf(
+    String userId,
+    DeclarationSave body, {
+    required String currentPassword,
+  }) async =>
+      TaxDeclaration.fromJson(await _json('PUT', '$_t/declarations/$userId', body: body.toJson(currentPassword)));
+
+  Future<TaxDeclaration> submitDeclarationOnBehalf(
+    String userId, {
+    required String fy,
+    required int expectedVersion,
+    required String currentPassword,
+  }) async =>
+      TaxDeclaration.fromJson(await _json('POST', '$_t/declarations/$userId/submit', body: {
+        'fy': fy,
+        'expected_version': expectedVersion,
+        'current_password': currentPassword,
+      },),);
+
+  Future<TaxDeclaration> unlockDeclaration(
+    String userId, {
+    required String fy,
+    required String until,
+    required String reason,
+  }) async =>
+      TaxDeclaration.fromJson(await _json('POST', '$_t/declarations/$userId/unlock', body: {
+        'fy': fy,
+        'until': until,
+        'reason': reason.trim(),
+      },),);
+
+  Future<Paged<TaxProof>> taxProofs(TaxProofQuery q, {int page = 1}) async => Paged.parse(
+        await _json('GET', '$_t/proofs', query: {
+          if (q.fy != null) 'fy': q.fy,
+          if (q.status != null) 'status': q.status,
+          if (q.userId != null) 'user_id': q.userId,
+          'page': page,
+          'page_size': 20,
+        },),
+        TaxProof.fromJson,
+      );
+
+  Future<TaxProof> verifyTaxProof(
+    String id, {
+    required int expectedVersion,
+    required String verified,
+    String? comment,
+  }) async =>
+      TaxProof.fromJson(await _json('POST', '$_t/proofs/$id/verify', body: {
+        'expected_version': expectedVersion,
+        'verified': verified,
+        'comment': _blankToNull(comment),
+      },),);
+
+  Future<TaxProof> rejectTaxProof(String id, {required int expectedVersion, required String comment}) async =>
+      TaxProof.fromJson(await _json('POST', '$_t/proofs/$id/reject', body: {
+        'expected_version': expectedVersion,
+        'comment': comment.trim(),
+      },),);
+
+  /// A proof file, fetched through the app client. The link from the server is reduced to its file id.
+  Future<PayrollFile> taxProofFile(ProofFile f) async {
+    final id = fileIdFromUrl(f.url);
+    if (id == null) throw const ApiException(code: 'NOT_FOUND', message: 'The file is not available.');
+    return _file('GET', '/files/$id', fallbackName: 'proof${f.extension}', ext: f.extension);
+  }
+
+  // ---- phase 5b: Form 16, admin (19.8) ----------------------------------------------------------
+
+  /// [dryRun] true checks and matches only. The commit (false) also needs the manifest of the dry run
+  /// and the caller's password. File names are sent as chosen: the server matches on them and never keeps them.
+  Future<Map<String, dynamic>> form16Upload({
+    required String fy,
+    required String kind,
+    required List<Form16UploadFile> files,
+    required bool dryRun,
+    String? manifestSha256,
+    String? currentPassword,
+  }) =>
+      guardApi<Map<String, dynamic>>(() async {
+        final form = FormData();
+        for (final f in files) {
+          form.files.add(MapEntry(
+            'files',
+            MultipartFile.fromBytes(f.bytes, filename: f.name, contentType: DioMediaType.parse('application/pdf')),
+          ),);
+        }
+        if (!dryRun) {
+          form.fields
+            ..add(MapEntry('manifest_sha256', manifestSha256 ?? ''))
+            ..add(MapEntry('current_password', currentPassword ?? ''));
+        }
+        final res = await _dio.post<Object?>(
+          '$_t/form16/upload',
+          data: form,
+          queryParameters: {'fy': fy, 'kind': kind, 'dry_run': dryRun},
+        );
+        final d = res.data;
+        return d is Map ? d.cast<String, dynamic>() : const <String, dynamic>{};
+      });
+
+  Future<Form16DryRun> form16DryRun(String fy, String kind, List<Form16UploadFile> files) async =>
+      Form16DryRun.fromJson(await form16Upload(fy: fy, kind: kind, files: files, dryRun: true));
+
+  Future<Form16CommitResult> form16Commit(
+    String fy,
+    String kind,
+    List<Form16UploadFile> files, {
+    required String manifestSha256,
+    required String currentPassword,
+  }) async =>
+      Form16CommitResult.fromJson(await form16Upload(
+        fy: fy,
+        kind: kind,
+        files: files,
+        dryRun: false,
+        manifestSha256: manifestSha256,
+        currentPassword: currentPassword,
+      ),);
+
+  Future<Paged<Form16Doc>> form16Documents(Form16Query q, {int page = 1}) async => Paged.parse(
+        await _json('GET', '$_t/form16', query: {
+          if (q.fy != null) 'fy': q.fy,
+          if (q.kind != null) 'kind': q.kind,
+          if (q.status != null) 'status': q.status,
+          if (q.q.trim().isNotEmpty) 'q': q.q.trim(),
+          'page': page,
+          'page_size': 20,
+        },),
+        Form16Doc.fromJson,
+      );
+
+  Future<PayrollFile> form16AdminFile(String id) =>
+      _file('GET', '$_t/form16/$id/file', fallbackName: 'form16.pdf', ext: '.pdf');
+
+  /// Needs `payroll.approve` and the caller's password. [documents] are the ids and hashes that were reviewed.
+  Future<Form16PublishResult> publishForm16(
+    String fy,
+    List<({String id, String sha256})> documents, {
+    required String currentPassword,
+  }) async =>
+      Form16PublishResult.fromJson(await _json('POST', '$_t/form16/publish', body: {
+        'fy': fy,
+        'documents': [for (final d in documents) {'id': d.id, 'sha256': d.sha256}],
+        'current_password': currentPassword,
+      },),);
+
+  Future<void> withdrawForm16(String id, {required String reason, required String currentPassword}) async {
+    await _json('POST', '$_t/form16/$id/withdraw', body: {
+      'reason': reason.trim(),
+      'current_password': currentPassword,
+    },);
+  }
+
+  // ---- phase 5b: employee self-service (19.7, 19.8) ---------------------------------------------
+
+  Future<List<MyTaxYear>> myTaxYears() async => MyTaxYear.parseList(await _json('GET', '/me/tax/years'));
+
+  Future<TaxDeclaration> myDeclaration({String? fy}) async =>
+      TaxDeclaration.fromJson(await _json('GET', '/me/tax/declaration', query: {if (fy != null) 'fy': fy}));
+
+  Future<TaxDeclaration> saveMyDeclaration(DeclarationSave body) async =>
+      TaxDeclaration.fromJson(await _json('PUT', '/me/tax/declaration', body: body.toJson(null)));
+
+  Future<TaxDeclaration> submitMyDeclaration({required String fy, required int expectedVersion}) async =>
+      TaxDeclaration.fromJson(await _json('POST', '/me/tax/declaration/submit', body: {
+        'fy': fy,
+        'expected_version': expectedVersion,
+      },),);
+
+  /// `POST /files` with `purpose=tax_proof`; returns the file id. The caller has checked type and size.
+  Future<String> uploadTaxProofFile(List<int> bytes, String filename) => guardApi<String>(() async {
+        final form = FormData.fromMap({
+          'purpose': 'tax_proof',
+          'file': MultipartFile.fromBytes(
+            bytes,
+            filename: filename,
+            contentType: DioMediaType.parse(billContentTypeFor(filename)),
+          ),
+        });
+        final res = await _dio.post<Map<String, dynamic>>('/files', data: form);
+        return '${res.data?['id'] ?? ''}';
+      });
+
+  Future<TaxProof> createMyProof({
+    required String fy,
+    required String itemId,
+    required String claimed,
+    required List<String> fileIds,
+  }) async =>
+      TaxProof.fromJson(await _json('POST', '/me/tax/proofs', body: {
+        'fy': fy,
+        'item_id': itemId,
+        'claimed': claimed,
+        'file_ids': fileIds,
+      },),);
+
+  Future<List<TaxProof>> myProofs({String? fy}) async =>
+      TaxProof.parseList(await _json('GET', '/me/tax/proofs', query: {if (fy != null) 'fy': fy}));
+
+  Future<TaxProof> cancelMyProof(String id) async =>
+      TaxProof.fromJson(await _json('POST', '/me/tax/proofs/$id/cancel', body: <String, Object?>{}));
+
+  Future<List<MyForm16>> myForm16() async => MyForm16.parseList(await _json('GET', '/me/tax/form16'));
+
+  Future<PayrollFile> myForm16File(String id) =>
+      _file('GET', '/me/tax/form16/$id/file', fallbackName: 'form16.pdf', ext: '.pdf');
+}
+
+/// One PDF of a Form 16 upload, in memory.
+class Form16UploadFile {
+  const Form16UploadFile(this.name, this.bytes);
+  final String name;
+  final Uint8List bytes;
 }
 
 String? _blankToNull(String? v) => v == null || v.trim().isEmpty ? null : v.trim();

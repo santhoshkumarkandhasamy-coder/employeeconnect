@@ -11,6 +11,8 @@ import '../domain/pay_items_models.dart';
 import '../domain/phase4a_models.dart';
 import '../domain/phase4b_models.dart';
 import '../domain/phase5a_models.dart';
+import '../domain/phase5b_models.dart';
+import 'tax_providers.dart' show TaxApprovals;
 import '../domain/payroll_models.dart';
 
 /// All payroll state is autoDispose and in memory only: it is never written to
@@ -395,6 +397,7 @@ class ApprovalQueue {
     this.fnfs = const [],
     this.publishRequests = const [],
     this.paymentBatches = const [],
+    this.tax = const TaxApprovals(),
   });
   final List<Increment> increments;
   final List<IncrementBatch> batches;
@@ -405,8 +408,16 @@ class ApprovalQueue {
 
   /// Submitted payment batches (only fetched for `payroll.approve` holders).
   final List<PaymentBatch> paymentBatches;
+
+  /// Tax rules waiting for verification and Form 16 documents waiting to be published (`payroll.approve`).
+  final TaxApprovals tax;
   int get count =>
-      increments.length + batches.length + fnfs.length + publishRequests.length + paymentBatches.length;
+      increments.length +
+      batches.length +
+      fnfs.length +
+      publishRequests.length +
+      paymentBatches.length +
+      tax.count;
 }
 
 final approvalQueueProvider = FutureProvider.autoDispose<ApprovalQueue>((ref) async {
@@ -420,6 +431,8 @@ final approvalQueueProvider = FutureProvider.autoDispose<ApprovalQueue>((ref) as
     if (approver) repo.fnfList(const FnfQuery(status: 'submitted')),
     if (publisher) repo.publishRequests(const PublishRequestQuery(status: 'submitted')),
     if (approver) repo.paymentBatches(const PaymentBatchQuery(status: 'submitted')),
+    if (approver) repo.taxYears(),
+    if (approver) repo.form16Documents(const Form16Query(status: 'uploaded')),
   ]);
   var n = 0;
   final incs = approver ? (results[n++] as Paged<Increment>).items : const <Increment>[];
@@ -427,7 +440,13 @@ final approvalQueueProvider = FutureProvider.autoDispose<ApprovalQueue>((ref) as
   final fnfs = approver ? (results[n++] as Paged<FnfListItem>).items : const <FnfListItem>[];
   final reqs = publisher ? (results[n++] as Paged<PublishRequest>).items : const <PublishRequest>[];
   final pays = approver ? (results[n++] as Paged<PaymentBatch>).items : const <PaymentBatch>[];
+  final years = approver ? (results[n++] as List<TaxYear>) : const <TaxYear>[];
+  final f16 = approver ? (results[n++] as Paged<Form16Doc>).items : const <Form16Doc>[];
   return ApprovalQueue(
+    tax: TaxApprovals(
+      rules: [for (final y in years) if (y.openVersion?.status == 'submitted') y],
+      form16: [for (final d in f16) if (d.isUploaded) d],
+    ),
     increments: [for (final i in incs) if (!i.isInBatch) i],
     batches: [for (final b in batches) if (!b.isCancelled && b.submittedCount > 0) b],
     fnfs: [for (final f in fnfs) if (f.status == 'submitted') f],

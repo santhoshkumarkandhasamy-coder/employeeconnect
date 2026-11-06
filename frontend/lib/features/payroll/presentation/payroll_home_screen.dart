@@ -14,6 +14,7 @@ import 'payroll_providers.dart' show approvalQueueProvider;
 import 'payroll_settings_tab.dart';
 import 'runs_tab.dart';
 import 'statutory_tab.dart';
+import 'tax_tab.dart';
 
 /// HR / Admin payroll area: Dashboard | Runs | Employees | Pay items | Approvals (only with
 /// `payroll.approve` or `payroll.publish`) | Payments | Statutory | Settings. Shown with
@@ -32,7 +33,7 @@ class PayrollHomeScreen extends ConsumerWidget {
     final pending = approver ? ref.watch(approvalQueueProvider).valueOrNull?.count ?? 0 : 0;
     return SecureScreen(
       child: DefaultTabController(
-        length: approver ? 8 : 7,
+        length: approver ? 9 : 8,
         child: Scaffold(
           appBar: AppBar(
             title: const Text('Payroll'),
@@ -56,6 +57,7 @@ class PayrollHomeScreen extends ConsumerWidget {
                   ),
                 const Tab(key: ValueKey('tab-payments'), text: 'Payments'),
                 const Tab(text: 'Statutory'),
+                const Tab(key: ValueKey('tab-tax'), text: 'Tax'),
                 const Tab(text: 'Settings'),
               ],
             ),
@@ -69,6 +71,7 @@ class PayrollHomeScreen extends ConsumerWidget {
               if (approver) const ApprovalsTab(),
               const PaymentsTab(),
               const StatutoryTab(),
+              const TaxTab(),
               const PayrollSettingsTab(),
             ],
           ),

@@ -14,6 +14,7 @@ import 'my_loans_screen.dart';
 import 'my_overtime_screen.dart';
 import 'my_fnf_card.dart';
 import 'payslip_detail_screen.dart';
+import 'my_tax_screen.dart';
 
 /// "Payslips" under More: the signed-in user's published payslips, one row per
 /// month. The list carries no amounts by contract; they appear only in the
@@ -60,6 +61,14 @@ class _PayslipsScreenState extends ConsumerState<PayslipsScreen> {
                   MaterialPageRoute<void>(builder: (_) => const MyOvertimeScreen()),
                 ),
               ),
+            IconButton(
+              key: const ValueKey('open-my-tax'),
+              tooltip: 'Tax and Form 16',
+              icon: const Icon(Icons.request_quote_outlined),
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(builder: (_) => const MyTaxScreen()),
+              ),
+            ),
             IconButton(
               key: const ValueKey('open-my-loans'),
               tooltip: 'My loans',

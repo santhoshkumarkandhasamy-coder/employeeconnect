@@ -424,6 +424,12 @@ const List<PayrollSettingSpec> payrollSettingSpecs = [
   PayrollSettingSpec('payroll.bank_change_alert_days',
       'Flag bank detail changes made in the last', PayrollSettingKind.number,
       'Publishing and bank file', min: 7, max: 90, suffix: 'days',),
+  // 5b: Form 16 and investment proofs (contract 19.10).
+  PayrollSettingSpec('payroll.form16_requires_second_person',
+      'A different person must publish a Form 16 that I uploaded', PayrollSettingKind.boolean,
+      'Tax documents',),
+  PayrollSettingSpec('payroll.tax_proof_max_files', 'Files allowed per investment proof',
+      PayrollSettingKind.number, 'Tax documents', min: 1, max: 10,),
 ];
 
 const String reimbursementCategoriesKey = 'payroll.reimbursement_categories';

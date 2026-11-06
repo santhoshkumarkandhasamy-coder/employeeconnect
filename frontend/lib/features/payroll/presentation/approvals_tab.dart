@@ -9,6 +9,9 @@ import 'fnf_widgets.dart';
 import 'increment_detail_screen.dart';
 import 'increment_widgets.dart';
 import '../domain/phase5a_models.dart';
+import '../domain/phase5b_models.dart' show fyTitle;
+import 'form16_section.dart' show Form16PublishScreen;
+import 'tax_rules_section.dart' show TaxRulesScreen;
 import 'payment_widgets.dart';
 import 'payroll_providers.dart';
 import 'publish_request_widgets.dart';
@@ -106,6 +109,48 @@ class ApprovalsTab extends ConsumerWidget {
                                   style: Theme.of(context).textTheme.bodySmall,
                                 ),
                               ),
+                      ),
+                  ],
+                  if (q.tax.rules.isNotEmpty) ...[
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      child: Text('Tax rules', style: Theme.of(context).textTheme.titleSmall),
+                    ),
+                    for (final y in q.tax.rules)
+                      Card(
+                        key: ValueKey('queue-tax-rules-${y.fy}'),
+                        child: ListTile(
+                          title: Text('Tax rules ${fyTitle(y.fy)} version ${y.openVersion!.version}'),
+                          subtitle: const Text('Waiting for verification by a second person'),
+                          trailing: const Icon(Icons.chevron_right),
+                          onTap: () async {
+                            await Navigator.of(context).push<void>(
+                              MaterialPageRoute<void>(builder: (_) => TaxRulesScreen(rulesId: y.openVersion!.id)),
+                            );
+                            ref.invalidate(approvalQueueProvider);
+                          },
+                        ),
+                      ),
+                  ],
+                  if (q.tax.form16.isNotEmpty) ...[
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      child: Text('Form 16 to publish', style: Theme.of(context).textTheme.titleSmall),
+                    ),
+                    for (final fy in ({for (final d in q.tax.form16) d.fy}.toList()..sort((a, b) => b.compareTo(a))))
+                      Card(
+                        key: ValueKey('queue-form16-$fy'),
+                        child: ListTile(
+                          title: Text('${q.tax.form16.where((d) => d.fy == fy).length} Form 16 documents ready'),
+                          subtitle: Text('${fyTitle(fy)}. Check and publish them.'),
+                          trailing: const Icon(Icons.chevron_right),
+                          onTap: () async {
+                            await Navigator.of(context).push<void>(
+                              MaterialPageRoute<void>(builder: (_) => Form16PublishScreen(fy: fy)),
+                            );
+                            ref.invalidate(approvalQueueProvider);
+                          },
+                        ),
                       ),
                   ],
                   if (q.batches.isNotEmpty) ...[
