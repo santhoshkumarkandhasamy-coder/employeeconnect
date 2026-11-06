@@ -42,13 +42,13 @@ class PayrollItemEvent(Base):
     __table_args__ = (
         CheckConstraint(
             "item_type IN ('one_time','loan','loan_installment','arrears','encashment','reimbursement','overtime',"
-            "'increment','fnf','publish_request','payment_batch')",
+            "'increment','fnf','publish_request','payment_batch','tax_rules','tax_declaration','tax_proof','form16')",
             name="ck_payroll_item_events_item_type",
         ),
         CheckConstraint(
             "action IN ('create','update','cancel','skip','reschedule','foreclose','close','propose','accept','dismiss',"
             "'verify','approve','reject','process','reopen','pay','carry','submit','withdraw','settle','revoke','remove',"
-            "'export','confirm','expire','stale')",
+            "'export','confirm','expire','stale','unlock')",
             name="ck_payroll_item_events_action",
         ),
         CheckConstraint("period IS NULL OR extract(day from period) = 1", name="ck_payroll_item_events_period_first"),

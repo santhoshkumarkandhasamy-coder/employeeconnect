@@ -99,6 +99,10 @@ TABLES = [
     "company_bank_accounts",
     "payroll_payment_batches",
     "payroll_payment_lines",
+    "tax_year_rules",
+    "tax_declarations",
+    "tax_proofs",
+    "form16_documents",
     "statutory_challans",
     "statutory_challan_events",
     "payroll_import_batches",
@@ -154,6 +158,7 @@ def _adapt_metadata_for_sqlite() -> None:
                 or "ANY (" in str(c.sqltext)
                 or "btrim" in str(c.sqltext)
                 or "char_length" in str(c.sqltext)
+                or "jsonb_typeof" in str(c.sqltext)
                 or "extract(" in str(c.sqltext)
                 or "DATE '" in str(c.sqltext)
                 or "trunc(" in str(c.sqltext)
@@ -188,11 +193,17 @@ def _adapt_metadata_for_sqlite() -> None:
         ("payroll_publish_requests", "makers"),
         ("payroll_payment_batches", "contributors"),
         ("payroll_payment_lines", "flags"),
+        ("tax_year_rules", "contributors"),  # migration 0027
     ):
         arr = Base.metadata.tables[tname].c[cname]
         arr.type = JSON()
         arr.server_default = None
         arr.default = ColumnDefault(list)
+    tax_files = Base.metadata.tables["tax_proofs"].c.file_ids  # uuid[] in Postgres (tests pass ids as strings)
+    tax_files.type = JSON()
+    tax_windows = Base.metadata.tables["tax_year_rules"].c.windows  # '{}'::jsonb default in Postgres
+    tax_windows.server_default = None
+    tax_windows.default = ColumnDefault(dict)
     wd = Base.metadata.tables["shifts"].c.working_days
     wd.type = JSON()
     wd.server_default = None
