@@ -19,9 +19,27 @@ Machines (verified 2026-11-07): `.201` A6FE201561197 (36 users, 29,228 records),
 | Migration 0030 up, down and up again on Postgres 16; append-only trigger checked as `app_user` | done | OK |
 | Real-device read of users and punches on all 3 machines | done | OK |
 | eTimeTrackLite "delete logs after download" is OFF | user | **open** |
-| Employee codes in the app match the machine user ids (4 characters on `.201`/`.203`, 6 on `.202`) | user + Claude | **open** |
+| Employee codes vs machine user ids: compared 2026-11-07, see section 1.1 | user | **open**, the user will change the codes by hand |
 | Pick the "ingest from" date for each machine (history goes back to 2024 on `.201`) | user | **open** |
 | A quiet time window agreed (the egress network change can cause a short outage, see 4.4) | user | **open** |
+
+### 1.1 Employee codes vs machine user ids (checked 2026-11-07, read-only)
+
+The app has 5 users: `ACA001`, `ACA002` (inactive and deleted, never matches), `ACA003`, `ACA004`, `ADMIN001`. The machines hold 44 distinct ids:
+
+| Machine | Ids on the device | Match an app employee |
+|---|---|---|
+| `.202` | `ACA001`, `ACA028`, `ACA035` | `ACA001` only |
+| `.201` | 36 ids, `E001` to `E092` | none |
+| `.203` | 17 ids (12 also on `.201`, plus `E019`, `E075`, `E080`, `E081`, `E094`) | none |
+
+41 distinct `E…` ids across `.201` and `.203`. Matching rule (`device_matching.py`, active and not deleted users only): exact employee ID, case-insensitive; else numeric equality when the device id is all digits (after removing `device.match_prefix`). `E003` is not all digits, so only an exact code `E003` matches it.
+
+Until employees with those codes exist, punches are stored and shown as unmatched, never lost, and no attendance is written for them. The user changes the codes by hand after this process. Either way works:
+1. **Rename or create the employees with the device ids** (`E003`, `ACA028`, ...). The next sync or the 00:20 recompute then matches them by exact ID.
+2. **Leave the codes and map in the console** (Unmatched users, per machine or for all machines).
+
+Do this before relying on device attendance. `ACA003` and `ACA004` are on no machine, and `ACA028` and `ACA035` (on `.202`) have no employee yet. Nothing in the database was changed by the check.
 
 ## 2. Prepare (no production change)
 
@@ -71,7 +89,7 @@ The worker must print `worker ok`. The api must fail with a timeout or refusal. 
 In the console (Admin, Attendance devices):
 1. Name, IP, port 4370, TCP, no communication key, the "ingest from" date agreed in the gates, expected serial number.
 2. **Test connection**, then save, then **Sync now**.
-3. Check: the device shows the serial and clock status, the punch log fills, "Unmatched users" lists anyone whose id has no employee. `.202` has a clock about 6 minutes slow, so expect an automatic offset to be applied and shown.
+3. Check: the device shows the serial and clock status, the punch log fills, "Unmatched users" lists anyone whose id has no employee. Until the codes are changed (1.1), expect all of `.201` and `.203` and two of the three on `.202` to appear there. `.202` has a clock about 6 minutes slow, so expect an automatic offset to be applied and shown.
 4. Map unmatched users or fix employee codes, then check that attendance appears for a day you can verify by hand.
 5. Repeat for `.203`, then `.201`. `.201` has the largest log; the first sync reads about 29k records and may take a minute or two.
 
