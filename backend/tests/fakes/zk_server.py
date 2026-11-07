@@ -120,11 +120,11 @@ class FakeZK:
         for p in self.punches:
             t = struct.pack("<I", _enc_time(p.time))
             if self.att_format == 8:
-                body += struct.pack("<HBB4s", p.uid, p.verify, p.state, t)
+                body += struct.pack("<HB4sB", p.uid, p.verify, t, p.state)
             elif self.att_format == 16:
                 body += struct.pack("<I4sBB2xI", int(p.user_id), t, p.verify, p.state, 0)
             else:
-                body += struct.pack("<H24sBB4s8x", p.uid, p.user_id.encode(), p.verify, p.state, t)
+                body += struct.pack("<H24sB4sB8x", p.uid, p.user_id.encode(), p.verify, t, p.state)
         return struct.pack("<I", len(body)) + body
 
     def now(self) -> dt.datetime:

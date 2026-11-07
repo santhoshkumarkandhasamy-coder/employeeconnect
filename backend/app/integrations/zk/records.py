@@ -21,9 +21,9 @@ USER_FORMATS = {
     72: struct.Struct("<HB8x24sIx7sx24s"),
 }
 ATT_FORMATS = {
-    8: struct.Struct("<HBB4s"),  # uid, verify, state, time
+    8: struct.Struct("<HB4sB"),  # uid, verify (status), time, state (punch)
     16: struct.Struct("<I4sBB2xI"),  # numeric user id, time, verify, state, (reserved), workcode
-    40: struct.Struct("<H24sBB4s8x"),  # uid, user id text, verify, state, time
+    40: struct.Struct("<H24sB4sB8x"),  # uid, user id text, verify (status), time, state (punch); checked on a real device
 }
 
 
@@ -121,13 +121,13 @@ def parse_attendance(buf: bytes, count: int) -> tuple[list[ZKPunch], int]:
         uid: int | None
         user_id: str | None
         if size == 8:
-            uid, verify, state, t = ATT_FORMATS[8].unpack(chunk)
+            uid, verify, t, state = ATT_FORMATS[8].unpack(chunk)
             user_id = None
         elif size == 16:
             num, t, verify, state, _work = ATT_FORMATS[16].unpack(chunk)
             uid, user_id = None, str(num)
         else:
-            uid, uid_text, verify, state, t, *_ = (*ATT_FORMATS[40].unpack(chunk),)
+            uid, uid_text, verify, t, state = ATT_FORMATS[40].unpack(chunk)
             user_id = clean(uid_text, 24) or None
         when = decode_time(struct.unpack("<I", t)[0] if isinstance(t, bytes) else t)
         if when is None:

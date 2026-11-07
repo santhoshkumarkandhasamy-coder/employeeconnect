@@ -95,7 +95,7 @@ def test_parsers_attendance_formats(fmt):
 def test_parser_skips_impossible_timestamps_and_rejects_bad_lengths():
     good = FakeZK(punches=[FakePunch("1", T0, uid=1)])._att_buf()
     broken = bytearray(good)
-    broken[4 + 28 : 4 + 32] = struct.pack("<I", ((26 * 12 + 1) * 31 + 30) * 86400)
+    broken[4 + 27 : 4 + 31] = struct.pack("<I", ((26 * 12 + 1) * 31 + 30) * 86400)
     punches, skipped = rec.parse_attendance(bytes(broken), 1)
     assert punches == [] and skipped == 1
     with pytest.raises(zk.DeviceProtocolError):
