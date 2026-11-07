@@ -18,7 +18,7 @@ Machines (verified 2026-11-07): `.201` A6FE201561197 (36 users, 29,228 records),
 | Backend suite green (2207 passed) and Flutter device tests green (71) | done | OK, re-run after any further change |
 | Migration 0030 up, down and up again on Postgres 16; append-only trigger checked as `app_user` | done | OK |
 | Real-device read of users and punches on all 3 machines | done | OK |
-| eTimeTrackLite "delete logs after download" is OFF | user | **tested 2026-11-07**: the user downloaded the logs from eTimeTrackLite (twice) and reported the record counts unchanged (user's report; the counts were not pasted, and the setting screen itself was not viewed). Machines covered: `.201` and `.203` stated; `.202` not confirmed. Re-test `.202` or view the setting |
+| eTimeTrackLite "delete logs after download" is OFF | user | **tested 2026-11-07**: the user downloaded the logs from eTimeTrackLite (twice) and reported the record counts unchanged (user's report; the counts were not pasted, and the setting screen itself was not viewed). Machines covered: all three (`.202` confirmed by the user afterwards). Optional: also view the setting screen |
 | Employee codes vs machine user ids: compared 2026-11-07, see section 1.1 | user | **open**, the user will change the codes by hand |
 | Pick the "ingest from" date for each machine (history goes back to 2024 on `.201`) | user | **open** |
 | A quiet time window agreed (the egress network change can cause a short outage, see 4.4) | user | **open** |
