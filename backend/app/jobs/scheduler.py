@@ -112,7 +112,7 @@ async def job_devices_tick() -> int:
 async def job_devices_queue() -> None:
     """Never raises; no database work unless a job is waiting."""
     try:
-        await device_sync_svc.process_queue(get_sessionmaker(), await get_redis())
+        await device_sync_svc.process_queue(get_sessionmaker(), await get_redis(), wait=False)
     except Exception:  # noqa: BLE001
         log.warning("device job queue could not be processed")
 

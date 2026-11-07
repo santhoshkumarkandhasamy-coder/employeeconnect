@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -12,6 +13,15 @@ from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _BAD_SECRET_MARKERS = ("change", "secret", "example", "default", "password")
+
+# RFC 6890 special-purpose IPv4 ranges (never an attendance device) plus Docker's default bridge. Always blocked.
+SPECIAL_RANGES: tuple[ipaddress.IPv4Network, ...] = tuple(
+    ipaddress.IPv4Network(n)
+    for n in (
+        "0.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.17.0.0/16", "192.0.0.0/24", "192.0.2.0/24",
+        "192.88.99.0/24", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4", "255.255.255.255/32",
+    )
+)  # fmt: skip
 
 
 class Settings(BaseSettings):
@@ -128,9 +138,12 @@ class Settings(BaseSettings):
     device_blocked_ips: str = ""  # comma separated addresses/CIDRs that must never be a device (the server itself)
     egress_subnet: str = ""  # docker egress network of the worker (refused as a device address)
     worker_egress_ip: str = ""
-    zk_debug: bool = False  # redacted packet dumps; ignored in prod
+    net_subnet: str = ""  # docker `backend` network (NET_SUBNET); refused as a device address
+    edge_subnet: str = ""  # docker `edge` network when it is pinned (EDGE_SUBNET); refused as a device address
+    # Ports a device may use (SSRF: the worker must not be pointed at arbitrary ports). Machines default to 4370.
+    device_allowed_ports: str = "4370"
 
-    @field_validator("device_allowed_cidrs", "device_blocked_ips", "egress_subnet")
+    @field_validator("device_allowed_cidrs", "device_blocked_ips", "egress_subnet", "net_subnet", "edge_subnet")
     @classmethod
     def _cidrs(cls, v: str) -> str:
         for item in v.split(","):
@@ -204,6 +217,14 @@ class Settings(BaseSettings):
             raise ValueError("only HS256 is allowed")
         return v
 
+    @field_validator("device_allowed_ports")
+    @classmethod
+    def _ports(cls, v: str) -> str:
+        ports = [i.strip() for i in v.split(",") if i.strip()]
+        if not ports or any(not i.isdigit() or not 1 <= int(i) <= 65535 for i in ports):
+            raise ValueError("DEVICE_ALLOWED_PORTS must be a comma separated list of ports 1-65535")
+        return v
+
     @field_validator("trusted_proxies")
     @classmethod
     def _proxies(cls, v: str) -> str:
@@ -228,7 +249,27 @@ class Settings(BaseSettings):
                 PurePosixPath(self.export_temp_dir).is_absolute() or Path(self.export_temp_dir).is_absolute()
             ):
                 raise ValueError("EXPORT_TEMP_DIR (absolute path of a dedicated, size-limited directory) is required in prod")
+        self._check_device_networks()
         return self
+
+    def _check_device_networks(self) -> None:
+        """Review L2: a blocked network that overlaps the allow-list (other than a single host carved out of it, such as the
+        server's own 192.168.0.33) is a configuration mistake, so the application refuses to start."""
+        allowed = [n for n in self.device_allowed_networks if n.version == 4]
+        for blocked in (*self.device_blocked_networks, *SPECIAL_RANGES):
+            if blocked.version != 4 or blocked.prefixlen >= 32:
+                continue
+            for a in allowed:
+                if a.overlaps(blocked):
+                    raise ValueError(f"DEVICE_ALLOWED_CIDRS {a} overlaps the blocked network {blocked}; refusing to start")
+        if allowed and not self.device_blocked_ips.strip():
+            logging.getLogger("app.config").warning(
+                "DEVICE_BLOCKED_IPS is empty: set it to this server's own address(es) on the device LAN (e.g. 192.168.0.33)"
+            )
+
+    @property
+    def device_allowed_port_set(self) -> frozenset[int]:
+        return frozenset(int(i) for i in self.device_allowed_ports.split(",") if i.strip())
 
     @property
     def is_prod(self) -> bool:
@@ -244,8 +285,16 @@ class Settings(BaseSettings):
 
     @property
     def device_blocked_networks(self) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
-        items = [*self.device_blocked_ips.split(","), self.egress_subnet, self.worker_egress_ip]
-        return [ipaddress.ip_network(i.strip(), strict=False) for i in items if i.strip()]
+        items = [
+            *self.device_blocked_ips.split(","), self.egress_subnet, self.worker_egress_ip, self.net_subnet, self.edge_subnet,
+        ]  # fmt: skip
+        nets = [ipaddress.ip_network(i.strip(), strict=False) for i in items if i.strip()]
+        for sub in (self.egress_subnet, self.net_subnet, self.edge_subnet):  # the docker gateway (.1) of each network
+            if sub.strip():
+                net = ipaddress.ip_network(sub.strip(), strict=False)
+                if net.num_addresses > 2:
+                    nets.append(ipaddress.ip_network(f"{net.network_address + 1}/32"))
+        return nets
 
     @property
     def cors_origin_list(self) -> list[str]:

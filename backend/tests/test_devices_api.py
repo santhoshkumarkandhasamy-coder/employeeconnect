@@ -18,7 +18,7 @@ from app.services import device_attendance as da
 from app.services import device_sync
 from app.services import devices as devices_svc
 from app.services.system_health import HEARTBEAT_KEY
-from tests.conftest import USERS, bearer
+from tests.conftest import PASSWORD, USERS, bearer
 from tests.device_helpers import NOW, TODAY, add_device, add_device_user, add_punch, local
 from tests.fakes.zk_server import FakePunch, FakeUser
 
@@ -34,14 +34,33 @@ BODY = {
 }
 
 
+WEB = {"Origin": "https://hr.example.com", "X-EC-Client": "console"}
+
+
 @pytest.fixture
-async def H(tokens_for):
+async def H(client, monkeypatch, tokens_for):
+    """Console (web) sessions: device.manage writes need a console access token (review L7)."""
     cache: dict = {}
+    monkeypatch.setattr(get_settings(), "public_origin", WEB["Origin"])
 
     async def _h(role):
         if role not in cache:
-            cache[role] = bearer(await tokens_for(role))
+            r = await client.post("/api/auth/web/login", headers=WEB, json={"employee_id": USERS[role], "password": PASSWORD})
+            if r.status_code != 200:  # roles without console access (employee, manager) keep a mobile session
+                cache[role] = bearer(await tokens_for(role))
+            else:
+                cache[role] = {"Authorization": f"Bearer {r.json()['access_token']}"}
         return cache[role]
+
+    return _h
+
+
+@pytest.fixture
+async def HM(tokens_for):
+    """Mobile sessions (no console session id)."""
+
+    async def _h(role):
+        return bearer(await tokens_for(role))
 
     return _h
 
@@ -85,7 +104,7 @@ def keys_of(obj, out=None):
         ("POST", "/devices/{id}/accept-identity", {}, {"admin"}),
         ("GET", "/devices/{id}/syncs", None, {"admin", "hr"}),
         ("GET", "/device-users", None, {"admin", "hr"}),
-        ("PUT", "/device-users/{du}/mapping", {"user_id": None}, {"admin", "hr"}),
+        ("PUT", "/device-users/{du}/mapping", {"user_id": None, "reason": "visitor card"}, {"admin", "hr"}),
         ("POST", "/device-users/{du}/auto", None, {"admin", "hr"}),
         ("GET", "/device-punches?from=2026-10-20&to=2026-10-21", None, {"admin", "hr"}),
     ],
@@ -93,7 +112,7 @@ def keys_of(obj, out=None):
 @pytest.mark.parametrize("role", ["admin", "hr", "manager", "employee"])
 async def test_permission_matrix(client, H, db, worker_up, role, method, path, body, allowed):
     dev = await add_device(db, None, ip="192.168.0.205", name="Matrix")
-    du = await add_device_user(db, dev, "EMP001", user="employee")
+    du = await add_device_user(db, dev, "EMP001", user=None, method="unmatched")
     url = A + path.replace("{id}", str(dev.id)).replace("{du}", str(du.id))
     # the sync endpoints need the 60 s window free; use a fresh Redis key per case through the fixture's fresh fakeredis
     r = await client.request(method, url, headers=await H(role), json=body)
@@ -140,7 +159,7 @@ async def test_create_shape_and_comm_key_is_never_returned(client, H, db):
     assert (
         audit.after["comm_key_changed"] is True
         and "123456" not in json.dumps(audit.after)
-        and "192.168" not in json.dumps(audit.after)
+        and (audit.after["ip"], audit.after["port"]) == ("192.168.0.201", 4370)  # non-secret values are kept (review L5)
     )
 
 
@@ -161,7 +180,7 @@ async def test_put_comm_key_semantics_and_audit(client, H, db):
     ]
     names = [a for a, _ in acts]
     assert names.count("device.update") == 3 and "device.disable" in names
-    assert acts[1][1] == {"fields": ["name"], "comm_key_changed": False}
+    assert acts[1][1] == {"fields": ["name"], "comm_key_changed": False, "name": "Renamed"}
     assert "777" not in json.dumps(acts)
 
 
@@ -206,7 +225,8 @@ async def test_defaults(client, H):
     )
 
 
-async def test_duplicates_are_conflicts(client, H):
+async def test_duplicates_are_conflicts(client, H, monkeypatch):
+    monkeypatch.setattr(get_settings(), "device_allowed_ports", "4370,4371")
     await create(client, H)
     r = await client.post(f"{A}/devices", headers=await H("admin"), json={**BODY, "name": "MAIN ENTRANCE", "ip": "192.168.0.202"})
     assert (r.status_code, r.json()["error"]["code"]) == (409, "CONFLICT")
@@ -430,7 +450,7 @@ async def test_end_to_end_through_the_worker(client, H, db, sessionmaker_, redis
     du = (await client.get(f"{A}/device-users", headers=await H("hr"))).json()
     assert du["total"] == 1 and du["items"][0]["device_user_id"] == "900"
     item = du["items"][0]
-    assert set(item) == {"id", "device", "device_user_id", "name", "card_masked", "is_device_admin", "present_on_device", "status", "match_method",
+    assert set(item) == {"id", "device", "device_user_id", "name", "card_masked", "is_device_admin", "pending_confirmation", "present_on_device", "status", "match_method",
                          "user", "last_punch_at", "unapplied_punches", "last_seen_at"}  # fmt: skip
     assert (item["status"], item["unapplied_punches"], item["user"], item["device"]["name"]) == ("unmatched", 1, None, dev.name)
     allu = (await client.get(f"{A}/device-users?status=all&q=test emp", headers=await H("hr"))).json()
@@ -441,16 +461,17 @@ async def test_end_to_end_through_the_worker(client, H, db, sessionmaker_, redis
 
     # map the visitor to the manager on every device
     r = await client.put(
-        f"{A}/device-users/{item['id']}/mapping", headers=await H("hr"), json={"user_id": str(seeded["users"]["manager"])}
+        f"{A}/device-users/{item['id']}/mapping", headers=await H("hr"), json={"user_id": str(seeded["users"]["manager"]), "reason": "visitor is the manager"}
     )
     assert r.status_code == 200 and r.json()["items"][0]["user"]["employee_id"] == USERS["manager"]
     r = await client.put(
-        f"{A}/device-users/{item['id']}/mapping", headers=await H("hr"), json={"user_id": "00000000-0000-0000-0000-000000000009"}
+        f"{A}/device-users/{item['id']}/mapping", headers=await H("hr"), json={"user_id": "00000000-0000-0000-0000-000000000009", "reason": "typo test"}
     )
     assert r.status_code == 422 and r.json()["error"]["details"][0]["field"] == "user_id"
     await device_sync.process_queue(sessionmaker_, redis)
     acts = (await db.execute(select(AuditLog).where(AuditLog.action == "device_user.map"))).scalars().all()
-    assert acts[0].after == {"device_user_id": "900", "employee_id": USERS["manager"]}
+    assert acts[0].after == {"device_user_id": "900", "employee_id": USERS["manager"], "reason": "visitor is the manager"}
+    assert acts[0].before == {"device_user_id": "900", "match_method": "unmatched", "employee_id": None}
 
     # punch log
     q = f"from={TODAY}&to={TODAY}"
@@ -686,3 +707,205 @@ async def test_device_punch_export_respects_scope_at_builder_level(db, seeded):
     everyone = [r async for r in build(db, export_svc.ExportScope.everyone(), export_svc.ExportFilters(), TODAY, TODAY).rows()]
     assert len(everyone) == 3
     assert await build(db, export_svc.ExportScope.team(set()), export_svc.ExportFilters(), TODAY, TODAY).count() == 0
+
+
+# ================================================================ security review fixes
+async def _map(client, H, role, du_id, user_id, reason="checked the badge list", **extra):
+    return await client.put(
+        f"{A}/device-users/{du_id}/mapping", headers=await H(role), json={"user_id": user_id, "reason": reason, **extra}
+    )
+
+
+# ---- M3
+async def test_m3_mapping_needs_a_reason(client, H, db, seeded):
+    dev = await add_device(db, None, ip="192.168.0.205")
+    du = await add_device_user(db, dev, "900", user=None, method="unmatched")
+    uid = str(seeded["users"]["manager"])
+    for body in ({"user_id": uid}, {"user_id": uid, "reason": ""}, {"user_id": uid, "reason": "ab"}, {"user_id": uid, "reason": "x" * 301}):
+        r = await client.put(f"{A}/device-users/{du.id}/mapping", headers=await H("hr"), json=body)
+        assert r.status_code == 422, body
+    assert (await _map(client, H, "hr", du.id, uid)).status_code == 200
+
+
+async def test_m3_nobody_maps_a_device_user_to_themselves(client, H, db, seeded):
+    dev = await add_device(db, None, ip="192.168.0.205")
+    du = await add_device_user(db, dev, "900", user=None, method="unmatched")
+    for role in ("hr", "admin"):
+        r = await _map(client, H, role, du.id, str(seeded["users"][role]))
+        assert (r.status_code, r.json()["error"]["code"]) == (403, "FORBIDDEN"), role
+    await db.refresh(du)
+    assert (du.match_method, du.user_id) == ("unmatched", None)
+
+
+async def test_m3_a_device_user_mapped_to_the_caller_cannot_be_changed_by_the_caller(client, H, db, seeded):
+    dev = await add_device(db, None, ip="192.168.0.205")
+    mine = await add_device_user(db, dev, "EMP-HR", user="hr", method="manual")
+    for target in (None, str(seeded["users"]["manager"])):
+        assert (await _map(client, H, "hr", mine.id, target)).status_code == 403, target
+    assert (await client.post(f"{A}/device-users/{mine.id}/auto", headers=await H("hr"))).status_code == 403
+    await db.refresh(mine)
+    assert mine.match_method == "manual" and mine.user_id == seeded["users"]["hr"]
+    # somebody else (the admin) can still correct it
+    assert (await _map(client, H, "admin", mine.id, None)).status_code == 200
+
+
+async def test_m3_changing_an_already_matched_user_needs_device_manage_and_is_audited_with_the_previous_employee(client, H, db, seeded):
+    dev = await add_device(db, None, ip="192.168.0.205")
+    du = await add_device_user(db, dev, "EMP001", user="employee")  # matched to the employee
+    mgr = str(seeded["users"]["manager"])
+    r = await _map(client, H, "hr", du.id, mgr)
+    assert r.status_code == 403 and r.json()["error"]["details"][0]["field"] == "id"
+    assert (await _map(client, H, "hr", du.id, None)).status_code == 403
+    assert (await client.post(f"{A}/device-users/{du.id}/auto", headers=await H("hr"))).status_code == 403
+    await db.refresh(du)
+    assert du.user_id == seeded["users"]["employee"]
+    assert (await _map(client, H, "hr", du.id, str(seeded["users"]["employee"]))).status_code == 200  # no change: allowed
+    r = await _map(client, H, "admin", du.id, mgr, reason="employee swapped badges")
+    assert r.status_code == 200 and r.json()["items"][0]["user"]["employee_id"] == USERS["manager"]
+    maps = (await db.execute(select(AuditLog).where(AuditLog.action == "device_user.map"))).scalars().all()
+    a = next(m for m in maps if m.after["reason"] == "employee swapped badges")
+    assert a.before["employee_id"] == USERS["employee"] and a.before["device_user_id"] == "EMP001"
+    assert a.after == {"device_user_id": "EMP001", "employee_id": USERS["manager"], "reason": "employee swapped badges"}
+
+
+async def test_m3_second_slot_on_the_same_device_alerts_hr(client, H, db, seeded):
+    from app.services.notifications import OUTBOX
+
+    dev = await add_device(db, None, ip="192.168.0.205")
+    await add_device_user(db, dev, "EMP001", user="employee")
+    extra = await add_device_user(db, dev, "7777", user=None, method="unmatched")
+    OUTBOX.clear()
+    r = await _map(client, H, "hr", extra.id, str(seeded["users"]["employee"]))
+    assert r.status_code == 200
+    got = [o for o in OUTBOX if "two users on one device" in o["payload"]["title"]]
+    assert got and str(seeded["users"]["admin"]) in got[0]["user_ids"]
+    assert "device_user.second_slot" in (await db.execute(select(AuditLog.action))).scalars().all()
+
+
+# ---- M4: HR confirms a held user; the list highlights device administrators
+async def test_m4_hr_confirms_a_held_user_and_admins_sort_first(client, H, db, seeded):
+    dev = await add_device(db, None, ip="192.168.0.205")
+    held = await add_device_user(db, dev, USERS["manager"], user=None, method="unmatched", auto_hold=True)
+    await add_device_user(db, dev, "5", user=None, method="unmatched", is_device_admin=True)
+    items = (await client.get(f"{A}/device-users", headers=await H("hr"))).json()["items"]
+    assert [i["device_user_id"] for i in items][0] == "5" and items[0]["is_device_admin"] is True
+    by = {i["device_user_id"]: i for i in items}
+    assert by[USERS["manager"]]["pending_confirmation"] is True and by["5"]["pending_confirmation"] is False
+    r = await client.post(f"{A}/device-users/{held.id}/auto", headers=await H("hr"))  # HR's confirmation
+    assert r.status_code == 200 and r.json()["items"][0]["match_method"] == "auto"
+    await db.refresh(held)
+    assert held.auto_hold is False and held.user_id == seeded["users"]["manager"]
+
+
+async def test_m3_hr_cannot_confirm_a_held_user_whose_id_is_their_own(client, H, db, seeded):
+    dev = await add_device(db, None, ip="192.168.0.205")
+    held = await add_device_user(db, dev, USERS["hr"], user=None, method="unmatched", auto_hold=True)
+    r = await client.post(f"{A}/device-users/{held.id}/auto", headers=await H("hr"))
+    assert r.status_code == 403
+    await db.refresh(held)
+    assert (held.match_method, held.auto_hold) == ("unmatched", True)
+    r = await client.post(f"{A}/device-users/{held.id}/auto", headers=await H("admin"))  # somebody else confirms it
+    assert r.status_code == 200 and r.json()["items"][0]["user"]["employee_id"] == USERS["hr"]
+
+
+# ---- L7: device.manage writes need a console session
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("POST", "/devices", BODY),
+        ("PUT", "/devices/{id}", BODY),
+        ("DELETE", "/devices/{id}", None),
+        ("POST", "/devices/test", {"ip": "192.168.0.201"}),
+        ("POST", "/devices/{id}/test", None),
+        ("POST", "/devices/{id}/accept-identity", {}),
+    ],
+)
+async def test_l7_mobile_tokens_cannot_change_devices(client, H, HM, db, worker_up, method, path, body):
+    dev = await add_device(db, None, ip="192.168.0.205", name="Matrix")
+    url = A + path.replace("{id}", str(dev.id))
+    r = await client.request(method, url, headers=await HM("admin"), json=body)
+    assert (r.status_code, r.json()["error"]["code"]) == (403, "CONSOLE_REQUIRED"), r.text
+    assert len((await db.execute(select(Device))).scalars().all()) == 1  # nothing changed
+    r = await client.request(method, url, headers=await H("admin"), json=body)  # the console session is let through
+    assert r.status_code < 400 or r.json()["error"]["code"] != "CONSOLE_REQUIRED"
+
+
+async def test_l7_reads_and_mapping_still_work_from_the_phone(client, HM, db, seeded):
+    dev = await add_device(db, None, ip="192.168.0.205")
+    du = await add_device_user(db, dev, "900", user=None, method="unmatched")
+    assert (await client.get(f"{A}/devices", headers=await HM("admin"))).status_code == 200
+    assert (await client.get(f"{A}/devices/{dev.id}", headers=await HM("hr"))).status_code == 200
+    r = await client.put(
+        f"{A}/device-users/{du.id}/mapping", headers=await HM("hr"), json={"user_id": str(seeded["users"]["manager"]), "reason": "visitor card"}
+    )
+    assert r.status_code == 200
+
+
+# ---- L9
+async def test_l9_mapping_applies_to_one_device_unless_asked(client, H, db, seeded):
+    d1 = await add_device(db, None, ip="192.168.0.205", name="One")
+    d2 = await add_device(db, None, ip="192.168.0.206", name="Two")
+    a = await add_device_user(db, d1, "900", user=None, method="unmatched")
+    b = await add_device_user(db, d2, "900", user=None, method="unmatched")
+    mgr = str(seeded["users"]["manager"])
+    r = await _map(client, H, "hr", a.id, mgr)
+    assert [i["device"]["name"] for i in r.json()["items"]] == ["One"]
+    await db.refresh(b)
+    assert b.match_method == "unmatched"
+    r = await _map(client, H, "hr", a.id, mgr, apply_to_all_devices=True)
+    assert sorted(i["device"]["name"] for i in r.json()["items"]) == ["One", "Two"]
+
+
+# ---- L1 / L5
+async def test_l1_only_allowed_ports_are_accepted_and_the_test_audit_names_ip_and_port(client, H, db, worker_up, monkeypatch):
+    for url, body in (("/devices", BODY), ("/devices/test", {"ip": "192.168.0.201"})):
+        r = await client.post(A + url, headers=await H("admin"), json={**body, "port": 22})
+        assert (r.status_code, r.json()["error"]["code"]) == (422, "DEVICE_ADDRESS_NOT_ALLOWED"), url
+        assert r.json()["error"]["details"][0]["field"] == "port"
+    dev = await create(client, H)
+    assert (await client.put(f"{A}/devices/{dev['id']}", headers=await H("admin"), json={**BODY, "port": 6379})).status_code == 422
+    t = await client.post(f"{A}/devices/test", headers=await H("admin"), json={"ip": "192.168.0.201", "port": 4370, "comm_key": 99})
+    assert t.status_code == 202
+    t2 = await client.post(f"{A}/devices/{dev['id']}/test", headers=await H("admin"))
+    assert t2.status_code == 202
+    tests = (await db.execute(select(AuditLog).where(AuditLog.action == "device.test"))).scalars().all()
+    assert sorted((a.after.get("unsaved", False), a.after["ip"], a.after["port"]) for a in tests) == [
+        (False, "192.168.0.201", 4370), (True, "192.168.0.201", 4370),
+    ]  # fmt: skip
+    assert "99" not in json.dumps([a.after for a in tests])
+    monkeypatch.setattr(get_settings(), "device_allowed_ports", "4370,5000")
+    assert (await client.put(f"{A}/devices/{dev['id']}", headers=await H("admin"), json={**BODY, "port": 5000})).status_code == 200
+
+
+async def test_l5_update_delete_and_accept_identity_audit_old_and_new_values(client, H, db):
+    dev = await create(client, H)
+    d = await db.get(Device, __import__("uuid").UUID(dev["id"]))
+    d.serial_number = "SN-OLD"
+    await db.commit()
+    r = await client.put(
+        f"{A}/devices/{dev['id']}", headers=await H("admin"),
+        json={**BODY, "ip": "192.168.0.202", "transport": "udp", "comm_key": 4242},
+    )  # fmt: skip
+    assert r.status_code == 200
+    upd = (await db.execute(select(AuditLog).where(AuditLog.action == "device.update"))).scalar_one()
+    assert upd.before == {"ip": "192.168.0.201", "transport": "tcp"} and upd.after["ip"] == "192.168.0.202" and upd.after["transport"] == "udp"
+    assert "4242" not in json.dumps([upd.before, upd.after]) and "123456" not in json.dumps([upd.before, upd.after])
+    assert (await client.post(f"{A}/devices/{dev['id']}/accept-identity", headers=await H("admin"), json={})).status_code == 200
+    acc = (await db.execute(select(AuditLog).where(AuditLog.action == "device.identity_accepted"))).scalar_one()
+    assert acc.before == {"serial_number": "SN-OLD"} and acc.after == {"ip": "192.168.0.202", "port": 4370}
+    assert (await client.delete(f"{A}/devices/{dev['id']}", headers=await H("admin"))).status_code == 204
+    dele = (await db.execute(select(AuditLog).where(AuditLog.action == "device.delete"))).scalar_one()
+    assert dele.before["ip"] == "192.168.0.202" and dele.before["port"] == 4370 and dele.before["name"] == "Main entrance"
+
+
+# ---- L8: the mapping endpoints are rate limited
+async def test_l8_mapping_endpoints_are_rate_limited(client, H, db, seeded):
+    dev = await add_device(db, None, ip="192.168.0.205")
+    du = await add_device_user(db, dev, "900", user=None, method="unmatched")
+    mgr = str(seeded["users"]["manager"])
+    codes = [(await _map(client, H, "hr", du.id, mgr)).status_code for _ in range(30)]
+    assert set(codes) == {200}
+    r = await _map(client, H, "hr", du.id, mgr)
+    assert (r.status_code, r.json()["error"]["code"]) == (429, "RATE_LIMITED")
+    assert (await client.post(f"{A}/device-users/{du.id}/auto", headers=await H("hr"))).status_code == 429
+    assert (await _map(client, H, "admin", du.id, mgr)).status_code == 200  # per caller

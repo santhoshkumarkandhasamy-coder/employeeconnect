@@ -3761,6 +3761,8 @@ CREATE TABLE devices (
   firmware text,
   platform text,
   last_clock_offset_s integer,
+  last_clock_reading timestamp,
+  last_clock_reading_offset_s integer,
   clock_status text,
   last_log_count integer,
   last_user_count integer,
@@ -3839,6 +3841,7 @@ CREATE TABLE device_users (
   name_enc bytea,
   card_enc bytea,
   is_device_admin boolean NOT NULL DEFAULT false,
+  auto_hold boolean NOT NULL DEFAULT false,
   user_id uuid REFERENCES users(id) ON DELETE RESTRICT,
   match_method text NOT NULL DEFAULT 'unmatched',
   matched_by uuid REFERENCES users(id) ON DELETE RESTRICT,
@@ -3878,7 +3881,7 @@ CREATE TABLE device_punches (
   ingested_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT uq_device_punches_device_user_time UNIQUE (device_id, device_user_id, device_time),
   CONSTRAINT ck_device_punches_user_id CHECK (char_length(device_user_id) BETWEEN 1 AND 24),
-  CONSTRAINT ck_device_punches_quarantine CHECK (quarantine IS NULL OR quarantine IN ('clock_invalid','future'))
+  CONSTRAINT ck_device_punches_quarantine CHECK (quarantine IS NULL OR quarantine IN ('clock_invalid','future','clock_changed','backdated'))
 );
 
 CREATE INDEX ix_device_punches_user_punch_at ON device_punches (device_user_id, punch_at);
@@ -3920,7 +3923,7 @@ CREATE TABLE device_punch_outcomes (
   reason text,
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT ck_device_punch_outcomes_outcome CHECK (outcome IN ('check_in','check_out','extra','unmatched','ignored','quarantined','not_applied')),
-  CONSTRAINT ck_device_punch_outcomes_reason CHECK (reason IS NULL OR reason IN ('on_leave','on_duty','no_shift','inactive_user','manual_entry','outside_window','payroll_locked','mapping_ignored','clock_invalid','future','duplicate'))
+  CONSTRAINT ck_device_punch_outcomes_reason CHECK (reason IS NULL OR reason IN ('on_leave','on_duty','no_shift','inactive_user','manual_entry','outside_window','payroll_locked','mapping_ignored','clock_invalid','future','clock_changed','backdated','duplicate'))
 );
 
 CREATE INDEX ix_device_punch_outcomes_user_work_date ON device_punch_outcomes (user_id, work_date);

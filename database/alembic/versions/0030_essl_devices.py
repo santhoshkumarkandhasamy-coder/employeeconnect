@@ -7,13 +7,17 @@ Plan: docs/plans/18-essl-devices.md section 3; contract: docs/api-contract.md se
 
 Added
 * devices                 the office machines (ip inet, port, transport, comm key ENCRYPTED, pinned serial, clock status, failure counters).
+                          last_clock_reading (naive device clock at the last successful sync) and last_clock_reading_offset_s (the offset measured
+                          then) are the reference for the clock-change and backdating checks (security review H1); they are NOT moved by a sync
+                          whose clock is invalid.
                           UNIQUE (ip, port) and UNIQUE (lower(name)). Delete is RESTRICTed by punches / users / attendance (disable instead).
 * device_syncs            history and job status of schedule / manual / reconcile / test runs. device_id NULL for an unsaved test.
                           Deleting a device cascades its sync history (history only, no evidence).
 * device_users            one row per user slot seen on a device. name_enc and card_enc ENCRYPTED. The device PIN is never stored. NO
-                          fingerprint / face / palm template column exists anywhere (a test guards the names). CHECK: user_id IS NOT NULL
+                          fingerprint / face / palm template column exists anywhere (a test guards the names). auto_hold = a user first seen
+                          after the device's first sync: not auto-matched until HR confirms (review M4). CHECK: user_id IS NOT NULL
                           iff match_method IN ('auto','manual'). DELETE stays granted to app_user (the service clears a device's user list).
-* device_punches          raw, append-only. UNIQUE (device_id, device_user_id, device_time) is the idempotency key (raw device clock).
+* device_punches          raw, append-only. quarantine: clock_invalid | future | clock_changed | backdated (review H1). UNIQUE (device_id, device_user_id, device_time) is the idempotency key (raw device clock).
                           Trigger device_punches_block_mutation(): UPDATE and TRUNCATE always raise; DELETE only for rows whose punch_at is older
                           than 90 days (retention job, DELETE stays granted to app_user). One narrow UPDATE is let through: the foreign-key
                           action ON DELETE SET NULL on sync_id (the sync-history retention job deletes old device_syncs rows while the punches
@@ -82,6 +86,8 @@ CREATE TABLE devices (
   firmware text,
   platform text,
   last_clock_offset_s integer,
+  last_clock_reading timestamp,
+  last_clock_reading_offset_s integer,
   clock_status text,
   last_log_count integer,
   last_user_count integer,
@@ -152,6 +158,7 @@ CREATE TABLE device_users (
   name_enc bytea,
   card_enc bytea,
   is_device_admin boolean NOT NULL DEFAULT false,
+  auto_hold boolean NOT NULL DEFAULT false,
   user_id uuid REFERENCES users(id) ON DELETE RESTRICT,
   match_method text NOT NULL DEFAULT 'unmatched',
   matched_by uuid REFERENCES users(id) ON DELETE RESTRICT,
@@ -187,7 +194,7 @@ CREATE TABLE device_punches (
   ingested_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT uq_device_punches_device_user_time UNIQUE (device_id, device_user_id, device_time),
   CONSTRAINT ck_device_punches_user_id CHECK (char_length(device_user_id) BETWEEN 1 AND 24),
-  CONSTRAINT ck_device_punches_quarantine CHECK (quarantine IS NULL OR quarantine IN ('clock_invalid','future'))
+  CONSTRAINT ck_device_punches_quarantine CHECK (quarantine IS NULL OR quarantine IN ('clock_invalid','future','clock_changed','backdated'))
 );
 CREATE INDEX ix_device_punches_user_punch_at ON device_punches (device_user_id, punch_at);
 CREATE INDEX ix_device_punches_punch_at ON device_punches (punch_at);
@@ -224,7 +231,7 @@ CREATE TABLE device_punch_outcomes (
   reason text,
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT ck_device_punch_outcomes_outcome CHECK (outcome IN ('check_in','check_out','extra','unmatched','ignored','quarantined','not_applied')),
-  CONSTRAINT ck_device_punch_outcomes_reason CHECK (reason IS NULL OR reason IN ('on_leave','on_duty','no_shift','inactive_user','manual_entry','outside_window','payroll_locked','mapping_ignored','clock_invalid','future','duplicate'))
+  CONSTRAINT ck_device_punch_outcomes_reason CHECK (reason IS NULL OR reason IN ('on_leave','on_duty','no_shift','inactive_user','manual_entry','outside_window','payroll_locked','mapping_ignored','clock_invalid','future','clock_changed','backdated','duplicate'))
 );
 CREATE INDEX ix_device_punch_outcomes_user_work_date ON device_punch_outcomes (user_id, work_date);
 CREATE INDEX ix_device_punch_outcomes_work_date ON device_punch_outcomes (work_date);

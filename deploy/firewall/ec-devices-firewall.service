@@ -1,0 +1,31 @@
+# Re-applies the attendance-device firewall (deploy/firewall/devices.sh) after every docker start, so a reboot or a docker
+# restart never leaves the devices' LAN reachable from the wrong container.
+#
+#   sudo cp /opt/employeeconnect/deploy/firewall/ec-devices-firewall.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now ec-devices-firewall.service
+#   systemctl status ec-devices-firewall.service        # "active (exited)" = applied
+#
+# EnvironmentFile is deploy/.env (KEY=value lines; WORKER_EGRESS_IP, EGRESS_SUBNET, NET_SUBNET, DEVICE_ALLOWED_PORTS ...).
+# Keep the path in step with where the repository lives on the server.
+[Unit]
+Description=Employee Connect attendance device firewall (DOCKER-USER chain EC-DEVICES)
+Documentation=file:///opt/employeeconnect/docs/DEPLOY.md
+# docker creates DOCKER-USER; PartOf re-runs this unit when docker is restarted (docker keeps the chain, firewalld reloads do not)
+After=docker.service network-online.target
+Requires=docker.service
+PartOf=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/opt/employeeconnect/deploy/.env
+ExecStart=/bin/sh /opt/employeeconnect/deploy/firewall/devices.sh
+# a failed run must be visible, never silent
+Restart=on-failure
+RestartSec=15
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

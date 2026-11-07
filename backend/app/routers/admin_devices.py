@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core import rate_limit
 from ..core.db import get_session
+from ..core.errors import AppError
 from ..core.pagination import PageParams
 from ..core.rbac import Principal, require_permission
 from ..core.redis import get_redis
@@ -22,9 +23,26 @@ from ..services import devices as svc
 router = APIRouter(prefix="/admin", tags=["devices"])
 
 _VIEW = Depends(require_permission("device.view"))
-_MANAGE = Depends(require_permission("device.manage"))
+_manage_dep = require_permission("device.manage")
 _MAP = Depends(require_permission("device.map"))
 _SYNC = Depends(require_permission("device.map", "device.manage"))
+
+
+async def _manage_console(actor: Principal = Depends(_manage_dep)) -> Principal:
+    """Review L7: changing a device (address, key, identity) is a console action. A console access token carries a session id;
+    a mobile token does not, so a phone session that is stolen or left unlocked cannot repoint the worker at another host."""
+    if not actor.sid:
+        raise AppError(
+            "CONSOLE_REQUIRED", "Changing attendance devices is only possible in the web console", status=403
+        )
+    return actor
+
+
+_MANAGE = Depends(_manage_console)
+
+
+async def _map_limit(redis: Redis, actor: Principal) -> None:
+    await rate_limit.enforce(redis, [(f"rl:device-map:{actor.id}", 30, 60)])  # 30 / min per caller
 
 
 async def _list_limit(redis: Redis, actor: Principal) -> None:
@@ -153,7 +171,10 @@ async def set_mapping(
     redis: Redis = Depends(get_redis),
     actor: Principal = _MAP,
 ):
-    return await device_matching.set_mapping(session, redis, actor, du_id, body.user_id, body.apply_to_all_devices)
+    await _map_limit(redis, actor)
+    return await device_matching.set_mapping(
+        session, redis, actor, du_id, body.user_id, body.apply_to_all_devices, body.reason
+    )
 
 
 @router.post("/device-users/{du_id}/auto")
@@ -163,6 +184,7 @@ async def reset_auto(
     redis: Redis = Depends(get_redis),
     actor: Principal = _MAP,
 ):
+    await _map_limit(redis, actor)
     return await device_matching.reset_auto(session, redis, actor, du_id)
 
 

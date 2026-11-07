@@ -7,6 +7,7 @@ concurrently. Network I/O happens in `_fetch` (no database session held); the re
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import json
 import logging
@@ -39,9 +40,6 @@ from ..models import (
     DevicePunchOutcome,
     DeviceSync,
     DeviceUser,
-    Permission,
-    RolePermission,
-    User,
 )
 from . import attendance as att
 from . import device_attendance, device_matching, device_settings
@@ -59,7 +57,20 @@ USERS_REFRESH = dt.timedelta(hours=1)
 MIN_VALID_YEAR = 2015
 RETRY_DELAYS: tuple[float, ...] = (3.0, 10.0)  # patched to zero in tests
 STUCK_AFTER = dt.timedelta(minutes=10)
+MAX_TEST_PARALLEL = 2  # Test connection jobs have their own slots and their own Redis list (review L8)
+MIN_CLOCK_JITTER_S = 5  # two offset readings of the same clock differ by a few seconds; below this is "the same offset"
+VOLUME_MIN = 300  # review L11: a sync that inserts more punches than max(VOLUME_MIN, VOLUME_PER_USER * users) raises an alert
+VOLUME_PER_USER = 10
+ORPHAN_LIMIT = 5000
 _locks: dict[uuid.UUID, asyncio.Lock] = {}
+_apply_locks: dict[uuid.UUID, asyncio.Lock] = {}
+_running: dict[str, set[asyncio.Task]] = {"sync": set(), "test": set()}  # background jobs of process_queue(wait=False)
+
+
+def apply_lock(device_id: uuid.UUID) -> asyncio.Lock:
+    """Serialises the database phase of a sync with a mapping recompute for the same device (review L4). Never held across I/O
+    to the device."""
+    return _apply_locks.setdefault(device_id, asyncio.Lock())
 
 
 def make_client(host: str, port: int, transport: str, comm_key: int) -> ZKClient:
@@ -113,7 +124,7 @@ def _snapshot(d: Device, office_tz: ZoneInfo, mode: str = "sync") -> Snapshot:
 
 
 async def _fetch(snap: Snapshot) -> Fetched:
-    devices_svc.check_address(snap.ip)  # defence in depth: the row may have been edited in the database
+    devices_svc.check_address(snap.ip, snap.port)  # defence in depth: the row may have been edited in the database
     async with make_client(snap.ip, snap.port, snap.transport, snap.comm_key) as zk:
         opts = await zk.get_options()
         serial = opts.get("SerialNumber") or None
@@ -157,16 +168,34 @@ async def _fetch(snap: Snapshot) -> Fetched:
 
 
 # ---------------------------------------------------------------- clock
-def classify_clock(f: Fetched, dcfg: device_settings.DeviceCfg, correction: str) -> tuple[str, int]:
-    """-> (clock_status, offset_to_apply_s)."""
+def classify_clock(
+    f: Fetched, dcfg: device_settings.DeviceCfg, correction: str, prev_offset: int | None = None
+) -> tuple[str, int, str | None]:
+    """-> (clock_status, offset_to_apply_s, hold_reason).
+
+    Review H1: the offset measured NOW is applied to every new punch of the sync, so an offset that moved since the previous sync
+    could backdate punches that were made with a correct clock. Therefore
+    * an offset that moved by more than the tolerance versus the previous sync -> `hold_reason = clock_changed`: the new punches
+      are quarantined and nothing is corrected;
+    * automatic correction starts only when two consecutive syncs measured the same offset (the first sync of a device cannot
+      confirm one, so a drifting clock is held until the next sync).
+    """
     if f.device_time is None or f.device_time.year < MIN_VALID_YEAR or f.offset_s is None:
-        return "invalid", 0
+        return "invalid", 0, None
+    tol = max(dcfg.drift_tolerance_s, MIN_CLOCK_JITTER_S)
+    changed = prev_offset is not None and abs(f.offset_s - prev_offset) > tol
     off = abs(f.offset_s)
     if off <= dcfg.drift_tolerance_s:
-        return "ok", 0
-    if off <= dcfg.drift_invalid_s:
-        return "drift", f.offset_s if correction == "auto" else 0
-    return "invalid", 0
+        return "ok", 0, "clock_changed" if changed else None
+    if off > dcfg.drift_invalid_s:
+        return "invalid", 0, None
+    if changed:
+        return "drift", 0, "clock_changed"
+    if correction != "auto":
+        return "drift", 0, None
+    if prev_offset is None:
+        return "drift", 0, "clock_changed"  # not confirmed by a second sync yet
+    return "drift", f.offset_s, None
 
 
 # ---------------------------------------------------------------- DB phase helpers
@@ -175,43 +204,72 @@ def _insert(session: AsyncSession, table):
     return (postgresql.insert if d == "postgresql" else sqlite.insert)(table)
 
 
+@dataclass
+class UserSync:
+    matched: list[DeviceUser]  # auto-matched now
+    held: int = 0  # new users after the device's first sync: wait for HR confirmation (review M4)
+    new_admins: int = 0  # device administrators that appeared (new row or newly flagged) after the first sync
+    duplicates: list[uuid.UUID] | None = None  # employees that now own two slots on one device
+
+
 async def upsert_users(
     session: AsyncSession, device: Device, users: list[ZKUser], now: dt.datetime, prefix: str
-) -> list[DeviceUser]:
-    """Upsert the device's user list (PIN never reaches here), flag the absent ones, auto-match. Returns newly matched rows."""
+) -> UserSync:
+    """Upsert the device's user list (PIN never reaches here), flag the absent ones, auto-match.
+
+    Review M4: after the device's FIRST successful sync a newly seen user is not auto-matched (`auto_hold`); HR confirms with
+    POST /admin/device-users/{id}/auto or maps it by hand. Otherwise anyone able to enrol a user id such as an employee's id on
+    the machine would silently receive that employee's attendance."""
+    first_sync = device.last_success_at is None
     existing = {
         r.device_user_id: r
         for r in (await session.execute(select(DeviceUser).where(DeviceUser.device_id == device.id))).scalars()
     }
     seen: set[str] = set()
+    out = UserSync(matched=[])
     for u in users:
         if not 1 <= len(u.user_id) <= 24 or u.user_id in seen:
             continue
         seen.add(u.user_id)
         row = existing.get(u.user_id)
+        was_admin = row.is_device_admin if row is not None else False
         if row is None:
-            row = DeviceUser(device_id=device.id, device_user_id=u.user_id, match_method="unmatched", first_seen_at=now)
+            row = DeviceUser(
+                device_id=device.id, device_user_id=u.user_id, match_method="unmatched", first_seen_at=now, auto_hold=not first_sync
+            )  # fmt: skip
             session.add(row)
             existing[u.user_id] = row
+            out.held += not first_sync
         row.device_uid, row.name, row.card, row.is_device_admin = u.uid, u.name or None, u.card, u.is_admin
         row.present_on_device, row.last_seen_at = True, now
+        if u.is_admin and not was_admin and not first_sync:
+            out.new_admins += 1
     for key, row in existing.items():
         if key not in seen and row.present_on_device:
             row.present_on_device = False
     await session.flush()
     idx = await device_matching.build_index(session, prefix)
-    return await device_matching.auto_match_rows(session, list(existing.values()), idx)
+    out.matched = await device_matching.auto_match_rows(session, list(existing.values()), idx)
+    out.duplicates = await device_matching.second_slot_users(session, [r.user_id for r in out.matched if r.user_id])
+    return out
 
 
 async def ingest_punches(
     session: AsyncSession, device: Device, punches: list[ZKPunch], users: dict[int, str], *, sync_id: uuid.UUID,
     tz: ZoneInfo, office: ZoneInfo, status: str, applied: int, now: dt.datetime, dcfg: device_settings.DeviceCfg,
+    hold: str | None = None, backdate_before: dt.datetime | None = None, stats: dict[str, int] | None = None,
 ) -> tuple[list[tuple[int, str, dt.datetime, str | None]], int, int]:  # fmt: skip
-    """Insert new punches with ON CONFLICT DO NOTHING (never an id). Returns (inserted rows, quarantined count, fetched)."""
+    """Insert new punches with ON CONFLICT DO NOTHING (never an id). Returns (inserted rows, quarantined count, fetched).
+
+    `hold` quarantines every new punch with that reason and applies no correction (clock moved since the previous sync);
+    `backdate_before` (naive device time) quarantines new punches stamped earlier than the previous sync's clock reading
+    (review H1). A punch whose slot number cannot be resolved to a user id is dropped, never guessed (review M4)."""
     rows: dict[tuple[str, dt.datetime], dict[str, Any]] = {}
     for p in punches:
-        uid = p.user_id or (users.get(p.uid) if p.uid is not None else None) or (str(p.uid) if p.uid is not None else None)
+        uid = p.user_id or (users.get(p.uid) if p.uid is not None else None)
         if not uid or len(uid) > 24:
+            if stats is not None:
+                stats["unresolved"] = stats.get("unresolved", 0) + 1
             continue
         quarantine = None
         off = applied
@@ -219,10 +277,14 @@ async def ingest_punches(
         punch_at = local.astimezone(dt.UTC)
         if p.time.year < MIN_VALID_YEAR or status == "invalid":
             quarantine, off = "clock_invalid", 0
+        elif hold:
+            quarantine, off = hold, 0
         else:
             punch_at -= dt.timedelta(seconds=off)
             if punch_at > now + dt.timedelta(seconds=dcfg.future_tolerance_s):
                 quarantine = "future"
+        if quarantine is None and backdate_before is not None and p.time < backdate_before:
+            quarantine = "backdated"
         if punch_at.astimezone(office).date() < device.ingest_from:
             continue
         key = (uid, p.time)
@@ -245,20 +307,19 @@ async def ingest_punches(
     return inserted, sum(1 for r in inserted if r[3]), len(values)
 
 
-async def _admin_ids(session: AsyncSession) -> list[uuid.UUID]:
-    q = (
-        select(User.id)
-        .join(RolePermission, RolePermission.role_id == User.role_id)
-        .join(Permission, Permission.id == RolePermission.permission_id)
-        .where(Permission.code == "device.manage", User.status == "active", User.deleted_at.is_(None))
-    )
-    return list((await session.execute(q)).scalars().unique())
+async def _admin_ids(session: AsyncSession, perms: tuple[str, ...] = ("device.manage",)) -> list[uuid.UUID]:
+    return await devices_svc.permission_holders(session, perms)
+
+
+HR_ALERT = ("device.manage", "device.map")  # admins and HR
 
 
 async def alert_admins(
-    session: AsyncSession, redis: Redis | None, device: Device, event: str, title: str, now: dt.datetime
+    session: AsyncSession, redis: Redis | None, device: Device, event: str, title: str, now: dt.datetime,
+    perms: tuple[str, ...] = ("device.manage",),
 ) -> bool:
-    """admin_alert push to device.manage holders; device name only. At most once per event and day per device."""
+    """admin_alert push to the holders of `perms` (device.manage by default; HR_ALERT adds device.map); device name only.
+    At most once per event and day per device."""
     allowed = True
     if redis is not None:
         try:
@@ -270,7 +331,7 @@ async def alert_admins(
         allowed = False
     if not allowed:
         return False
-    ids = await _admin_ids(session)
+    ids = await _admin_ids(session, perms)
     device.last_alert_at = now
     if ids:
         await notify(session, ids, type="admin_alert", entity_id=device.id, title=title, body=device.name, high_priority=True)
@@ -331,6 +392,13 @@ async def _finish_failed(
 async def _apply_success(
     sm: async_sessionmaker[AsyncSession], redis: Redis | None, device_id: uuid.UUID, sync_id: uuid.UUID, f: Fetched, kind: str
 ) -> None:
+    async with apply_lock(device_id):
+        await _apply_success_locked(sm, redis, device_id, sync_id, f, kind)
+
+
+async def _apply_success_locked(
+    sm: async_sessionmaker[AsyncSession], redis: Redis | None, device_id: uuid.UUID, sync_id: uuid.UUID, f: Fetched, kind: str
+) -> None:
     now = utcnow()
     async with sm() as s:
         d = await s.get(Device, device_id)
@@ -341,12 +409,16 @@ async def _apply_success(
         dcfg = await device_settings.load(s)
         office = att.office_tz(cfg)
         tz = _snapshot(d, office).tz
-        status, applied = classify_clock(f, dcfg, d.clock_correction)
+        first_sync = d.last_success_at is None
+        prev_offset, prev_reading = d.last_clock_reading_offset_s, d.last_clock_reading
+        status, applied, hold = classify_clock(f, dcfg, d.clock_correction, prev_offset)
         if f.serial and d.serial_number is None:
             d.serial_number = f.serial
         d.model, d.platform, d.firmware = f.model or d.model, f.platform or d.platform, f.firmware or d.firmware
         prev_status = d.clock_status
         d.last_clock_offset_s, d.clock_status = f.offset_s, status
+        if status != "invalid":  # the H1 reference only moves on a valid reading
+            d.last_clock_reading, d.last_clock_reading_offset_s = f.device_time, f.offset_s
         if status != "ok":
             if prev_status != status:
                 audit(
@@ -357,6 +429,12 @@ async def _apply_success(
                     after={"status": status, "offset_s": f.offset_s},
                 )
             await alert_admins(s, redis, d, "clock", "Device clock is wrong", now)  # once a day per device
+        if hold:
+            audit(
+                s, action="device.clock_changed", entity_type="device", entity_id=d.id,
+                before={"offset_s": prev_offset}, after={"offset_s": f.offset_s, "status": status},
+            )  # fmt: skip
+            await alert_admins(s, redis, d, "clock_changed", "Device clock was changed", now, perms=HR_ALERT)
         if f.log_decreased:
             audit(
                 s,
@@ -368,11 +446,22 @@ async def _apply_success(
             await alert_admins(s, redis, d, "logs", "Device logs were cleared", now)
         newly: list[DeviceUser] = []
         if f.users is not None:
-            newly = await upsert_users(s, d, f.users, now, dcfg.match_prefix)
+            res = await upsert_users(s, d, f.users, now, dcfg.match_prefix)
+            newly = res.matched
             d.last_users_read_at = now
+            if res.held:
+                audit(s, action="device.users_held", entity_type="device", entity_id=d.id, after={"count": res.held})
+                await alert_admins(s, redis, d, "new_users", "New device users need confirmation", now, perms=HR_ALERT)
+            if res.new_admins:
+                audit(s, action="device.admin_user_seen", entity_type="device", entity_id=d.id, after={"count": res.new_admins})
+                await alert_admins(s, redis, d, "device_admin", "A device administrator appeared", now, perms=HR_ALERT)
+            if res.duplicates:
+                audit(s, action="device_user.second_slot", entity_type="device", entity_id=d.id, after={"employees": len(res.duplicates)})
+                await alert_admins(s, redis, d, "second_slot", "An employee has two users on one device", now, perms=HR_ALERT)
         d.last_user_count, d.last_log_count = f.user_count, f.log_count
         inserted: list[tuple[int, str, dt.datetime, str | None]] = []
         fetched = quarantined = 0
+        stats: dict[str, int] = {}
         if f.punches:
             uid_map = {u.uid: u.user_id for u in (f.users or [])}
             if f.users is None:  # uid lookup for the 8-byte format from the stored list
@@ -380,6 +469,11 @@ async def _apply_success(
                     await s.execute(select(DeviceUser.device_uid, DeviceUser.device_user_id).where(DeviceUser.device_id == d.id))
                 ).all()
                 uid_map = {a: b for a, b in rows if a is not None}
+            backdate_before = (
+                prev_reading - dt.timedelta(seconds=max(dcfg.drift_tolerance_s, MIN_CLOCK_JITTER_S))
+                if prev_reading is not None
+                else None
+            )
             inserted, quarantined, fetched = await ingest_punches(
                 s,
                 d,
@@ -392,7 +486,23 @@ async def _apply_success(
                 applied=applied,
                 now=now,
                 dcfg=dcfg,
+                hold=hold,
+                backdate_before=backdate_before,
+                stats=stats,
             )
+        by_reason: dict[str, int] = {}
+        for r in inserted:
+            if r[3]:
+                by_reason[r[3]] = by_reason.get(r[3], 0) + 1
+        if by_reason.get("backdated"):
+            audit(s, action="device.punches_backdated", entity_type="device", entity_id=d.id, after={"count": by_reason["backdated"]})
+            await alert_admins(s, redis, d, "backdated", "Device punches dated before the last sync", now, perms=HR_ALERT)
+        if stats.get("unresolved"):
+            audit(s, action="device.punches_unresolved", entity_type="device", entity_id=d.id, after={"count": stats["unresolved"]})
+            log.warning("device %s: %d punches had an unknown user slot and were dropped", d.id, stats["unresolved"])
+        if not first_sync and len(inserted) > max(VOLUME_MIN, VOLUME_PER_USER * (f.user_count or 0)):
+            audit(s, action="device.punch_volume", entity_type="device", entity_id=d.id, after={"inserted": len(inserted)})
+            await alert_admins(s, redis, d, "volume", "Unusual number of device punches", now, perms=HR_ALERT)
         d.last_sync_at, d.last_success_at = now, now
         d.consecutive_failures, d.circuit_open_until = 0, None
         d.last_error_code = "DEVICE_CLOCK_INVALID" if status == "invalid" else None
@@ -407,7 +517,11 @@ async def _apply_success(
         row.fetched, row.inserted, row.quarantined, row.clock_offset_s = fetched, len(inserted), quarantined, f.offset_s
         await s.commit()
         seen: set = set()
-        days = await device_attendance.apply_new_punches(s, d.id, inserted, cfg, dcfg, seen)
+        # punches stored by an earlier run that died before their outcomes were written are applied now (review L4)
+        orphans = await device_attendance.unapplied_punches(s, d.id, cfg, dcfg, ORPHAN_LIMIT)
+        known = {r[0] for r in inserted}
+        to_apply = inserted + [o for o in orphans if o[0] not in known]
+        days = await device_attendance.apply_new_punches(s, d.id, to_apply, cfg, dcfg, seen)
         if newly:
             days += await device_attendance.recompute_device_users(
                 s, [(r.device_id, r.device_user_id) for r in newly], cfg=cfg, dcfg=dcfg, done=seen
@@ -616,28 +730,52 @@ async def run_job(sm: async_sessionmaker[AsyncSession], redis: Redis | None, job
         elif kind == "test":
             await run_test(sm, redis, uuid.UUID(job["sync_id"]), uuid.UUID(job["device_id"]) if job.get("device_id") else None)
         elif kind == "recompute":
-            async with sm() as s:
-                await device_attendance.recompute_device_users(s, [(uuid.UUID(d), u) for d, u in job["keys"]])
+            keys = [(uuid.UUID(d), u) for d, u in job["keys"]]
+            async with contextlib.AsyncExitStack() as stack:
+                for did in sorted({k[0] for k in keys}, key=str):  # fixed order: no deadlock between two recomputes
+                    await stack.enter_async_context(apply_lock(did))
+                async with sm() as s:
+                    await device_attendance.recompute_device_users(s, keys)
     except Exception:  # noqa: BLE001
         log.exception("device job %s failed", kind)
 
 
-async def process_queue(sm: async_sessionmaker[AsyncSession], redis: Redis, limit: int = 20) -> int:
-    """Pop and run the queued jobs (Sync now, Test connection, recompute after a mapping change). Devices run concurrently."""
-    jobs = []
-    for _ in range(limit):
-        job = await devices_svc.pop_job(redis)
-        if job is None:
-            break
-        jobs.append(job)
-    sem = asyncio.Semaphore(MAX_PARALLEL)
+async def process_queue(sm: async_sessionmaker[AsyncSession], redis: Redis, limit: int = 20, *, wait: bool = True) -> int:
+    """Run the queued jobs: Sync now and mapping recompute (list `QUEUE_KEY`, 3 at a time), Test connection (its own list and
+    its own 2 slots, so neither starves the other; review L8).
 
-    async def _one(j: dict[str, Any]) -> None:
-        async with sem:
-            await run_job(sm, redis, j)
+    wait=True (tests): pop up to `limit` jobs per list and return when all are done. wait=False (the scheduler tick): start jobs
+    as background tasks while a slot is free and return at once, so one slow device never delays the next tick. Returns the
+    number of jobs started."""
+    lanes = ((devices_svc.QUEUE_KEY, "sync", MAX_PARALLEL), (devices_svc.QUEUE_TEST_KEY, "test", MAX_TEST_PARALLEL))
+    if wait:
+        jobs: list[tuple[str, dict[str, Any]]] = []
+        for queue, lane, _cap in lanes:
+            for _ in range(limit):
+                job = await devices_svc.pop_job(redis, queue)
+                if job is None:
+                    break
+                jobs.append((lane, job))
+        sems = {"sync": asyncio.Semaphore(MAX_PARALLEL), "test": asyncio.Semaphore(MAX_TEST_PARALLEL)}
 
-    await asyncio.gather(*[_one(j) for j in jobs])
-    return len(jobs)
+        async def _one(lane: str, j: dict[str, Any]) -> None:
+            async with sems[lane]:
+                await run_job(sm, redis, j)
+
+        await asyncio.gather(*[_one(lane, j) for lane, j in jobs])
+        return len(jobs)
+    started = 0
+    for queue, lane, cap in lanes:
+        running = _running[lane]
+        while len(running) < cap:
+            job = await devices_svc.pop_job(redis, queue)
+            if job is None:
+                break
+            task = asyncio.create_task(run_job(sm, redis, job))
+            running.add(task)
+            task.add_done_callback(running.discard)
+            started += 1
+    return started
 
 
 def in_sync_window(local_hhmm: str, start: str, end: str) -> bool:

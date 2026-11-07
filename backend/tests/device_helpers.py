@@ -65,6 +65,7 @@ def _fast_retries(monkeypatch):
 def allow_loopback(monkeypatch):
     """The fake server listens on 127.0.0.1, which the address guard refuses in production."""
     monkeypatch.setattr(devices_svc, "address_problem", lambda ip: None)
+    monkeypatch.setattr(devices_svc, "port_problem", lambda port: None)  # the fake server listens on a random port
 
 
 @pytest.fixture

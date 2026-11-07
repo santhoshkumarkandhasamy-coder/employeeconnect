@@ -16,6 +16,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -83,21 +84,59 @@ def punch_work_date(punch_at: dt.datetime, shift: Shift | None, tz: ZoneInfo) ->
 
 # ---------------------------------------------------------------- outcomes
 async def set_outcomes(session: AsyncSession, rows: list[tuple[int, uuid.UUID | None, dt.date | None, str, str | None]]) -> None:
-    """Upsert (punch_id, user_id, work_date, outcome, reason) rows. Only touches rows whose values changed."""
+    """Upsert (punch_id, user_id, work_date, outcome, reason) rows. Only rows whose values changed are written, and the write is
+    INSERT ... ON CONFLICT DO UPDATE, so two writers (sync and recompute) can never collide on a primary key (review L4)."""
     if not rows:
         return
     existing = {
-        o.punch_id: o
-        for o in (
-            await session.execute(select(DevicePunchOutcome).where(DevicePunchOutcome.punch_id.in_([r[0] for r in rows])))
-        ).scalars()
-    }
-    for pid, user_id, wd, outcome, reason in rows:
-        o = existing.get(pid)
-        if o is None:
-            session.add(DevicePunchOutcome(punch_id=pid, user_id=user_id, work_date=wd, outcome=outcome, reason=reason))
-        elif (o.user_id, o.work_date, o.outcome, o.reason) != (user_id, wd, outcome, reason):
-            o.user_id, o.work_date, o.outcome, o.reason = user_id, wd, outcome, reason
+        pid: (uid, wd, outcome, reason)
+        for pid, uid, wd, outcome, reason in (
+            await session.execute(
+                select(
+                    DevicePunchOutcome.punch_id, DevicePunchOutcome.user_id, DevicePunchOutcome.work_date,
+                    DevicePunchOutcome.outcome, DevicePunchOutcome.reason,
+                ).where(DevicePunchOutcome.punch_id.in_([r[0] for r in rows]))
+            )
+        ).all()
+    }  # fmt: skip
+    todo = list(  # one row per punch (a duplicate key in one ON CONFLICT statement would fail); the last value wins
+        {
+            pid: {"punch_id": pid, "user_id": user_id, "work_date": wd, "outcome": outcome, "reason": reason}
+            for pid, user_id, wd, outcome, reason in rows
+            if existing.get(pid) != (user_id, wd, outcome, reason)
+        }.values()
+    )
+    if not todo:
+        return
+    table = DevicePunchOutcome.__table__
+    ins = (postgresql.insert if session.get_bind().dialect.name == "postgresql" else sqlite.insert)(table)
+    await session.execute(
+        ins.values(todo).on_conflict_do_update(
+            index_elements=["punch_id"],
+            set_={
+                "user_id": ins.excluded.user_id, "work_date": ins.excluded.work_date, "outcome": ins.excluded.outcome,
+                "reason": ins.excluded.reason, "updated_at": func.now(),
+            },
+        )
+    )  # fmt: skip
+
+
+async def unapplied_punches(
+    session: AsyncSession, device_id: uuid.UUID, cfg: dict[str, Any], dcfg: device_settings.DeviceCfg, limit: int = 5000
+) -> list[tuple[int, str, dt.datetime, str | None]]:
+    """Punches of this device inside the apply window that have NO outcome row (a run died between the insert and the
+    outcomes). Same tuple shape as the freshly inserted rows, so `apply_new_punches` can take them (review L4)."""
+    tz = att.office_tz(cfg)
+    today_d = utcnow().astimezone(tz).date()
+    since = dt.datetime.combine(today_d - dt.timedelta(days=dcfg.apply_window_days + 1), dt.time(0), tzinfo=tz).astimezone(dt.UTC)
+    q = (
+        select(DevicePunch.id, DevicePunch.device_user_id, DevicePunch.punch_at, DevicePunch.quarantine)
+        .outerjoin(DevicePunchOutcome, DevicePunchOutcome.punch_id == DevicePunch.id)
+        .where(DevicePunch.device_id == device_id, DevicePunch.punch_at >= since, DevicePunchOutcome.punch_id.is_(None))
+        .order_by(DevicePunch.id)
+        .limit(limit)
+    )
+    return [(r[0], r[1], r[2], r[3]) for r in (await session.execute(q)).all()]
 
 
 # ---------------------------------------------------------------- helpers

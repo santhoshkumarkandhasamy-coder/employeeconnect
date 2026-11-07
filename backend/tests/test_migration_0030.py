@@ -90,7 +90,7 @@ def test_tables_triggers_and_grants():
         "punch_at timestamptz NOT NULL",
         "sync_id uuid REFERENCES device_syncs(id) ON DELETE SET NULL",
         "CONSTRAINT uq_device_punches_device_user_time UNIQUE (device_id, device_user_id, device_time)",
-        "CHECK (quarantine IS NULL OR quarantine IN ('clock_invalid','future'))",
+        "CHECK (quarantine IS NULL OR quarantine IN ('clock_invalid','future','clock_changed','backdated'))",
     ):
         assert needle in punches, needle
     fn = up.split("CREATE FUNCTION device_punches_block_mutation")[1].split("$$;")[0]
@@ -119,6 +119,29 @@ def test_tables_triggers_and_grants():
         assert f"INSERT INTO settings (key, value) VALUES ('{k}', '{v}'::jsonb) ON CONFLICT (key) DO NOTHING;" in up, k
     # attendance backfill
     assert "WHERE manual;" in up and "app_check_in_at = check_in_at, app_check_out_at = check_out_at WHERE NOT manual;" in up
+
+
+def test_security_review_columns_and_checks():
+    """Review H1 / M4: clock reference columns, auto_hold, and the new quarantine reasons in BOTH check constraints, the models
+    and the generated schema."""
+    from app.models import Base
+
+    up = _load().UPGRADE
+    dev = up.split("CREATE TABLE devices (")[1].split(chr(10) + ");")[0]
+    assert "last_clock_reading timestamp," in dev and "last_clock_reading_offset_s integer," in dev
+    assert "auto_hold boolean NOT NULL DEFAULT false" in up.split("CREATE TABLE device_users (")[1].split(chr(10) + ");")[0]
+    outcomes = up.split("CREATE TABLE device_punch_outcomes (")[1].split(chr(10) + ");")[0]
+    for reason in ("clock_changed", "backdated"):
+        assert f"'{reason}'" in outcomes, reason
+    t = Base.metadata.tables
+    assert {"last_clock_reading", "last_clock_reading_offset_s"} <= set(t["devices"].c.keys())
+    assert t["device_users"].c.auto_hold.nullable is False
+    for cname, table in (("ck_device_punches_quarantine", "device_punches"), ("ck_device_punch_outcomes_reason", "device_punch_outcomes")):
+        text = next(str(c.sqltext) for c in t[table].constraints if getattr(c, "name", None) == cname)
+        assert "'clock_changed'" in text and "'backdated'" in text, cname
+    sql = (DB / "schema.sql").read_text(encoding="utf-8")
+    assert "last_clock_reading timestamp" in sql and "auto_hold boolean NOT NULL DEFAULT false" in sql
+    assert "'clock_changed','backdated'" in sql
 
 
 def test_no_biometric_names():

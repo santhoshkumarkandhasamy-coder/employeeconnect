@@ -3,6 +3,10 @@
 Auto-match, in order: exact employee id (case-insensitive, trimmed); else numeric equality ignoring leading zeros after stripping
 `device.match_prefix` from the employee id (prefix `EMP`: `0101` <-> `EMP101`). Only active employees. 2+ candidates = ambiguous =
 stays unmatched. Manual mapping and "ignore" override and are never touched by auto-matching.
+
+Security review M3 / M4: nobody maps a device user to themselves or changes a device user that is mapped to themselves; every
+manual map / ignore needs a reason and is audited with the previous employee; changing a user that is already matched needs
+`device.manage`; a device user first seen after the device's first sync is held (`auto_hold`) until HR confirms it.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from . import devices as devices_svc
 
 log = logging.getLogger("app.device_matching")
 UNAPPLIED = ("unmatched", "ignored", "not_applied", "quarantined")
+MAPPED = ("auto", "manual")
 
 
 @dataclass
@@ -103,6 +108,7 @@ async def device_users_out(session: AsyncSession, rows: list[DeviceUser]) -> lis
                 "name": r.name,
                 "card_masked": mask_card(r.card),
                 "is_device_admin": r.is_device_admin,
+                "pending_confirmation": bool(r.auto_hold and r.match_method == "unmatched"),
                 "present_on_device": r.present_on_device,
                 "status": {"auto": "matched", "manual": "matched"}.get(r.match_method, r.match_method),
                 "match_method": r.match_method,
@@ -127,7 +133,7 @@ async def list_device_users(
         cond.append(DeviceUser.match_method.in_(("auto", "manual")))
     elif status == "ignored":
         cond.append(DeviceUser.match_method == "ignored")
-    order = (func.length(DeviceUser.device_user_id), DeviceUser.device_user_id, DeviceUser.device_id)
+    order = (DeviceUser.is_device_admin.desc(), func.length(DeviceUser.device_user_id), DeviceUser.device_user_id, DeviceUser.device_id)
     term = (q or "").strip().lower()
     if term:  # names are encrypted at rest, so the text match runs here (the list is a few hundred rows at most)
         rows = [
@@ -154,7 +160,7 @@ async def auto_match_rows(session: AsyncSession, rows: list[DeviceUser], idx: Ma
     now = utcnow()
     hit = []
     for r in rows:
-        if r.match_method != "unmatched":
+        if r.match_method != "unmatched" or r.auto_hold:
             continue
         uid = idx.find(r.device_user_id)
         if uid is not None:
@@ -185,8 +191,33 @@ async def _queue_recompute(session: AsyncSession, redis: Redis | None, rows: lis
     return True
 
 
+async def second_slot_users(session: AsyncSession, user_ids: list[uuid.UUID]) -> list[uuid.UUID]:
+    """Employees (of `user_ids`) that own two or more mapped slots on ONE device: a sign of a planted duplicate id."""
+    if not user_ids:
+        return []
+    q = (
+        select(DeviceUser.user_id)
+        .where(DeviceUser.user_id.in_(set(user_ids)), DeviceUser.match_method.in_(MAPPED))
+        .group_by(DeviceUser.user_id, DeviceUser.device_id)
+        .having(func.count() > 1)
+    )
+    return list((await session.execute(q)).scalars().unique())
+
+
+def _forbidden(message: str, field: str = "user_id") -> AppError:
+    return AppError("FORBIDDEN", message, details=[{"field": field, "message": message}])
+
+
+async def _employee_ids(session: AsyncSession, ids: set[uuid.UUID | None]) -> dict[uuid.UUID, str]:
+    wanted = {i for i in ids if i}
+    if not wanted:
+        return {}
+    return {i: e for i, e in (await session.execute(select(User.id, User.employee_id).where(User.id.in_(wanted)))).all()}
+
+
 async def set_mapping(
-    session: AsyncSession, redis: Redis | None, actor: Principal, du_id: uuid.UUID, user_id: uuid.UUID | None, apply_all: bool
+    session: AsyncSession, redis: Redis | None, actor: Principal, du_id: uuid.UUID, user_id: uuid.UUID | None, apply_all: bool,
+    reason: str,
 ) -> dict[str, Any]:
     du = await _get(session, du_id)
     target: User | None = None
@@ -198,6 +229,8 @@ async def set_mapping(
                 "Unknown or inactive employee",
                 details=[{"field": "user_id", "message": "unknown or inactive"}],
             )
+        if target.id == actor.id:
+            raise _forbidden("You cannot map a device user to yourself")
     rows = [du]
     if apply_all:
         rows += list(
@@ -207,14 +240,31 @@ async def set_mapping(
                 )
             ).scalars()
         )
+    if any(r.user_id == actor.id for r in rows):
+        raise _forbidden("A device user mapped to you can only be changed by someone else")
+    new_id = target.id if target else None
+    if any(r.match_method in MAPPED and r.user_id != new_id for r in rows) and not actor.has("device.manage"):
+        raise _forbidden("Changing a device user that is already matched needs the device.manage permission", field="id")
+    previous = await _employee_ids(session, {r.user_id for r in rows})
     now = utcnow()
     for r in rows:
-        r.user_id = target.id if target else None
+        before = {
+            "device_user_id": r.device_user_id, "match_method": r.match_method,
+            "employee_id": previous.get(r.user_id) if r.user_id else None,
+        }  # fmt: skip
+        r.user_id = new_id
         r.match_method = "manual" if target else "ignored"
-        r.matched_by, r.matched_at = actor.id, now
+        r.matched_by, r.matched_at, r.auto_hold = actor.id, now, False
         audit(
             session, action="device_user.map" if target else "device_user.ignore", actor=actor, entity_type="device_user", entity_id=r.id,
-            after={"device_user_id": r.device_user_id, "employee_id": target.employee_id if target else None},
+            before=before, after={"device_user_id": r.device_user_id, "employee_id": target.employee_id if target else None, "reason": reason},
+        )  # fmt: skip
+    await session.flush()
+    if target is not None and await second_slot_users(session, [target.id]):
+        audit(session, action="device_user.second_slot", actor=actor, entity_type="user", entity_id=target.id)
+        await devices_svc.alert_holders(
+            session, redis, key=f"second_slot:{target.id}", title="An employee has two users on one device", body="Device users",
+            entity_id=du.device_id,
         )  # fmt: skip
     await session.commit()
     queued = await _queue_recompute(session, redis, rows)
@@ -222,16 +272,35 @@ async def set_mapping(
 
 
 async def reset_auto(session: AsyncSession, redis: Redis | None, actor: Principal, du_id: uuid.UUID) -> dict[str, Any]:
+    """Back to automatic matching. This is also HR's confirmation of a held new user (`auto_hold`)."""
     from . import device_settings
 
     du = await _get(session, du_id)
-    du.user_id, du.match_method, du.matched_by, du.matched_at = None, "unmatched", None, None
+    if du.user_id == actor.id:
+        raise _forbidden("A device user mapped to you can only be changed by someone else", field="id")
+    if du.match_method in MAPPED and not actor.has("device.manage"):
+        raise _forbidden("Changing a device user that is already matched needs the device.manage permission", field="id")
     idx = await build_index(session, (await device_settings.load(session)).match_prefix)
+    candidate = idx.find(du.device_user_id)
+    if candidate == actor.id:
+        raise _forbidden("You cannot map a device user to yourself")
+    before = {
+        "device_user_id": du.device_user_id, "match_method": du.match_method,
+        "employee_id": (await _employee_ids(session, {du.user_id})).get(du.user_id) if du.user_id else None,
+    }  # fmt: skip
+    du.user_id, du.match_method, du.matched_by, du.matched_at, du.auto_hold = None, "unmatched", None, None, False
     await auto_match_rows(session, [du], idx)
     audit(
         session, action="device_user.auto", actor=actor, entity_type="device_user", entity_id=du.id,
-        after={"device_user_id": du.device_user_id, "matched": du.match_method == "auto"},
+        before=before, after={"device_user_id": du.device_user_id, "matched": du.match_method == "auto"},
     )  # fmt: skip
+    await session.flush()
+    if du.user_id is not None and await second_slot_users(session, [du.user_id]):
+        audit(session, action="device_user.second_slot", actor=actor, entity_type="user", entity_id=du.user_id)
+        await devices_svc.alert_holders(
+            session, redis, key=f"second_slot:{du.user_id}", title="An employee has two users on one device", body="Device users",
+            entity_id=du.device_id,
+        )  # fmt: skip
     await session.commit()
     queued = await _queue_recompute(session, redis, [du])
     return {"items": await device_users_out(session, [du]), "recompute_queued": queued}

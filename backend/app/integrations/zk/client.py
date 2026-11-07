@@ -24,6 +24,7 @@ PACKET_TIMEOUT_S = 10.0
 SESSION_TIMEOUT_S = 120.0
 CHUNK_TCP = 0x8000
 CHUNK_UDP = 0x4000
+UDP_QUEUE_MAX = 64  # datagrams waiting for the reader; a flood from the LAN is dropped instead of buffered (review L3)
 
 
 class _UdpProtocol(asyncio.DatagramProtocol):
@@ -36,7 +37,8 @@ class _UdpProtocol(asyncio.DatagramProtocol):
         self.transport = transport
 
     def datagram_received(self, data: bytes, addr) -> None:
-        if addr[0] == self.peer[0] and len(data) <= p.MAX_PACKET + 64 and self.queue.qsize() < 4096:
+        # only the registered device (address AND port) is believed; the queue is small and bounded
+        if (addr[0], addr[1]) == (self.peer[0], self.peer[1]) and len(data) <= p.MAX_PACKET + 64 and self.queue.qsize() < UDP_QUEUE_MAX:
             self.queue.put_nowait(data)
 
     def error_received(self, exc: Exception) -> None:

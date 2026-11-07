@@ -25,13 +25,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..core import rate_limit
 from ..core.audit import audit
 from ..core.clock import as_utc, iso_z, utcnow
-from ..core.config import get_settings
+from ..core.config import SPECIAL_RANGES, get_settings
 from ..core.crypto import encrypt_bytes
 from ..core.errors import AppError
 from ..core.rbac import Principal
-from ..models import Attendance, Device, DevicePunch, DeviceSync, DeviceUser, User
+from ..models import Attendance, Device, DevicePunch, DeviceSync, DeviceUser, Permission, RolePermission, User
 from . import attendance as att
 from . import device_settings
+from .notifications import notify
 from .system_health import HEARTBEAT_KEY, HEARTBEAT_STALE_S, _parse
 
 log = logging.getLogger("app.devices")
@@ -41,6 +42,7 @@ TESTJOB_KEY = "ec:devices:testjob:{}"
 TESTJOB_TTL_S = 120
 MAX_DEVICES = 50
 DOCKER_DEFAULT_NET = ipaddress.ip_network("172.17.0.0/16")
+QUEUE_TEST_KEY = "ec:devices:jobs:test"  # Test connection jobs get their own list so they cannot starve or be starved by syncs
 
 ERROR_TEXT = {
     "DEVICE_UNREACHABLE": "The device could not be reached on the network",
@@ -85,20 +87,35 @@ def address_problem(ip: str) -> str | None:
         return "outside DEVICE_ALLOWED_CIDRS"
     if net.prefixlen <= 30 and addr in (net.network_address, net.broadcast_address):
         return "network or broadcast address"
-    if any(addr in n for n in (*st.device_blocked_networks, DOCKER_DEFAULT_NET) if n.version == 4):
-        return "docker network or this server"
+    if any(addr in n for n in (*st.device_blocked_networks, DOCKER_DEFAULT_NET, *SPECIAL_RANGES) if n.version == 4):
+        return "docker network, special-purpose range or this server"
     if str(addr) in _own_addresses():
         return "this server's own address"
     return None
 
 
-def check_address(ip: str) -> None:
+def port_problem(port: int) -> str | None:
+    """None when `port` is in DEVICE_ALLOWED_PORTS (default 4370 only)."""
+    if port not in get_settings().device_allowed_port_set:
+        return "port is not in DEVICE_ALLOWED_PORTS"
+    return None
+
+
+def check_address(ip: str, port: int | None = None) -> None:
+    """Refuse an address (and, when given, a port) that may not be a device. The port is part of the SSRF guard (review L1)."""
     problem = address_problem(ip)
     if problem:
         raise AppError(
             "DEVICE_ADDRESS_NOT_ALLOWED",
             "This address cannot be used for an attendance device",
             details=[{"field": "ip", "message": problem}],
+        )
+    problem = port_problem(port) if port is not None else None
+    if problem:
+        raise AppError(
+            "DEVICE_ADDRESS_NOT_ALLOWED",
+            "This port cannot be used for an attendance device",
+            details=[{"field": "port", "message": problem}],
         )
 
 
@@ -264,8 +281,16 @@ async def _check_unique(session: AsyncSession, name: str, ip: str, port: int, ex
         )
 
 
+def _jsonable(v: Any) -> Any:
+    return v.isoformat() if isinstance(v, dt.date) else v
+
+
+# non-secret values worth keeping in the audit trail (the comm key and the free-text label never go there)
+_AUDITED = ("name", "ip", "port", "transport", "enabled", "timezone", "clock_correction", "ingest_from")
+
+
 async def create_device(session: AsyncSession, actor: Principal, body: Any) -> dict[str, Any]:
-    check_address(body.ip)
+    check_address(body.ip, body.port)
     _check_timezone(body.timezone)
     if (await session.execute(select(func.count()).select_from(Device))).scalar_one() >= MAX_DEVICES:
         raise AppError("CONFLICT", "Too many devices")
@@ -292,7 +317,10 @@ async def create_device(session: AsyncSession, actor: Principal, body: Any) -> d
         raise AppError("CONFLICT", "A device with this name or address already exists") from None
     audit(
         session, action="device.create", actor=actor, entity_type="device", entity_id=d.id,
-        after={"fields": sorted(body.model_fields_set | {"name", "ip", "port"}), "comm_key_changed": bool(body.comm_key)},
+        after={
+            "fields": sorted(body.model_fields_set | {"name", "ip", "port"}), "comm_key_changed": bool(body.comm_key),
+            "name": body.name, "ip": body.ip, "port": body.port, "transport": body.transport,
+        },
     )  # fmt: skip
     await session.commit()
     return device_out(d, 0, utcnow())
@@ -300,10 +328,12 @@ async def create_device(session: AsyncSession, actor: Principal, body: Any) -> d
 
 async def update_device(session: AsyncSession, actor: Principal, device_id: uuid.UUID, body: Any) -> dict[str, Any]:
     d = await get_or_404(session, device_id, lock=True)
-    check_address(body.ip)
+    check_address(body.ip, body.port)
     _check_timezone(body.timezone)
     await _check_unique(session, body.name, body.ip, body.port, d.id)
     changed: list[str] = []
+    before: dict[str, Any] = {}
+    after: dict[str, Any] = {}
     new_ingest = await _ingest_from(session, body.ingest_from, keep=d.ingest_from)
     for field, new in (
         ("name", body.name), ("ip", body.ip), ("port", body.port), ("transport", body.transport), ("enabled", body.enabled),
@@ -313,6 +343,8 @@ async def update_device(session: AsyncSession, actor: Principal, device_id: uuid
         old = str(d.ip).split("/")[0] if field == "ip" else getattr(d, field)
         if old != new:
             changed.append(field)
+            if field in _AUDITED:
+                before[field], after[field] = _jsonable(old), _jsonable(new)
             setattr(d, field, new)
     comm_changed = False
     if "comm_key" in body.model_fields_set:
@@ -330,7 +362,7 @@ async def update_device(session: AsyncSession, actor: Principal, device_id: uuid
         raise AppError("CONFLICT", "A device with this name or address already exists") from None
     audit(
         session, action="device.update", actor=actor, entity_type="device", entity_id=d.id,
-        after={"fields": changed, "comm_key_changed": comm_changed},
+        before=before, after={**after, "fields": changed, "comm_key_changed": comm_changed},
     )  # fmt: skip
     if "enabled" in changed:
         audit(
@@ -362,7 +394,7 @@ async def delete_device(session: AsyncSession, actor: Principal, device_id: uuid
         actor=actor,
         entity_type="device",
         entity_id=d.id,
-        before={"fields": ["name", "ip", "port"]},
+        before={"name": d.name, "ip": str(d.ip).split("/")[0], "port": d.port, "transport": d.transport, "serial_number": d.serial_number},
     )
     await session.delete(d)
     await session.commit()
@@ -370,16 +402,48 @@ async def delete_device(session: AsyncSession, actor: Principal, device_id: uuid
 
 async def accept_identity(session: AsyncSession, actor: Principal, device_id: uuid.UUID) -> dict[str, Any]:
     d = await get_or_404(session, device_id, lock=True)
+    old_serial = d.serial_number
     d.serial_number = None  # the next successful sync pins whatever machine answers
     if d.last_error_code == "DEVICE_IDENTITY_CHANGED":
         d.last_error_code = None
         d.last_error_at = None
     d.consecutive_failures = 0
     d.circuit_open_until = None
-    audit(session, action="device.identity_accepted", actor=actor, entity_type="device", entity_id=d.id)
+    audit(
+        session, action="device.identity_accepted", actor=actor, entity_type="device", entity_id=d.id,
+        before={"serial_number": old_serial}, after={"ip": str(d.ip).split("/")[0], "port": d.port},
+    )  # fmt: skip
     await session.commit()
     counts = await _unmatched_counts(session)
     return device_out(d, counts.get(d.id, 0), utcnow())
+
+
+# ---------------------------------------------------------------- alerts to the people who run the devices
+async def permission_holders(session: AsyncSession, perms: tuple[str, ...]) -> list[uuid.UUID]:
+    q = (
+        select(User.id)
+        .join(RolePermission, RolePermission.role_id == User.role_id)
+        .join(Permission, Permission.id == RolePermission.permission_id)
+        .where(Permission.code.in_(perms), User.status == "active", User.deleted_at.is_(None))
+    )
+    return list((await session.execute(q)).scalars().unique())
+
+
+async def alert_holders(
+    session: AsyncSession, redis: Redis | None, *, key: str, title: str, body: str, entity_id: uuid.UUID | None,
+    perms: tuple[str, ...] = ("device.manage", "device.map"),
+) -> bool:
+    """admin_alert push (no personal data) to the holders of `perms`; at most once a day per `key` (Redis down = send)."""
+    if redis is not None:
+        try:
+            if not await redis.set(f"ec:device:alert:{key}", "1", nx=True, ex=86400):
+                return False
+        except Exception:  # noqa: BLE001
+            pass
+    ids = await permission_holders(session, perms)
+    if ids:
+        await notify(session, ids, type="admin_alert", entity_id=entity_id, title=title, body=body, high_priority=True)
+    return True
 
 
 # ---------------------------------------------------------------- job queue (API side)
@@ -398,15 +462,15 @@ async def ensure_worker(redis: Redis) -> None:
 
 async def push_job(redis: Redis, job: dict[str, Any]) -> None:
     try:
-        await redis.lpush(QUEUE_KEY, json.dumps(job))
+        await redis.lpush(QUEUE_TEST_KEY if job.get("kind") == "test" else QUEUE_KEY, json.dumps(job))
     except Exception:  # noqa: BLE001
         raise AppError(
             "TEMPORARILY_UNAVAILABLE", "The job queue is not available. Try again shortly.", headers={"Retry-After": "30"}
         ) from None
 
 
-async def pop_job(redis: Redis) -> dict[str, Any] | None:
-    raw = await redis.rpop(QUEUE_KEY)
+async def pop_job(redis: Redis, queue: str = QUEUE_KEY) -> dict[str, Any] | None:
+    raw = await redis.rpop(queue)
     if not raw:
         return None
     try:
@@ -468,14 +532,17 @@ async def request_test(
     await rate_limit.enforce(redis, [(f"rl:device-test:{actor.id}", 6, 60)], fail_closed=True)
     if device_id is not None:
         d = await get_or_404(session, device_id)
-        check_address(str(d.ip).split("/")[0])
+        check_address(str(d.ip).split("/")[0], d.port)
         row = DeviceSync(device_id=d.id, kind="test", requested_by=actor.id, status="queued")
         session.add(row)
-        audit(session, action="device.test", actor=actor, entity_type="device", entity_id=d.id)
+        audit(
+            session, action="device.test", actor=actor, entity_type="device", entity_id=d.id,
+            after={"ip": str(d.ip).split("/")[0], "port": d.port, "transport": d.transport},
+        )  # fmt: skip
         await session.commit()
         await push_job(redis, {"kind": "test", "sync_id": str(row.id), "device_id": str(d.id)})
         return row
-    check_address(params.ip)
+    check_address(params.ip, params.port)
     row = DeviceSync(device_id=None, kind="test", requested_by=actor.id, status="queued")
     session.add(row)
     await session.commit()
@@ -485,7 +552,10 @@ async def request_test(
     except Exception:  # noqa: BLE001
         raise AppError("TEMPORARILY_UNAVAILABLE", "The job queue is not available. Try again shortly.") from None
     await push_job(redis, {"kind": "test", "sync_id": str(row.id), "device_id": None})
-    audit(session, action="device.test", actor=actor, entity_type="device", after={"unsaved": True})
+    audit(
+        session, action="device.test", actor=actor, entity_type="device",
+        after={"unsaved": True, "ip": params.ip, "port": params.port, "transport": params.transport},
+    )  # fmt: skip
     await session.commit()
     return row
 

@@ -62,6 +62,8 @@ class Device(TimestampMixin, Base):
     firmware: Mapped[str | None] = mapped_column(Text)
     platform: Mapped[str | None] = mapped_column(Text)
     last_clock_offset_s: Mapped[int | None] = mapped_column(Integer)
+    last_clock_reading: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=False))  # naive device clock at the last valid sync
+    last_clock_reading_offset_s: Mapped[int | None] = mapped_column(Integer)  # offset measured then (H1 reference)
     clock_status: Mapped[str | None] = mapped_column(Text)
     last_log_count: Mapped[int | None] = mapped_column(Integer)
     last_user_count: Mapped[int | None] = mapped_column(Integer)
@@ -134,6 +136,7 @@ class DeviceUser(TimestampMixin, Base):
     name: Mapped[str | None] = mapped_column("name_enc", EncryptedString)
     card: Mapped[str | None] = mapped_column("card_enc", EncryptedString)
     is_device_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    auto_hold: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))  # new user: HR confirms the match
     user_id: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
     match_method: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'unmatched'"))
     matched_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
@@ -149,7 +152,7 @@ class DevicePunch(Base):
     __table_args__ = (
         UniqueConstraint("device_id", "device_user_id", "device_time", name="uq_device_punches_device_user_time"),
         CheckConstraint("char_length(device_user_id) BETWEEN 1 AND 24", name="ck_device_punches_user_id"),
-        CheckConstraint("quarantine IS NULL OR quarantine IN ('clock_invalid','future')", name="ck_device_punches_quarantine"),
+        CheckConstraint("quarantine IS NULL OR quarantine IN ('clock_invalid','future','clock_changed','backdated')", name="ck_device_punches_quarantine"),
         Index("ix_device_punches_user_punch_at", "device_user_id", "punch_at"),
         Index("ix_device_punches_punch_at", "punch_at"),
         Index("ix_device_punches_sync_id", "sync_id", postgresql_where=text("sync_id IS NOT NULL")),
@@ -180,7 +183,7 @@ class DevicePunchOutcome(Base):
         ),
         CheckConstraint(
             "reason IS NULL OR reason IN ('on_leave','on_duty','no_shift','inactive_user','manual_entry','outside_window',"
-            "'payroll_locked','mapping_ignored','clock_invalid','future','duplicate')",
+            "'payroll_locked','mapping_ignored','clock_invalid','future','clock_changed','backdated','duplicate')",
             name="ck_device_punch_outcomes_reason",
         ),
         Index("ix_device_punch_outcomes_user_work_date", "user_id", "work_date"),

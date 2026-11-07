@@ -73,7 +73,16 @@ class EmptyBody(BaseModel):
 class MappingIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     user_id: uuid.UUID | None
-    apply_to_all_devices: bool = True
+    apply_to_all_devices: bool = False  # review L9: one slot unless the caller asks for every device
+    reason: str = Field(min_length=3, max_length=300)  # review M3: audited with the previous employee
+
+    @field_validator("reason")
+    @classmethod
+    def _reason(cls, v: str) -> str:
+        v = clean_text(v)
+        if len(v) < 3:
+            raise ValueError("give a reason (at least 3 characters)")
+        return v
 
 
 class UseDeviceIn(BaseModel):

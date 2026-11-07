@@ -544,7 +544,13 @@ async def test_ignoring_a_device_user_unapplies_a_device_only_day(client, H, db,
     assert await rec_of(sessionmaker_, seeded) is not None
     async with sessionmaker_() as s:
         du_id = (await s.execute(select(DeviceUser.id))).scalar_one()
-    r = await client.put(f"/api/admin/device-users/{du_id}/mapping", headers=await H("hr"), json={"user_id": None})
+    r = await client.put(  # ignoring a MATCHED user needs device.manage (review M3): HR is refused, the admin may
+        f"/api/admin/device-users/{du_id}/mapping", headers=await H("hr"), json={"user_id": None, "reason": "left the company"}
+    )
+    assert r.status_code == 403
+    r = await client.put(
+        f"/api/admin/device-users/{du_id}/mapping", headers=await H("admin"), json={"user_id": None, "reason": "left the company"}
+    )
     assert r.status_code == 200 and r.json()["recompute_queued"] is True
     assert r.json()["items"][0]["status"] == "ignored"
     await device_sync.process_queue(sessionmaker_, redis)
@@ -554,7 +560,8 @@ async def test_ignoring_a_device_user_unapplies_a_device_only_day(client, H, db,
         assert "attendance.device_unapply" in (await s.execute(select(AuditLog.action))).scalars().all()
     # mapping it back to the employee brings the day back
     r = await client.put(
-        f"/api/admin/device-users/{du_id}/mapping", headers=await H("hr"), json={"user_id": str(seeded["users"]["employee"])}
+        f"/api/admin/device-users/{du_id}/mapping", headers=await H("hr"),
+        json={"user_id": str(seeded["users"]["employee"]), "reason": "badge re-issued"},
     )
     assert r.json()["items"][0]["match_method"] == "manual"
     await device_sync.process_queue(sessionmaker_, redis)

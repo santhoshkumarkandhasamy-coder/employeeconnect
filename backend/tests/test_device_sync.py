@@ -174,24 +174,32 @@ async def test_future_punch_and_pre_2015_punch_are_quarantined(fake_zk, db, sess
         )
 
 
-async def test_drift_is_corrected_when_auto_and_ignored_when_off(fake_zk, db, sessionmaker_, redis, clk):
-    # the machine runs 200 s ahead: a punch it stamps 09:00:00 really happened at 08:56:40
+async def test_drift_is_corrected_only_after_two_consecutive_syncs_with_the_same_offset(fake_zk, db, sessionmaker_, redis, clk):
+    # the machine runs 200 s ahead: a punch it stamps 09:07:00 really happened at 09:03:40
     ahead = lambda: clk.device_local() + dt.timedelta(seconds=200)  # noqa: E731
     f = await fake_zk(users=_users(), clock_fn=ahead, punches=[FakePunch("EMP001", local(TODAY, "08:58"), uid=1)])
     dev = await add_device(db, f)
     row = await run(sessionmaker_, redis, dev)
-    assert row.clock_offset_s == 200
+    assert row.clock_offset_s == 200 and row.quarantined == 1  # first sight of a drifting clock: nothing is corrected, held
     d = await reload(sessionmaker_, Device, dev.id)
-    assert (d.clock_status, d.last_clock_offset_s) == ("drift", 200)
+    assert (d.clock_status, d.last_clock_offset_s, d.last_clock_reading_offset_s) == ("drift", 200, 200)
     async with sessionmaker_() as s:
         p = (await s.execute(select(DevicePunch))).scalars().one()
-        assert p.offset_applied_s == 200 and p.punch_at.replace(tzinfo=dt.UTC) == NOW - dt.timedelta(minutes=2, seconds=200)
+        assert (p.quarantine, p.offset_applied_s) == ("clock_changed", 0)
+    clk.set(NOW + dt.timedelta(minutes=5))
+    f.punches.append(FakePunch("EMP001", local(TODAY, "09:07"), uid=1))
+    row = await run(sessionmaker_, redis, dev)  # the same offset twice in a row: corrected from here on
+    assert row.inserted == 1 and row.quarantined == 0
+    async with sessionmaker_() as s:
+        p = (await s.execute(select(DevicePunch).where(DevicePunch.quarantine.is_(None)))).scalars().one()
+        assert p.offset_applied_s == 200 and p.punch_at.replace(tzinfo=dt.UTC) == NOW + dt.timedelta(minutes=3, seconds=40)
     f2 = await fake_zk(users=_users(), clock_fn=ahead, punches=[FakePunch("EMP001", local(TODAY, "08:58"), uid=1)])
     dev2 = await add_device(db, f2, name="Back door", clock_correction="off")
     await run(sessionmaker_, redis, dev2)
     async with sessionmaker_() as s:
         p2 = (await s.execute(select(DevicePunch).where(DevicePunch.device_id == dev2.id))).scalars().one()
         assert p2.offset_applied_s == 0 and p2.punch_at.replace(tzinfo=dt.UTC) == NOW - dt.timedelta(minutes=2)
+        assert p2.quarantine is None  # correction off: nothing is held for a steady drift
 
 
 async def test_small_offset_is_within_tolerance(fake_zk, db, sessionmaker_, redis, clk):
@@ -594,3 +602,290 @@ def test_settings_defaults_match_the_contract():
         d["device.sync_interval_minutes"] == 5 and d["device.apply_window_days"] == 7 and d["device.punch_retention_days"] == 1095
     )
     assert USERS["admin"] == "ADM001"
+
+
+# ================================================================ security review fixes
+class Shift:
+    """A device clock that an 'attacker' can move: real time plus `seconds`."""
+
+    def __init__(self, clk):
+        self.clk, self.seconds = clk, 0
+
+    def __call__(self):
+        return self.clk.device_local() + dt.timedelta(seconds=self.seconds)
+
+
+def _alerts(title_part):
+    return [o for o in OUTBOX if o["payload"]["type"] == "admin_alert" and title_part in o["payload"]["title"]]
+
+
+async def _punch_rows(sm):
+    async with sm() as s:
+        return {(p.device_user_id, p.device_time): p for p in (await s.execute(select(DevicePunch))).scalars()}
+
+
+# ---- H1 attack A: the clock is changed between two syncs, so a correction would shift punches made with the right clock
+async def test_h1_clock_moved_forward_quarantines_new_punches_instead_of_backdating_them(fake_zk, db, sessionmaker_, redis, clk, seeded):
+    shift = Shift(clk)
+    f = await fake_zk(users=_users(), clock_fn=shift, punches=_punches(("EMP001", "08:50")))
+    dev = await add_device(db, f)
+    assert (await run(sessionmaker_, redis, dev)).quarantined == 0  # sync 1: clock right
+    clk.set(NOW + dt.timedelta(minutes=5))  # 09:05
+    f.punches.append(FakePunch("EMP001", local(TODAY, "09:02"), uid=1))  # made with the right clock
+    shift.seconds = 3 * 3600  # then somebody sets the machine 3 hours ahead
+    OUTBOX.clear()
+    row = await run(sessionmaker_, redis, dev)  # sync 2: measures +10800
+    assert (row.inserted, row.quarantined) == (1, 1)
+    p = (await _punch_rows(sessionmaker_))[("EMP001", local(TODAY, "09:02"))]
+    assert p.quarantine == "clock_changed" and p.offset_applied_s == 0
+    assert p.punch_at.replace(tzinfo=dt.UTC) == NOW + dt.timedelta(minutes=2)  # NOT moved 3 hours back to 06:02
+    async with sessionmaker_() as s:
+        o = (await s.execute(select(DevicePunchOutcome).where(DevicePunchOutcome.punch_id == p.id))).scalar_one()
+        assert (o.outcome, o.reason) == ("quarantined", "clock_changed")
+        assert "device.clock_changed" in (await s.execute(select(AuditLog.action))).scalars().all()
+    hr = _alerts("clock was changed")
+    assert hr and str(seeded["users"]["hr"]) in hr[0]["user_ids"] and str(seeded["users"]["admin"]) in hr[0]["user_ids"]
+    # sync 3: the same wrong offset twice in a row is a stable drift and gets corrected from now on
+    clk.set(NOW + dt.timedelta(minutes=10))
+    f.punches.append(FakePunch("EMP001", local(TODAY, "12:08"), uid=1))  # 09:08 real, stamped by the +3 h clock
+    row = await run(sessionmaker_, redis, dev)
+    assert row.quarantined == 0
+    p3 = (await _punch_rows(sessionmaker_))[("EMP001", local(TODAY, "12:08"))]
+    assert (p3.offset_applied_s, p3.quarantine) == (10800, None)
+    assert p3.punch_at.replace(tzinfo=dt.UTC) == NOW + dt.timedelta(minutes=8)
+
+
+async def test_h1_clock_set_back_and_restored_is_held_both_times(fake_zk, db, sessionmaker_, redis, clk):
+    shift = Shift(clk)
+    f = await fake_zk(users=_users(), clock_fn=shift, punches=[])
+    dev = await add_device(db, f)
+    await run(sessionmaker_, redis, dev)
+    clk.set(NOW + dt.timedelta(minutes=5))
+    shift.seconds = -1800  # 30 minutes back (inside the 12 h invalid limit)
+    f.punches.append(FakePunch("EMP001", local(TODAY, "08:34"), uid=1))
+    assert (await run(sessionmaker_, redis, dev)).quarantined == 1
+    clk.set(NOW + dt.timedelta(minutes=10))
+    shift.seconds = 0  # restored: the offset moved again, so this sync's new punches are held too
+    f.punches.append(FakePunch("EMP001", local(TODAY, "09:09"), uid=1))
+    assert (await run(sessionmaker_, redis, dev)).quarantined == 1
+    clk.set(NOW + dt.timedelta(minutes=15))
+    f.punches.append(FakePunch("EMP001", local(TODAY, "09:14"), uid=1))
+    row = await run(sessionmaker_, redis, dev)  # steady again
+    assert (row.inserted, row.quarantined) == (1, 0)
+
+
+# ---- H1 attack B: set the clock back, punch, restore it before the next sync (the offset looks normal at the sync)
+async def test_h1_backdated_punch_is_quarantined_even_when_the_clock_is_back_to_normal(fake_zk, db, sessionmaker_, redis, clk, seeded):
+    f = await fake_zk(users=_users(), punches=_punches(("EMP001", "08:50")))
+    dev = await add_device(db, f)
+    await run(sessionmaker_, redis, dev)  # sync 1 at 09:00: reading 09:00
+    clk.set(NOW + dt.timedelta(minutes=20))  # 09:20
+    f.punches.append(FakePunch("EMP001", local(TODAY, "08:21"), uid=1))  # stamped while the clock was set back one hour
+    f.punches.append(FakePunch("EMP001", local(TODAY, "09:15"), uid=1))  # an honest punch
+    OUTBOX.clear()
+    row = await run(sessionmaker_, redis, dev)  # offset is 0 again
+    assert (row.inserted, row.quarantined) == (2, 1)
+    rows = await _punch_rows(sessionmaker_)
+    assert rows[("EMP001", local(TODAY, "08:21"))].quarantine == "backdated"
+    assert rows[("EMP001", local(TODAY, "09:15"))].quarantine is None
+    async with sessionmaker_() as s:
+        a = (await s.execute(select(Attendance))).scalars().one()
+        assert a.check_in_at.replace(tzinfo=dt.UTC) == NOW - dt.timedelta(minutes=10)  # 08:50 stays the check-in, not 08:21
+        assert "device.punches_backdated" in (await s.execute(select(AuditLog.action))).scalars().all()
+    assert _alerts("dated before the last sync")
+
+
+async def test_h1_new_punches_after_the_last_reading_are_never_backdated(fake_zk, db, sessionmaker_, redis, clk):
+    f = await fake_zk(users=_users(), punches=_punches(("EMP001", "08:50")))
+    dev = await add_device(db, f)
+    await run(sessionmaker_, redis, dev)
+    clk.set(NOW + dt.timedelta(minutes=5))
+    f.punches.append(FakePunch("EMP001", local(TODAY, "09:00"), uid=1))  # exactly at the previous reading
+    f.punches.append(FakePunch("EMP001", local(TODAY, "08:58"), uid=1))  # inside the tolerance (120 s)
+    row = await run(sessionmaker_, redis, dev)
+    assert (row.inserted, row.quarantined) == (2, 0)
+
+
+async def test_h1_invalid_clock_does_not_move_the_reference(fake_zk, db, sessionmaker_, redis, clk):
+    shift = Shift(clk)
+    f = await fake_zk(users=_users(), clock_fn=shift, punches=[])
+    dev = await add_device(db, f)
+    await run(sessionmaker_, redis, dev)
+    before = await reload(sessionmaker_, Device, dev.id)
+    shift.seconds = -3 * 86400
+    await run(sessionmaker_, redis, dev)
+    after = await reload(sessionmaker_, Device, dev.id)
+    assert after.clock_status == "invalid"
+    assert (after.last_clock_reading, after.last_clock_reading_offset_s) == (before.last_clock_reading, before.last_clock_reading_offset_s)
+
+
+def test_h1_classify_clock_table():
+    cfg = device_settings.DeviceCfg(**{k.removeprefix("device."): v for k, v in device_settings.DEFAULTS.items()})
+    t = dt.datetime(2026, 10, 21, 9, 0)
+
+    def f(off):
+        return device_sync.Fetched("S", "M", "P", "F", t, off, 1, 1, None, None, 0, False)
+
+    cc = device_sync.classify_clock
+    assert cc(f(10), cfg, "auto", None) == ("ok", 0, None)
+    assert cc(f(10), cfg, "auto", 0) == ("ok", 0, None)
+    assert cc(f(10), cfg, "auto", 3600) == ("ok", 0, "clock_changed")  # fixed on the machine: ambiguous sync
+    assert cc(f(200), cfg, "auto", None) == ("drift", 0, "clock_changed")  # unconfirmed
+    assert cc(f(200), cfg, "auto", 195) == ("drift", 200, None)  # confirmed (within jitter)
+    assert cc(f(200), cfg, "off", 195) == ("drift", 0, None)
+    assert cc(f(200), cfg, "off", None) == ("drift", 0, None)
+    assert cc(f(3600), cfg, "auto", 0) == ("drift", 0, "clock_changed")
+    assert cc(f(99999), cfg, "auto", 0) == ("invalid", 0, None)
+    nothing = device_sync.Fetched("S", "M", "P", "F", None, None, 1, 1, None, None, 0, False)
+    assert cc(nothing, cfg, "auto", 0) == ("invalid", 0, None)
+
+
+# ---- M4: unresolved slots are dropped, new users are held, device administrators are flagged
+async def test_m4_punch_with_an_unknown_slot_is_dropped_not_guessed(fake_zk, db, sessionmaker_, redis):
+    punches = [FakePunch("EMP001", local(TODAY, "08:50"), uid=1), FakePunch("77", local(TODAY, "08:51"), uid=77)]
+    f = await fake_zk(att_format=8, users=_users(), punches=punches)
+    dev = await add_device(db, f)
+    row = await run(sessionmaker_, redis, dev)
+    assert row.inserted == 1
+    ids = {k[0] for k in await _punch_rows(sessionmaker_)}
+    assert ids == {"EMP001"}  # slot 77 never became a user id "77"
+    async with sessionmaker_() as s:
+        assert "device.punches_unresolved" in (await s.execute(select(AuditLog.action))).scalars().all()
+
+
+async def test_m4_users_first_seen_after_the_first_sync_are_held_for_hr(fake_zk, db, sessionmaker_, redis, clk, seeded):
+    f = await fake_zk(users=_users(), punches=[])
+    dev = await add_device(db, f)
+    await run(sessionmaker_, redis, dev)  # first sync: EMP001 is matched as before
+    async with sessionmaker_() as s:
+        got = {r.device_user_id: (r.match_method, r.auto_hold) for r in (await s.execute(select(DeviceUser))).scalars()}
+        assert got == {"EMP001": ("auto", False), "900": ("unmatched", False)}
+    clk.set(NOW + dt.timedelta(minutes=5))
+    f.users.append(FakeUser(3, USERS["manager"], "Planted", privilege=14))  # somebody enrols the manager's id on the machine
+    OUTBOX.clear()
+    await run(sessionmaker_, redis, dev)
+    async with sessionmaker_() as s:
+        planted = (await s.execute(select(DeviceUser).where(DeviceUser.device_user_id == USERS["manager"]))).scalar_one()
+        assert (planted.match_method, planted.user_id, planted.auto_hold, planted.is_device_admin) == ("unmatched", None, True, True)
+    assert _alerts("need confirmation") and _alerts("administrator appeared")
+    clk.set(NOW + dt.timedelta(hours=2))
+    await run(sessionmaker_, redis, dev)  # later syncs (and user list refreshes) keep holding it
+    async with sessionmaker_() as s:
+        method = (await s.execute(select(DeviceUser.match_method).where(DeviceUser.device_user_id == USERS["manager"]))).scalar_one()
+        assert method == "unmatched"
+
+
+async def test_m4_first_sync_rows_still_match_when_the_employee_appears_later(fake_zk, db, sessionmaker_, redis, clk, seeded):
+    f = await fake_zk(users=[FakeUser(3, USERS["manager"], "Mgr")], punches=[])
+    dev = await add_device(db, f)
+    async with sessionmaker_() as s:  # the manager is not active yet at the first sync
+        m = await s.get(User, seeded["users"]["manager"])
+        m.status = "inactive"
+        await s.commit()
+    await run(sessionmaker_, redis, dev)
+    async with sessionmaker_() as s:
+        m = await s.get(User, seeded["users"]["manager"])
+        m.status = "active"
+        await s.commit()
+    clk.set(NOW + dt.timedelta(hours=2))  # past the one hour user-list refresh
+    await run(sessionmaker_, redis, dev)
+    async with sessionmaker_() as s:
+        assert (await s.execute(select(DeviceUser.match_method))).scalar_one() == "auto"  # first-sync rows are not held
+
+
+# ---- L11: unusual punch volume
+async def test_l11_unusual_punch_volume_raises_an_alert_but_not_on_the_first_sync(fake_zk, db, sessionmaker_, redis, clk, monkeypatch):
+    monkeypatch.setattr(device_sync, "VOLUME_MIN", 3)
+    monkeypatch.setattr(device_sync, "VOLUME_PER_USER", 1)
+    first = [FakePunch("EMP001", local(TODAY, "08:00") + dt.timedelta(minutes=10 * i), uid=1) for i in range(5)]
+    f = await fake_zk(users=_users(), punches=first)
+    dev = await add_device(db, f)
+    OUTBOX.clear()
+    await run(sessionmaker_, redis, dev)
+    assert not _alerts("Unusual number")  # the first sync pulls history by design
+    clk.set(NOW + dt.timedelta(minutes=30))
+    f.punches += [FakePunch("EMP001", local(TODAY, "09:10") + dt.timedelta(minutes=i), uid=1) for i in range(8)]
+    await run(sessionmaker_, redis, dev)
+    assert _alerts("Unusual number")
+    async with sessionmaker_() as s:
+        assert "device.punch_volume" in (await s.execute(select(AuditLog.action))).scalars().all()
+
+
+# ---- L4: punches without an outcome are applied by the next sync; outcomes upsert
+async def test_l4_punches_without_an_outcome_are_applied_on_the_next_sync(fake_zk, db, sessionmaker_, redis, clk, seeded):
+    f = await fake_zk(users=_users(), punches=[])
+    dev = await add_device(db, f)
+    await run(sessionmaker_, redis, dev)
+    from tests.device_helpers import add_punch
+
+    async with sessionmaker_() as s:  # a run died after the insert: the punch is stored, no outcome row, no attendance
+        d = await s.get(Device, dev.id)
+        await add_punch(s, d, "EMP001", local(TODAY, "08:45"))
+        await s.commit()
+    assert await scalar(sessionmaker_, select(func.count()).select_from(DevicePunchOutcome)) == 0
+    clk.set(NOW + dt.timedelta(minutes=5))
+    await run(sessionmaker_, redis, dev)
+    assert await scalar(sessionmaker_, select(func.count()).select_from(DevicePunchOutcome)) == 1
+    async with sessionmaker_() as s:
+        assert (await s.execute(select(Attendance))).scalars().one().check_in_source == "device"
+
+
+async def test_l4_set_outcomes_upserts_and_tolerates_duplicates(db, sessionmaker_, seeded):
+    from app.services import device_attendance as da
+    from tests.device_helpers import add_punch
+
+    dev = await add_device(db, None)
+    p = await add_punch(db, dev, "EMP001", local(TODAY, "08:45"))
+    await db.commit()
+    await da.set_outcomes(db, [(p.id, None, TODAY, "unmatched", None), (p.id, None, TODAY, "ignored", "mapping_ignored")])
+    await db.commit()
+    async with sessionmaker_() as s:
+        await da.set_outcomes(s, [(p.id, None, TODAY, "quarantined", "future")])  # existing row: updated in place
+        await s.commit()
+    async with sessionmaker_() as s:
+        rows = (await s.execute(select(DevicePunchOutcome.outcome, DevicePunchOutcome.reason))).all()
+    assert [tuple(r) for r in rows] == [("quarantined", "future")]
+
+
+async def test_l4_recompute_waits_for_the_device_apply_lock(sessionmaker_, redis):
+    import uuid
+
+    did = uuid.uuid4()
+    lock = device_sync.apply_lock(did)
+    await lock.acquire()
+    task = asyncio.create_task(device_sync.run_job(sessionmaker_, redis, {"kind": "recompute", "keys": [[str(did), "1"]]}))
+    await asyncio.sleep(0.05)
+    assert not task.done()  # blocked behind the sync's database phase
+    lock.release()
+    await asyncio.wait_for(task, 5)
+
+
+# ---- L8: separate lanes, no waiting for the batch
+async def test_l8_test_jobs_use_their_own_list(sessionmaker_, redis):
+    await devices_svc.push_job(redis, {"kind": "test", "sync_id": "a", "device_id": None})
+    await devices_svc.push_job(redis, {"kind": "sync", "sync_id": "b", "device_id": "c"})
+    assert await redis.llen(devices_svc.QUEUE_TEST_KEY) == 1 and await redis.llen(devices_svc.QUEUE_KEY) == 1
+    assert (await devices_svc.pop_job(redis))["kind"] == "sync"
+    assert (await devices_svc.pop_job(redis, devices_svc.QUEUE_TEST_KEY))["kind"] == "test"
+
+
+async def test_l8_process_queue_without_waiting_returns_while_slow_jobs_run(sessionmaker_, redis, monkeypatch):
+    gate = asyncio.Event()
+    seen = []
+
+    async def slow(sm, r, job):
+        seen.append(job["kind"])
+        await gate.wait()
+
+    monkeypatch.setattr(device_sync, "run_job", slow)
+    for i in range(5):
+        await devices_svc.push_job(redis, {"kind": "sync", "sync_id": str(i), "device_id": str(i)})
+    await devices_svc.push_job(redis, {"kind": "test", "sync_id": "t", "device_id": None})
+    started = await asyncio.wait_for(device_sync.process_queue(sessionmaker_, redis, wait=False), 2)
+    await asyncio.sleep(0)
+    assert started == 4 and sorted(seen) == ["sync", "sync", "sync", "test"]  # 3 sync slots + 1 test slot
+    assert await redis.llen(devices_svc.QUEUE_KEY) == 2  # the rest waits in Redis for the next tick
+    gate.set()
+    await asyncio.gather(*device_sync._running["sync"], *device_sync._running["test"])
+    assert await device_sync.process_queue(sessionmaker_, redis, wait=False) == 2
+    await asyncio.gather(*device_sync._running["sync"])
