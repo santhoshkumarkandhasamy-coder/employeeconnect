@@ -20,7 +20,7 @@ Machines (verified 2026-11-07): `.201` A6FE201561197 (36 users, 29,228 records),
 | Real-device read of users and punches on all 3 machines | done | OK |
 | eTimeTrackLite "delete logs after download" is OFF | user | **tested 2026-11-07**: the user downloaded the logs from eTimeTrackLite (twice) and reported the record counts unchanged (user's report; the counts were not pasted, and the setting screen itself was not viewed). Machines covered: all three (`.202` confirmed by the user afterwards). Optional: also view the setting screen |
 | Employee codes vs machine user ids: compared 2026-11-07, see section 1.1 | user | **open**, the user will change the codes by hand |
-| Pick the "ingest from" date for each machine (history goes back to 2024 on `.201`) | user | **open** |
+| "Ingest from" date per machine. Decided 2026-11-07: **keep the previous punch records**, so use the machine's oldest date (`.201` 2024-03-25, `.203` 2025-08-29, `.202` 2026-08-07). History is stored as raw records only and never rewrites attendance | user | **decided**, enter the dates when adding the machines |
 | A quiet time window agreed (the egress network change can cause a short outage, see 4.4) | user | **open** |
 
 ### 1.1 Employee codes vs machine user ids (checked 2026-11-07, read-only)

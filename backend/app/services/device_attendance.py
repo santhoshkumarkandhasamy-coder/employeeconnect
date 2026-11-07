@@ -88,6 +88,10 @@ async def set_outcomes(session: AsyncSession, rows: list[tuple[int, uuid.UUID | 
     INSERT ... ON CONFLICT DO UPDATE, so two writers (sync and recompute) can never collide on a primary key (review L4)."""
     if not rows:
         return
+    if len(rows) > OUTCOME_CHUNK:  # one statement may carry at most ~32k parameters (a first sync can bring tens of thousands)
+        for i in range(0, len(rows), OUTCOME_CHUNK):
+            await set_outcomes(session, rows[i : i + OUTCOME_CHUNK])
+        return
     existing = {
         pid: (uid, wd, outcome, reason)
         for pid, uid, wd, outcome, reason in (
@@ -409,6 +413,8 @@ async def apply_new_punches(
     )
     simple: list[tuple[int, uuid.UUID | None, dt.date | None, str, str | None]] = []
     pairs: set[tuple[uuid.UUID, dt.date]] = set()
+    today_d = utcnow().astimezone(tz).date()
+    since = dt.datetime.combine(today_d - dt.timedelta(days=dcfg.apply_window_days + 1), dt.time(0), tzinfo=tz).astimezone(dt.UTC)
     for pid, duid, punch_at, quarantine in rows:
         local_day = as_utc(punch_at).astimezone(tz).date()  # type: ignore[union-attr]
         if quarantine:
@@ -421,10 +427,59 @@ async def apply_new_punches(
             simple.append((pid, None, local_day, "ignored", "mapping_ignored"))
         else:
             u = users.get(du.user_id)  # type: ignore[arg-type]
-            pairs.add((du.user_id, punch_work_date(punch_at, u.shift if u else None, tz)))  # type: ignore[arg-type]
+            day = punch_work_date(punch_at, u.shift if u else None, tz)
+            if as_utc(punch_at) < since:  # history: kept as a record, attendance is not recomputed for it
+                simple.append((pid, du.user_id, day, "not_applied", "outside_window"))
+                continue
+            pairs.add((du.user_id, day))  # type: ignore[arg-type]
     await set_outcomes(session, simple)
     await session.commit()
     return await _run_pairs(session, pairs, cfg, dcfg, done)
+
+
+OUTCOME_CHUNK = 5000
+
+
+async def refresh_history_outcomes(session: AsyncSession, keys: list[tuple[uuid.UUID, str]], cfg, dcfg) -> int:
+    """After a mapping change: link the HISTORY punches (older than the apply window) of those device users to the employee, or
+    unlink them. Only the outcome rows change (not_applied / outside_window, unmatched, ignored); attendance is never touched.
+    Returns the number of punches looked at."""
+    tz = att.office_tz(cfg)
+    today_d = utcnow().astimezone(tz).date()
+    since = dt.datetime.combine(today_d - dt.timedelta(days=dcfg.apply_window_days + 1), dt.time(0), tzinfo=tz).astimezone(dt.UTC)
+    mapping = {
+        (du.device_id, du.device_user_id): du
+        for du in (await session.execute(select(DeviceUser).where(or_(*[and_(DeviceUser.device_id == d, DeviceUser.device_user_id == u) for d, u in keys])))).scalars()
+    }  # fmt: skip
+    uids = {du.user_id for du in mapping.values() if du.user_id}
+    users = {u.id: u for u in (await session.execute(select(User).where(User.id.in_(uids)))).unique().scalars()} if uids else {}
+    total = last = 0
+    while True:  # keyset pagination: bounded memory however long the history is
+        q = (
+            select(DevicePunch.id, DevicePunch.device_id, DevicePunch.device_user_id, DevicePunch.punch_at)
+            .where(_pairs_cond(keys), DevicePunch.punch_at < since, DevicePunch.quarantine.is_(None), DevicePunch.id > last)
+            .order_by(DevicePunch.id)
+            .limit(OUTCOME_CHUNK)
+        )
+        batch = (await session.execute(q)).all()
+        if not batch:
+            break
+        simple: list[tuple[int, uuid.UUID | None, dt.date | None, str, str | None]] = []
+        for pid, dev_id, duid, punch_at in batch:
+            du = mapping.get((dev_id, duid))
+            local_day = as_utc(punch_at).astimezone(tz).date()  # type: ignore[union-attr]
+            if du is None or du.match_method == "unmatched":
+                simple.append((pid, None, local_day, "unmatched", None))
+            elif du.match_method == "ignored":
+                simple.append((pid, None, local_day, "ignored", "mapping_ignored"))
+            else:
+                u = users.get(du.user_id)  # type: ignore[arg-type]
+                simple.append((pid, du.user_id, punch_work_date(punch_at, u.shift if u else None, tz), "not_applied", "outside_window"))
+        await set_outcomes(session, simple)
+        await session.commit()
+        total += len(batch)
+        last = batch[-1][0]
+    return total
 
 
 async def recompute_device_users(
@@ -440,6 +495,7 @@ async def recompute_device_users(
     tz = att.office_tz(cfg)
     today_d = utcnow().astimezone(tz).date()
     since = dt.datetime.combine(today_d - dt.timedelta(days=dcfg.apply_window_days + 1), dt.time(0), tzinfo=tz).astimezone(dt.UTC)
+    await refresh_history_outcomes(session, keys, cfg, dcfg)
     cond = _pairs_cond(keys)
     q = select(DevicePunch).where(cond)
     if not all_dates:

@@ -265,6 +265,9 @@ async def ingest_punches(
     `backdate_before` (naive device time) quarantines new punches stamped earlier than the previous sync's clock reading
     (review H1). A punch whose slot number cannot be resolved to a user id is dropped, never guessed (review M4)."""
     rows: dict[tuple[str, dt.datetime], dict[str, Any]] = {}
+    # history (older than the apply window) is stored as the machine wrote it: today's clock offset says nothing about that
+    # day, and such punches cannot change attendance, so the backdating check does not apply to them either
+    hist_before = now.astimezone(office).date() - dt.timedelta(days=dcfg.apply_window_days + 1)
     for p in punches:
         uid = p.user_id or (users.get(p.uid) if p.uid is not None else None)
         if not uid or len(uid) > 24:
@@ -275,15 +278,18 @@ async def ingest_punches(
         off = applied
         local = p.time.replace(tzinfo=tz)
         punch_at = local.astimezone(dt.UTC)
+        historic = punch_at.astimezone(office).date() < hist_before
         if p.time.year < MIN_VALID_YEAR or status == "invalid":
             quarantine, off = "clock_invalid", 0
         elif hold:
             quarantine, off = hold, 0
         else:
+            if historic:
+                off = 0
             punch_at -= dt.timedelta(seconds=off)
             if punch_at > now + dt.timedelta(seconds=dcfg.future_tolerance_s):
                 quarantine = "future"
-        if quarantine is None and backdate_before is not None and p.time < backdate_before:
+        if quarantine is None and not historic and backdate_before is not None and p.time < backdate_before:
             quarantine = "backdated"
         if punch_at.astimezone(office).date() < device.ingest_from:
             continue

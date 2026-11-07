@@ -154,6 +154,53 @@ async def test_ingest_from_skips_older_punches(fake_zk, db, sessionmaker_, redis
     assert row.fetched == 1 and row.inserted == 1
 
 
+async def test_history_is_kept_as_records_and_never_rewrites_attendance(fake_zk, db, sessionmaker_, redis):
+    old_day = TODAY - dt.timedelta(days=400)
+    hist = [FakePunch("EMP001", local(old_day, "09:00"), uid=1), FakePunch("EMP001", local(old_day, "18:00"), uid=1)]
+    f = await fake_zk(users=_users(), punches=[*hist, *_punches(("EMP001", "08:55"))])
+    dev = await add_device(db, f, ingest_from=TODAY - dt.timedelta(days=500))
+    row = await run(sessionmaker_, redis, dev)
+    assert row.fetched == 3 and row.inserted == 3 and row.quarantined == 0
+    async with sessionmaker_() as s:
+        outs = (await s.execute(select(DevicePunchOutcome))).scalars().all()
+        old = [o for o in outs if o.work_date == old_day]
+        assert len(old) == 2 and {(o.outcome, o.reason) for o in old} == {("not_applied", "outside_window")}
+        days = [a.work_date for a in (await s.execute(select(Attendance))).scalars()]
+        assert days == [TODAY]  # no attendance row for the old day, only today's punch was applied
+
+
+async def test_large_first_sync_writes_outcomes_in_chunks(fake_zk, db, sessionmaker_, redis, monkeypatch):
+    from app.services import device_attendance
+
+    monkeypatch.setattr(device_attendance, "OUTCOME_CHUNK", 2)  # a real first sync brings tens of thousands of rows
+    punches = [FakePunch("900", local(TODAY - dt.timedelta(days=60 + i), "09:00"), uid=2) for i in range(7)]
+    f = await fake_zk(users=_users(), punches=punches)
+    dev = await add_device(db, f, ingest_from=TODAY - dt.timedelta(days=100))
+    row = await run(sessionmaker_, redis, dev)
+    assert row.inserted == 7
+    async with sessionmaker_() as s:
+        assert len((await s.execute(select(DevicePunchOutcome))).scalars().all()) == 7
+
+
+async def test_mapping_a_device_user_links_its_history_without_touching_attendance(fake_zk, db, sessionmaker_, redis):
+    from app.services import device_attendance
+
+    old_day = TODAY - dt.timedelta(days=400)
+    f = await fake_zk(users=_users(), punches=[FakePunch("900", local(old_day, "09:00"), uid=2), FakePunch("900", local(old_day, "18:00"), uid=2)])
+    dev = await add_device(db, f, ingest_from=TODAY - dt.timedelta(days=500))
+    await run(sessionmaker_, redis, dev)
+    async with sessionmaker_() as s:
+        assert {o.outcome for o in (await s.execute(select(DevicePunchOutcome))).scalars()} == {"unmatched"}
+        du = (await s.execute(select(DeviceUser).where(DeviceUser.device_user_id == "900"))).scalar_one()
+        emp = (await s.execute(select(User.id).where(User.employee_id == USERS["employee"]))).scalar_one()
+        du.user_id, du.match_method = emp, "manual"
+        await s.commit()
+        assert await device_attendance.recompute_device_users(s, [(du.device_id, "900")]) == 0
+        outs = (await s.execute(select(DevicePunchOutcome))).scalars().all()
+        assert {(o.user_id, o.outcome, o.reason, o.work_date) for o in outs} == {(emp, "not_applied", "outside_window", old_day)}
+        assert (await s.execute(select(Attendance))).scalars().all() == []
+
+
 # ---------------------------------------------------------------- clock and quarantine
 async def test_future_punch_and_pre_2015_punch_are_quarantined(fake_zk, db, sessionmaker_, redis):
     ancient = FakePunch("EMP001", dt.datetime(2009, 5, 1, 9, 0), uid=1)

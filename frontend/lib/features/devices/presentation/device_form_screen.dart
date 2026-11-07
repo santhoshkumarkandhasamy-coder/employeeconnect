@@ -58,9 +58,9 @@ class _DeviceFormState extends ConsumerState<DeviceFormScreen> {
     final d = await showDatePicker(
       context: context,
       initialDate: _ingestFrom,
-      firstDate: _ingestFrom.isBefore(_today.subtract(const Duration(days: 31)))
+      firstDate: _ingestFrom.isBefore(_today.subtract(const Duration(days: ingestFromMaxDaysBack)))
           ? _ingestFrom
-          : _today.subtract(const Duration(days: 31)),
+          : _today.subtract(const Duration(days: ingestFromMaxDaysBack)),
       lastDate: _today.isBefore(_ingestFrom) ? _ingestFrom : _today,
     );
     if (d != null) setState(() => _ingestFrom = d);
@@ -312,7 +312,7 @@ class _DeviceFormState extends ConsumerState<DeviceFormScreen> {
               ListTile(
                 contentPadding: EdgeInsets.zero,
                 title: const Text('Use punches from'),
-                subtitle: Text('${formatDayLong(_ingestFrom)} (at most 31 days back)'),
+                subtitle: Text('${formatDayLong(_ingestFrom)} (older punches are kept as records only)'),
                 trailing: const Icon(Icons.calendar_today_outlined),
                 onTap: _busy ? null : _pickDate,
               ),

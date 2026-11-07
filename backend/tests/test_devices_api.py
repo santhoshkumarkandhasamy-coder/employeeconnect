@@ -202,13 +202,19 @@ async def test_put_comm_key_semantics_and_audit(client, H, db):
         {"timezone": "Mars/Base"},
         {"clock_correction": "set"},
         {"ingest_from": "2026-10-22"},
-        {"ingest_from": "2026-09-01"},
+        {"ingest_from": "2020-01-01"},  # older than the punch retention (1095 days)
     ],
 )
 async def test_validation_errors(client, H, over):
     r = await client.post(f"{A}/devices", headers=await H("admin"), json={**BODY, **over})
     assert r.status_code == 422, r.text
     assert r.json()["error"]["code"] in ("VALIDATION_ERROR", "DEVICE_ADDRESS_NOT_ALLOWED")
+
+
+async def test_ingest_from_may_reach_back_to_the_punch_retention(client, H):
+    r = await client.post(f"{A}/devices", headers=await H("admin"), json={**BODY, "ingest_from": "2024-03-25"})
+    assert r.status_code == 201, r.text
+    assert r.json()["ingest_from"] == "2024-03-25"
 
 
 async def test_defaults(client, H):

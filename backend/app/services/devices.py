@@ -257,12 +257,10 @@ async def _ingest_from(session: AsyncSession, value: dt.date | None, keep: dt.da
         return keep or today_d
     if keep is not None and value == keep:
         return value  # unchanged on a full-replace PUT
-    if value > today_d or value < today_d - dt.timedelta(days=31):
-        raise AppError(
-            "VALIDATION_ERROR",
-            "ingest_from must be today or at most 31 days back",
-            details=[{"field": "ingest_from", "message": "today or at most 31 days back"}],
-        )
+    keep_days = (await device_settings.load(session)).punch_retention_days or 3650  # 0 = keep forever; cap at ten years
+    if value > today_d or value < today_d - dt.timedelta(days=keep_days):
+        msg = f"today or at most {keep_days} days back (the punch retention)"
+        raise AppError("VALIDATION_ERROR", f"ingest_from must be {msg}", details=[{"field": "ingest_from", "message": msg}])
     return value
 
 

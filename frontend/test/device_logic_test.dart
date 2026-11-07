@@ -188,7 +188,8 @@ void main() {
       final now = DateTime(2026, 11, 10, 15);
       expect(validateIngestFrom(DateTime(2026, 11, 10), now), isNull);
       expect(validateIngestFrom(DateTime(2026, 10, 10), now), isNull);
-      expect(validateIngestFrom(DateTime(2026, 10, 9), now), isNotNull);
+      expect(validateIngestFrom(DateTime(2024, 3, 25), now), isNull); // history is allowed back to the retention
+      expect(validateIngestFrom(DateTime(2023, 1, 1), now), isNotNull);
       expect(validateIngestFrom(DateTime(2026, 11, 11), now), isNotNull);
       expect(validateIngestFrom(null, now), isNotNull);
     });

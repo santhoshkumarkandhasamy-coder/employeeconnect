@@ -323,13 +323,14 @@ String? validateDeviceTimezone(String? v) {
   return 'Use a name like Asia/Kolkata, or leave empty for the office timezone';
 }
 
-/// `ingest_from` may be at most 31 days back and not in the future.
+/// `ingest_from` may reach back to the punch retention (1095 days by default; the server decides) and not be in the future.
+const ingestFromMaxDaysBack = 1095;
 String? validateIngestFrom(DateTime? d, DateTime now) {
   if (d == null) return 'Choose the date';
   final today = DateTime(now.year, now.month, now.day);
   final day = DateTime(d.year, d.month, d.day);
   if (day.isAfter(today)) return 'The date cannot be in the future';
-  if (today.difference(day).inDays > 31) return 'At most 31 days back';
+  if (today.difference(day).inDays > ingestFromMaxDaysBack) return 'At most 3 years back';
   return null;
 }
 

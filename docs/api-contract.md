@@ -2256,7 +2256,7 @@ Device: { "id":"uuid", "name":"Main entrance", "location_label":"Ground floor"|n
 **POST /admin/devices** (extra keys 422):
 `{ "name":1-60, "ip":"IPv4", "port":1..65535 (default 4370), "transport":"tcp" (default), "comm_key":0..999999|null,
    "enabled":true, "location_label":<=80|null, "timezone":IANA|null, "clock_correction":"auto", "ingest_from":"YYYY-MM-DD" }`
--> 201 Device. `ingest_from` defaults to today (office), may be at most 31 days back, not in the future.
+-> 201 Device. `ingest_from` defaults to today (office), may reach back to `device.punch_retention_days` (default 1095; 0 = keep forever caps it at 3650 days), not in the future. Punches older than the apply window (`device.apply_window_days`) are stored as raw records only: no clock offset is applied to them, their outcome is `not_applied` / `outside_window`, and attendance is never recomputed for them; mapping a device user later links its history to the employee (outcome rows only).
 **PUT /admin/devices/{id}** same body, full replace EXCEPT `comm_key`: omitted = unchanged, `null` = clear, number = set. -> 200 Device.
 Changing `ip` / `port` keeps the pinned `serial_number` (a different machine fails with `DEVICE_IDENTITY_CHANGED`).
 **DELETE /admin/devices/{id}** -> 204; 409 `IN_USE` when it has punches (disable instead).

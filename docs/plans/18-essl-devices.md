@@ -105,7 +105,9 @@ repeatable). Backfill: non-manual rows `app_* = check_in_at / check_out_at`; man
 6. Read users when `user_count` changed or hourly. Upsert `device_users` (present flag, names, cards encrypted; PIN dropped);
    run auto-match for `unmatched` rows.
 7. Read attendance log (chunked buffer read). Convert, quarantine, insert with `ON CONFLICT DO NOTHING`. Skip rows whose
-   office date is before `ingest_from`.
+   office date is before `ingest_from`. `ingest_from` may reach back to the punch retention (history import, decided 2026-11-07):
+   punches older than the apply window are stored raw (no clock offset, exempt from the backdating check, outcome `not_applied`/
+   `outside_window`, no attendance recompute); a later mapping refreshes their outcome rows only (`refresh_history_outcomes`).
 8. CMD_EXIT. Collect affected (user, work_date) pairs and recompute each in its own transaction (section 5).
 9. Update device status, `device_syncs` row, audit `device.sync` (counts only). Failure: `consecutive_failures + 1`; within
    the run retry twice (3 s, 10 s backoff); at threshold open the circuit and push `admin_alert` to `device.manage`
