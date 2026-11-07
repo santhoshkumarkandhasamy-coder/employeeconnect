@@ -220,7 +220,7 @@ async def test_all_has_four_sheets_with_headers_and_rows_for_hr(client, H, db, s
         assert ws["A1"].font.bold
     assert [c.value for c in wb["Attendance"][1]] == [
         "Date", "Employee ID", "Name", "Department", "Shift", "Check-in", "Check-out", "Status",
-        "Minutes Late", "Worked Hours", "Within Geofence", "Client Location", "Manual Entry",
+        "Minutes Late", "Worked Hours", "Within Geofence", "Client Location", "Manual Entry", "Check-in Source", "Check-out Source", "Check-in Device", "Check-out Device",
     ]  # fmt: skip
     assert [c.value for c in wb["Late"][1]] == [
         "Date", "Employee ID", "Name", "Department", "Shift Start", "Check-in", "Minutes Late",
@@ -502,6 +502,6 @@ async def test_audit_records_filters_and_counts_never_data(client, H, db, seeded
 
 
 def test_registry_covers_every_type_with_permissions():
-    assert {"attendance", "leave", "late", "permission", "on_duty", "food"} == set(export_svc.SHEETS)
+    assert {"attendance", "leave", "late", "permission", "on_duty", "food", "device_punches"} == set(export_svc.SHEETS)
     assert set(export_svc.ALL_TYPES) == {"attendance", "leave", "late", "permission", "on_duty"}
     assert USERS  # fixture import sanity

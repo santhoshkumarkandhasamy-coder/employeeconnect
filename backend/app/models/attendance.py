@@ -33,6 +33,15 @@ class Attendance(TimestampMixin, Base):
         Index("ix_attendance_status", "status"),
         Index("ix_attendance_shift_id", "shift_id"),
         Index("ix_attendance_client_location_id", "client_location_id"),
+        CheckConstraint("check_in_source IN ('app','device','manual')", name="ck_attendance_check_in_source"),
+        CheckConstraint("check_out_source IS NULL OR check_out_source IN ('app','device','manual')", name="ck_attendance_check_out_source"),
+        CheckConstraint("check_in_device_id IS NULL OR check_in_source = 'device'", name="ck_attendance_check_in_device"),
+        CheckConstraint("check_out_device_id IS NULL OR check_out_source = 'device'", name="ck_attendance_check_out_device"),
+        CheckConstraint("check_out_source IS NULL OR check_out_at IS NOT NULL", name="ck_attendance_check_out_source_set"),
+        CheckConstraint(
+            "app_check_in_at IS NULL OR app_check_out_at IS NULL OR app_check_out_at > app_check_in_at", name="ck_attendance_app_times"),
+        Index("ix_attendance_check_in_device_id", "check_in_device_id", postgresql_where=text("check_in_device_id IS NOT NULL")),
+        Index("ix_attendance_check_out_device_id", "check_out_device_id", postgresql_where=text("check_out_device_id IS NOT NULL")),
         Index("ix_attendance_open", "work_date", postgresql_where=text("check_out_at IS NULL")),
         Index("ix_attendance_suspicious", "work_date", postgresql_where=text("suspicious")),
         # a selfie file can back at most one punch (anti-replay); cross in/out reuse is checked in the service
@@ -78,6 +87,13 @@ class Attendance(TimestampMixin, Base):
     manual: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     manual_by: Mapped[uuid.UUID | None] = fk_uuid("users.id", nullable=True)
     manual_reason: Mapped[str | None] = mapped_column("manual_reason_enc", EncryptedString)
+    # attendance devices (plan 18, migration 0030): where each effective time came from, and the phone punch times kept for recompute
+    check_in_source: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'app'"))
+    check_out_source: Mapped[str | None] = mapped_column(Text)
+    check_in_device_id: Mapped[uuid.UUID | None] = fk_uuid("devices.id", nullable=True)
+    check_out_device_id: Mapped[uuid.UUID | None] = fk_uuid("devices.id", nullable=True)
+    app_check_in_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    app_check_out_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class LateRecord(CreatedMixin, Base):

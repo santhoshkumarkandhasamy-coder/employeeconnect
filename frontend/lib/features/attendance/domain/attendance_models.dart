@@ -46,6 +46,10 @@ class AttendanceRecord {
     this.clientLocationName,
     this.manual = false,
     this.manualReason,
+    this.checkInSource = 'app',
+    this.checkOutSource,
+    this.checkInDeviceName,
+    this.checkOutDeviceName,
   });
 
   final String id;
@@ -71,6 +75,14 @@ class AttendanceRecord {
   /// Only in the HR/Admin manual-attendance view.
   final String? manualReason;
 
+  /// `app` | `device` | `manual` (api-contract.md 21.6).
+  final String checkInSource;
+  final String? checkOutSource;
+
+  /// Name of the office device that gave the check-in / check-out time.
+  final String? checkInDeviceName;
+  final String? checkOutDeviceName;
+
   bool get checkedIn => checkInAt != null;
   bool get checkedOut => checkOutAt != null;
 
@@ -94,6 +106,10 @@ class AttendanceRecord {
       clientLocationName: site is Map ? site['name'] as String? : null,
       manual: j['manual'] as bool? ?? false,
       manualReason: j['manual_reason'] as String?,
+      checkInSource: (j['check_in_source'] as String?) ?? 'app',
+      checkOutSource: j['check_out_source'] as String?,
+      checkInDeviceName: j['check_in_device'] is Map ? (j['check_in_device'] as Map)['name'] as String? : null,
+      checkOutDeviceName: j['check_out_device'] is Map ? (j['check_out_device'] as Map)['name'] as String? : null,
     );
   }
 

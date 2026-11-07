@@ -76,6 +76,11 @@ TABLES = [
     "audit_logs",
     "settings",
     "holidays",
+    "devices",
+    "device_syncs",
+    "device_users",
+    "device_punches",
+    "device_punch_outcomes",
     "attendance",
     "late_records",
     "leave_types",
@@ -365,5 +370,6 @@ async def tokens_for(client):
     return _get
 
 
+from tests.device_helpers import _fast_retries, allow_loopback, clk, fake_zk, fast_client  # noqa: E402,F401 - plan 18 device fixtures
 from tests.payroll_fixtures import H, payroll, uid  # noqa: E402,F401 - payroll fixtures shared by several test modules
 from tests.payroll_tax_helpers import clock, storage  # noqa: E402,F401 - plan 17 5b tax fixtures (the office 'today', file storage dir)

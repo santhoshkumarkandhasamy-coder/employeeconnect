@@ -122,8 +122,16 @@ async def health(session: AsyncSession, redis: Redis) -> dict[str, Any]:
     backup = await _backup()
     storage = await asyncio.to_thread(_storage)
     tls = await asyncio.to_thread(_tls)
+    from . import devices as devices_svc  # lazy: that module imports this one
+
+    devices = (
+        await devices_svc.health_block(session)
+        if db["ok"]
+        else {"ok": True, "enabled": 0, "failing": 0, "offline": 0, "last_success_at": None}
+    )
     degraded = (
         not db["ok"]
+        or not devices["ok"]
         or not redis_ok["ok"]
         or not worker["ok"]
         or not backup["ok"]
@@ -139,4 +147,5 @@ async def health(session: AsyncSession, redis: Redis) -> dict[str, Any]:
         "storage": storage,
         "tls": tls,
         "push": {"configured": fcm.is_configured()},
+        "devices": devices,
     }

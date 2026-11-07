@@ -13,6 +13,7 @@ import '../export/domain/export_models.dart' show canOpenExport;
 import '../export/presentation/export_screen.dart';
 import '../food/domain/food_models.dart';
 import '../food/presentation/food_report_screen.dart';
+import '../devices/presentation/privacy_screen.dart';
 import '../late/presentation/late_screen.dart';
 import '../leave/domain/leave_logic.dart';
 import '../leave/presentation/approvals_screen.dart';
@@ -132,6 +133,12 @@ class MoreScreen extends ConsumerWidget {
               Icons.file_download_outlined,
               builder: (_) => const ExportScreen(),
             ),
+          _navTile(
+            context,
+            'Privacy',
+            Icons.privacy_tip_outlined,
+            builder: (_) => const PrivacyScreen(),
+          ),
           if (showAdmin)
             _navTile(
               context,

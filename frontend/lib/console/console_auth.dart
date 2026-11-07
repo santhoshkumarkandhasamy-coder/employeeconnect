@@ -12,6 +12,7 @@ import '../features/admin/presentation/admin_widgets.dart'
     show adminPermissionsProvider, adminSelfIdProvider;
 import '../core/cache/json_cache.dart' show MemoryJsonCache;
 import '../features/auth/domain/auth_user.dart';
+import '../features/devices/presentation/device_providers.dart' show deviceEditAllowedProvider;
 import '../features/leave/data/leave_repository.dart' show LeaveRepository, leaveRepositoryProvider;
 import 'console_api.dart';
 
@@ -64,6 +65,8 @@ List<Override> consoleAdminOverrides(Dio Function(Ref ref) dio) => [
       dioProvider.overrideWith(dio),
       adminPermissionsProvider.overrideWith((ref) => ref.watch(consolePermissionsProvider)),
       adminSelfIdProvider.overrideWith((ref) => ref.watch(consoleSelfIdProvider)),
+      // Devices can be added and edited only here (keeps comm keys off phones).
+      deviceEditAllowedProvider.overrideWithValue(true),
       // Requests page: memory-only cache, keyed by the console session (the
       // default repository scopes by the phone app's sign-in).
       leaveRepositoryProvider.overrideWith(

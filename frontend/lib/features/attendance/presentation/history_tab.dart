@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/api/api_exception.dart';
 import '../../../core/utils/dates.dart';
 import '../../../core/widgets/state_views.dart';
+import '../../devices/presentation/my_punches.dart';
 import '../domain/attendance_models.dart';
 import 'attendance_providers.dart';
 import 'widgets/month_grid.dart';
@@ -101,6 +102,8 @@ class HistoryTile extends StatelessWidget {
       if (r.status == DayStatus.late) '${r.minutesLate} min late',
       if (r.autoClosed) 'No check-out recorded',
       if (r.manual) 'Manual entry by HR',
+      if (!r.manual && (r.checkInSource == 'device' || r.checkOutSource == 'device'))
+        'Office device${[r.checkInDeviceName, r.checkOutDeviceName].whereType<String>().toSet().isEmpty ? '' : ' (${[r.checkInDeviceName, r.checkOutDeviceName].whereType<String>().toSet().join(', ')})'}',
       if (r.clientLocationName != null) 'On duty at ${r.clientLocationName}',
     ].join(', ');
     final color = statusColor(r.status, Theme.of(context).brightness);
@@ -114,6 +117,7 @@ class HistoryTile extends StatelessWidget {
           subtitle: Text('In $inT  Out $outT$worked${extra.isEmpty ? '' : '\n$extra'}'),
           isThreeLine: extra.isNotEmpty,
           trailing: Text(r.status.label),
+          onTap: () => showRecordDetail(context, r),
         ),
       ),
     );

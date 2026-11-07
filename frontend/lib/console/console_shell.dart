@@ -12,6 +12,8 @@ import '../features/leave/presentation/approvals_screen.dart';
 import '../features/admin/presentation/license_screen.dart';
 import '../features/admin/presentation/reset_requests_screen.dart';
 import '../features/admin/presentation/sessions_screen.dart';
+import '../features/devices/domain/device_models.dart' show canViewDevices;
+import '../features/devices/presentation/devices_home_screen.dart';
 import '../features/payroll/presentation/payroll_home_screen.dart';
 import 'console_auth.dart';
 import 'pages/attendance_day_page.dart';
@@ -43,6 +45,8 @@ final List<ConsoleDestination> consoleDestinations = [
       visible: canOpenApprovals,),
   ConsoleDestination('Payroll', Icons.payments_outlined, AdminPerm.payrollViewAll,
       () => const PayrollHomeScreen(),),
+  ConsoleDestination('Attendance devices', Icons.router_outlined, AdminPerm.deviceView,
+      () => const DevicesHomeScreen(), visible: canViewDevices,),
   ConsoleDestination('Settings', Icons.settings_outlined, AdminPerm.settingsManage,
       () => const SettingsScreen(),),
   ConsoleDestination('Password resets', Icons.lock_reset, AdminPerm.employeeResetPassword,

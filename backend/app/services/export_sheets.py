@@ -27,6 +27,9 @@ from ..models import (
     Attendance,
     ClientLocation,
     Department,
+    Device,
+    DevicePunch,
+    DevicePunchOutcome,
     LateRecord,
     LeaveRequest,
     LeaveType,
@@ -58,7 +61,14 @@ ATTENDANCE_HEADERS = [
     "Within Geofence",
     "Client Location",  # on-duty punch: the client site (empty = office)
     "Manual Entry",  # entered or corrected by HR/Admin
+    "Check-in Source",  # app | device | manual (plan 18)
+    "Check-out Source",
+    "Check-in Device",
+    "Check-out Device",
 ]
+DEVICE_PUNCH_HEADERS = [
+    "Punch Time", "Device Time", "Device", "Device User ID", "Employee ID", "Name", "Method", "State", "Work Date", "Outcome", "Reason",
+]  # fmt: skip
 LEAVE_HEADERS = [  # full list (include_reasons=true)
     "Request ID",
     "Employee ID",
@@ -164,6 +174,7 @@ def attendance_sheet(
 
     async def rows() -> AsyncIterator[tuple]:
         tz = await _office_tz(session)
+        dev_in, dev_out = aliased(Device), aliased(Device)
         q = filtered(
             select(
                 Attendance.work_date,
@@ -179,16 +190,40 @@ def attendance_sheet(
                 Attendance.check_in_within_fence,
                 ClientLocation.name,
                 Attendance.manual,
+                Attendance.check_in_source,
+                Attendance.check_out_source,
+                dev_in.name,
+                dev_out.name,
             ).select_from(Attendance)
         )
         q = (
             q.outerjoin(Department, Department.id == User.department_id)
             .outerjoin(Shift, Shift.id == Attendance.shift_id)
             .outerjoin(ClientLocation, ClientLocation.id == Attendance.client_location_id)
+            .outerjoin(dev_in, dev_in.id == Attendance.check_in_device_id)
+            .outerjoin(dev_out, dev_out.id == Attendance.check_out_device_id)
             .order_by(Attendance.work_date, User.employee_id)
         )
         result = await session.stream(q.execution_options(yield_per=BATCH))
-        async for day, eid, name, dept, shift, cin, cout, status, late, worked, fence, site, manual in result:
+        async for (
+            day,
+            eid,
+            name,
+            dept,
+            shift,
+            cin,
+            cout,
+            status,
+            late,
+            worked,
+            fence,
+            site,
+            manual,
+            src_in,
+            src_out,
+            d_in,
+            d_out,
+        ) in result:
             yield (
                 day,
                 eid,
@@ -203,9 +238,57 @@ def attendance_sheet(
                 "" if fence is None else ("Yes" if fence else "No"),
                 site or "",
                 "Yes" if manual else "No",
+                src_in or "",
+                src_out or "",
+                d_in or "",
+                d_out or "",
             )
 
     return SheetSpec("Attendance", ATTENDANCE_HEADERS, count, rows, get_settings().export_max_rows)
+
+
+# ---------------------------------------------------------------- Device punches (plan 18, type=device_punches only)
+def device_punches_sheet(
+    session: AsyncSession, scope: ExportScope, filters: ExportFilters, d_from: dt.date, d_to: dt.date
+) -> SheetSpec:
+    from .device_attendance import method_label, office_bounds, state_label
+
+    def filtered(q, tz):
+        lo, hi = office_bounds(tz, d_from, d_to)
+        q = (
+            q.outerjoin(DevicePunchOutcome, DevicePunchOutcome.punch_id == DevicePunch.id)
+            .outerjoin(User, User.id == DevicePunchOutcome.user_id)
+            .where(DevicePunch.punch_at >= lo, DevicePunch.punch_at < hi)
+        )
+        q = scope.restrict(q, DevicePunchOutcome.user_id)
+        if filters.department_id is not None:
+            q = q.where(User.department_id == filters.department_id)
+        if filters.user_id is not None:
+            q = q.where(DevicePunchOutcome.user_id == filters.user_id)
+        return q
+
+    async def count() -> int:
+        tz = await _office_tz(session)
+        return int((await session.execute(filtered(select(func.count()).select_from(DevicePunch), tz))).scalar_one())
+
+    async def rows() -> AsyncIterator[tuple]:
+        tz = await _office_tz(session)
+        q = filtered(
+            select(
+                DevicePunch.punch_at, DevicePunch.device_time, Device.name, DevicePunch.device_user_id, User.employee_id,
+                User.full_name, DevicePunch.verify_mode, DevicePunch.state, DevicePunchOutcome.work_date,
+                DevicePunchOutcome.outcome, DevicePunchOutcome.reason, DevicePunch.quarantine,
+            ).select_from(DevicePunch).join(Device, Device.id == DevicePunch.device_id),
+            tz,
+        )  # fmt: skip
+        result = await session.stream(q.order_by(DevicePunch.punch_at, DevicePunch.id).execution_options(yield_per=BATCH))
+        async for at, dtime, dev, duid, eid, name, verify, state, wd, outcome, reason, quarantine in result:
+            yield (
+                _local(at, tz), dtime.replace(microsecond=0), dev, duid, eid or "", name or "", method_label(verify),
+                state_label(state), wd, outcome or ("quarantined" if quarantine else "unmatched"), reason or quarantine or "",
+            )  # fmt: skip
+
+    return SheetSpec("Device Punches", DEVICE_PUNCH_HEADERS, count, rows, get_settings().export_max_rows)
 
 
 # ---------------------------------------------------------------- Late
