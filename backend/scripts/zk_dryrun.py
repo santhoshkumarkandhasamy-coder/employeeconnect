@@ -26,7 +26,7 @@ def _range(values: list[dt.datetime]) -> str:
     return f"{min(values):%Y-%m-%d %H:%M:%S} .. {max(values):%Y-%m-%d %H:%M:%S}" if values else "-"
 
 
-async def _dryrun(ip: str, port: int, transport: str, key: int) -> int:
+async def _dryrun(ip: str, port: int, transport: str, key: int, show_ids: bool = False) -> int:
     try:
         devices_svc.check_address(ip, port)
     except Exception as exc:  # noqa: BLE001
@@ -55,6 +55,8 @@ async def _dryrun(ip: str, port: int, transport: str, key: int) -> int:
           f"numeric {sum(i.isdigit() for i in ids)}, empty {sum(not i for i in ids)}")
     print(f"user names       : {sum(bool(u.name) for u in users)} with a name, {sum(u.card is not None for u in users)} with a card, "
           f"{sum(u.is_admin for u in users)} admin")
+    if show_ids:  # ids only: no names, cards or privileges
+        print("ids on device    : " + " ".join(sorted(ids)))
     if len(set(ids)) != len(ids):
         problems.append("duplicate user ids in the user table")
     if any(not i for i in ids):
@@ -87,11 +89,12 @@ def main() -> int:
     ap.add_argument("--ip", required=True)
     ap.add_argument("--port", type=int, default=4370)
     ap.add_argument("--transport", choices=("tcp", "udp"), default="tcp")
+    ap.add_argument("--show-ids", action="store_true", help="also print the device user ids (no names or cards), to compare with employee ids")
     k = ap.add_mutually_exclusive_group()
     k.add_argument("--comm-key-prompt", action="store_true")
     k.add_argument("--comm-key-stdin", action="store_true")
     a = ap.parse_args()
-    return asyncio.run(_dryrun(a.ip, a.port, a.transport, read_comm_key(a.comm_key_prompt, a.comm_key_stdin)))
+    return asyncio.run(_dryrun(a.ip, a.port, a.transport, read_comm_key(a.comm_key_prompt, a.comm_key_stdin), a.show_ids))
 
 
 if __name__ == "__main__":
